@@ -34,7 +34,9 @@ async function resultText($: Engine, config: OrqConfig, id: string): Promise<str
 
 function elapsedText(job: JobRecord, view: JobView, now: number): string {
   if (view.endedAt !== null) return formatDuration(view.endedAt - job.startedAt)
-  if (view.status === 'running' || view.status === 'cancelling') return formatDuration(now - job.startedAt)
+  if (view.status === 'running' || view.status === 'cancelling' || view.status === 'waiting') {
+    return formatDuration(now - job.startedAt)
+  }
   return '—'
 }
 

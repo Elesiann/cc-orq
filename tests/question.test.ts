@@ -99,6 +99,24 @@ function launchedId(text: string): string {
   return text.slice(prefix.length)
 }
 
+function seedJob(s: State, id: string, startedAt: number) {
+  s.files.set(
+    `${JOBS}/${id}/meta.json`,
+    JSON.stringify({
+      id,
+      kind: 'manual',
+      agentId: 'manual',
+      cwd: '/work',
+      startedAt,
+      startedAtIso: new Date(startedAt).toISOString(),
+      runner: 'codex',
+      model: 'fixture-model',
+      instanceId: 'codex',
+      driver: 'codex',
+    }),
+  )
+}
+
 test('the job directory reaches every CLI as ORQ_JOB_DIR, through the systemd unit and the setsid fallback', async ($, on) => {
   const s = fresh({ now: 2000000 })
   stubs(on, s)
@@ -110,4 +128,24 @@ test('the job directory reaches every CLI as ORQ_JOB_DIR, through the systemd un
   const plain = launchedId(await orq($, 'launch codex fixture-model -- no env'))
   expect(s.startScripts[1]).toContain(`--setenv=ORQ_JOB_DIR=${JOBS}/${plain}`)
   expect(s.startScripts[1]).toContain(`setsid env ORQ_JOB_DIR=${JOBS}/${plain} bash`)
+})
+
+test('a job that wrote question.txt and has no exit is waiting, and a blank question is not', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-asked', kind: 'dir' },
+    { name: 'job-blank', kind: 'dir' },
+  ]
+  seedJob(s, 'job-asked', 4000000)
+  s.files.set(`${JOBS}/job-asked/question.txt`, 'Which database should the migration target?\n')
+  seedJob(s, 'job-blank', 4000000)
+  s.files.set(`${JOBS}/job-blank/question.txt`, '  \n')
+  stubs(on, s)
+  await start($)
+  const lines = (await orq($, 'list')).split('\n')
+  const rowOf = (id: string) => lines.find((l) => l.startsWith(id))?.split(/\s+/)
+  expect(rowOf('job-asked')).toEqual(['job-asked', 'manual', 'waiting', '10m', '/work'])
+  expect(rowOf('job-blank')?.[2]).toBe('running')
+  expect(await orq($, 'result job-asked')).toBe('orq: job-asked is waiting for an answer to its question')
+  expect(await orq($, 'cancel job-asked')).toBe('orq: cancel requested for job-asked')
 })

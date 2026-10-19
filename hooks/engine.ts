@@ -3,6 +3,7 @@ import type { EngineInterface } from 'claude-code'
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
 import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation } from './contract.ts'
 import { hasControlCharacters, plainArgument } from './target.ts'
+import { QUESTION_FILE } from './question.ts'
 import {
   DRIVER_RUNNER,
   buildFooter,
@@ -94,6 +95,12 @@ async function isDirectory($: Engine, path: string): Promise<boolean> {
   }
 }
 
+/** The question a job wrote to question.txt, trimmed; null when the file is missing or blank. */
+async function readQuestion($: Engine, job: JobRecord): Promise<string | null> {
+  const text = ((await readText($, `${job.dir}/${QUESTION_FILE}`)) ?? '').trim()
+  return text === '' ? null : text
+}
+
 async function exists($: Engine, path: string): Promise<boolean> {
   try {
     return await $.fs.exists(path)
@@ -179,12 +186,14 @@ export async function finishedOutcome($: Engine, job: JobRecord, exitText: strin
 }
 
 export type JobView =
-  | { status: 'running' | 'cancelling' | 'interrupted'; endedAt: null }
+  | { status: 'running' | 'cancelling' | 'interrupted' | 'waiting'; endedAt: null }
   | Finished
 
 export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
   const exit = await readText($, `${job.dir}/exit`)
   if (exit !== null) return finishedOutcome($, job, exit)
+  // A question comes before liveness: the CLI may still be alive for a moment after it asks, and that is a wait.
+  if ((await readQuestion($, job)) !== null) return { status: 'waiting', endedAt: null }
   const liveness = await jobLiveness($, job)
   if (liveness === 'gone') return { status: 'interrupted', endedAt: null }
   if (liveness === 'running') {
@@ -588,9 +597,10 @@ async function codexModelEffort(
 }
 
 /** The one-line answer for a job that has not ended, or was interrupted. */
-export function notEndedText(id: string, status: 'running' | 'cancelling' | 'interrupted'): string {
+export function notEndedText(id: string, status: 'running' | 'cancelling' | 'interrupted' | 'waiting'): string {
   if (status === 'running') return `orq: ${id} is still running`
   if (status === 'cancelling') return `orq: ${id} is still cancelling`
+  if (status === 'waiting') return `orq: ${id} is waiting for an answer to its question`
   return `orq: ${id} was interrupted: its supervisor is gone and it left no exit file`
 }
 
