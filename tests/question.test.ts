@@ -149,3 +149,44 @@ test('a job that wrote question.txt and has no exit is waiting, and a blank ques
   expect(await orq($, 'result job-asked')).toBe('orq: job-asked is waiting for an answer to its question')
   expect(await orq($, 'cancel job-asked')).toBe('orq: cancel requested for job-asked')
 })
+
+function rowStatus(listText: string, id: string): string | undefined {
+  return listText.split('\n').find((l) => l.startsWith(id))?.split(/\s+/)[2]
+}
+
+test('a job that exits 0 after asking lists as done and composes the BLOCKED answer with the literal question', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-asked', kind: 'dir' }]
+  seedJob(s, 'job-asked', 4000000)
+  s.files.set(`${JOBS}/job-asked/question.txt`, 'Use `main` or `release/1.x`? (see $ORQ_JOB_DIR)\n')
+  s.files.set(`${JOBS}/job-asked/exit`, '0')
+  s.files.set(`${JOBS}/job-asked/last.txt`, 'BLOCKED: Use `main` or `release/1.x`?')
+  stubs(on, s)
+  await start($)
+  expect(rowStatus(await orq($, 'list'), 'job-asked')).toBe('done')
+  expect(await orq($, 'result job-asked')).toBe(
+    'BLOCKED on a question (taskId job-asked): Use `main` or `release/1.x`? (see $ORQ_JOB_DIR)\n\n' +
+      'Answer it in a new orq:task with the original brief plus the answer.',
+  )
+})
+
+test('a question left by a job that failed or was cancelled is not answered as BLOCKED', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-failed', kind: 'dir' },
+    { name: 'job-cancelled', kind: 'dir' },
+  ]
+  seedJob(s, 'job-failed', 4000000)
+  s.files.set(`${JOBS}/job-failed/question.txt`, 'Which database?\n')
+  s.files.set(`${JOBS}/job-failed/exit`, '1')
+  seedJob(s, 'job-cancelled', 4000000)
+  s.files.set(`${JOBS}/job-cancelled/question.txt`, 'Which database?\n')
+  s.files.set(`${JOBS}/job-cancelled/exit`, '124')
+  stubs(on, s)
+  await start($)
+  const list = await orq($, 'list')
+  expect(rowStatus(list, 'job-failed')).toBe('failed')
+  expect(rowStatus(list, 'job-cancelled')).toBe('cancelled')
+  expect(await orq($, 'result job-failed')).toBe('orq: job-failed failed (exit 1)')
+  expect(await orq($, 'result job-cancelled')).toBe('orq: job-cancelled was cancelled (exit 124)')
+})
