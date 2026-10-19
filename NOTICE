@@ -1,0 +1,13 @@
+orq
+Copyright (c) 2026 Giovanni Correa
+
+This project is inspired by the orchestrator of T3 Code
+(https://github.com/pingdotgg/t3code, MIT License, Copyright (c) Ping Labs).
+The tool surface (delegate a task, read its status, cancel it, list
+capabilities), the task status vocabulary, the privilege ceiling between a
+parent and its child tasks, and the orchestration instructions given to the
+parent agent are adapted from T3 Code's "Orchestrator V2" design. No T3 Code
+source code is included; orq reimplements the surface for Claude Code.
+
+The detached job engine (supervisor script, event extraction, job directory
+layout) derives from the author's earlier plugin "lanes" (MIT License).
