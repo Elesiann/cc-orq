@@ -196,7 +196,6 @@ test('launch prints the job id, writes meta.json and prompt.txt, and creates the
     model: 'fixture-model',
     instanceId: 'codex',
     driver: 'codex',
-    env: {},
   })
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Do the thing')
   expect(s.startScripts.length).toBe(1)
@@ -238,6 +237,9 @@ test('the instance env reaches the systemd unit and the setsid fallback', async 
   const withEnv = s.startScripts[0] ?? ''
   expect(withEnv).toContain(`--setenv=CODEX_HOME=${CODEX_HOME}`)
   expect(withEnv).toContain(`setsid env CODEX_HOME=${CODEX_HOME} bash`)
+  const metaWithEnv = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+  expect(metaWithEnv.codexHome).toBe(CODEX_HOME)
+  expect(metaWithEnv.env).toBeUndefined()
   await orq($, 'launch codex fixture-model -- no env')
   expect(s.startScripts[1]?.includes('CODEX_HOME')).toBe(false)
   expect(s.startScripts[1]).toContain('--unit=orq-manual-')
@@ -428,7 +430,7 @@ test('result of a finished codex job is its last message and a footer with the r
 
 test('the codex footer probes the CODEX_HOME a job launched with, even when its instance left the config', async ($, on) => {
   const s = fresh({ now: 9000000 })
-  seedJob(s, 'job-moved', { instanceId: 'codex-gone', env: { CODEX_HOME } }, 1000000)
+  seedJob(s, 'job-moved', { instanceId: 'codex-gone', codexHome: CODEX_HOME }, 1000000)
   s.files.set(`${JOBS}/job-moved/exit`, '0')
   s.files.set(`${JOBS}/job-moved/last.txt`, 'Moved.')
   s.mtimes.set(`${JOBS}/job-moved/exit`, 1125000)
