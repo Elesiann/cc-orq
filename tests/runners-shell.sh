@@ -162,8 +162,13 @@ for _ in $(seq 1 50); do [ -s "$CJOB/pgid" ] && break; sleep 0.2; done
 sleep 1
 echo cancelled > "$CJOB/cancel"
 for _ in $(seq 1 100); do [ -e "$CJOB/exit" ] && break; sleep 0.3; done
-wait "$CPID" 2>/dev/null || true
 expect_file "$CJOB/exit" 124 cancel-exit-124
+# The supervisor sends TERM, sleeps 5 s, writes exit 124, then sends KILL. The runner ignores TERM, so
+# the group is gone only after KILL; poll for up to 8 s before asserting.
+CPGID=$(cat "$CJOB/pgid" 2>/dev/null || true)
+for _ in $(seq 1 40); do [ -n "$CPGID" ] && pgrep -g "$CPGID" >/dev/null 2>&1 || break; sleep 0.2; done
+if [ -n "$CPGID" ] && ! pgrep -g "$CPGID" >/dev/null 2>&1; then ok cancel-group-gone; else bad "cancel-group-gone (group ${CPGID:-missing} still has processes)"; fi
+wait "$CPID" 2>/dev/null || true
 
 echo "---"
 echo "pass=$PASS fail=$FAIL scratch-cleaned"
