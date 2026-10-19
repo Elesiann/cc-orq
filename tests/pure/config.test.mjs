@@ -73,7 +73,7 @@ test('bad waitSeconds values keep the default and warn', () => {
 test('invalid instances are dropped one by one, each with a warning', () => {
   const r = parseConfig(j({
     instances: [
-      { id: 'x', driver: 'gemini' },
+      { id: 'x', driver: 'notadriver' },
       { id: '-bad', driver: 'codex' },
       'text',
       { id: 'ok', driver: 'opencode' },

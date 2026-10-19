@@ -19,7 +19,7 @@ const CONFIG = JSON.stringify({
   jobsDir: JOBS,
   instances: [
     { id: 'codex', driver: 'codex' },
-    { id: 'codex-lane', driver: 'codex', env: { CODEX_HOME } },
+    { id: 'codex-work', driver: 'codex', env: { CODEX_HOME } },
     { id: 'claudeAgent', driver: 'claudeAgent' },
   ],
 })
@@ -215,7 +215,7 @@ test('the instance env reaches the systemd unit and the setsid fallback', async 
   const s = fresh()
   stubs(on, s)
   await start($)
-  await orq($, 'launch codex-lane fixture-model -- with env')
+  await orq($, 'launch codex-work fixture-model -- with env')
   const withEnv = s.startScripts[0] ?? ''
   expect(withEnv).toContain(`--setenv=CODEX_HOME=${CODEX_HOME}`)
   expect(withEnv).toContain(`setsid env CODEX_HOME=${CODEX_HOME} bash`)
@@ -229,7 +229,7 @@ test('refused launches say what is wrong', async ($, on) => {
   stubs(on, s)
   await start($)
   expect((await orq($, 'launch nope fixture-model -- go'))).toContain(
-    'unknown instance nope (configured: codex, codex-lane, claudeAgent)',
+    'unknown instance nope (configured: codex, codex-work, claudeAgent)',
   )
   expect((await orq($, 'launch codex fixture-model --'))).toBe(
     'orq: the prompt after -- is empty',
