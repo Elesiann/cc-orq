@@ -214,6 +214,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       model: spec.model,
       instanceId: spec.instanceId,
       driver: spec.driver,
+      env: spec.env,
     }
     try {
       await $.fs.write(`${dir}/meta.json`, JSON.stringify(meta))
@@ -260,6 +261,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       model: spec.model,
       instanceId: spec.instanceId,
       driver: spec.driver,
+      env: spec.env,
     }
     if (pgid) job.pgid = pgid
     return { job }
@@ -337,7 +339,8 @@ async function codexModelEffort(
   try {
     const home = (await $.env.get('HOME')) ?? ''
     const instance = config.instances.find((i) => i.id === job.instanceId)
-    const codexHome = instance?.env?.CODEX_HOME ?? (home ? `${home}/.codex` : '')
+    const launchEnv = job.env ?? instance?.env ?? {}
+    const codexHome = launchEnv.CODEX_HOME ?? (home ? `${home}/.codex` : '')
     if (!codexHome) return fallback
     const probe =
       `# orq:rollout\nfind -L ${shellWord(`${codexHome}/sessions`)} -name ${shellWord(`rollout-*-${threadId}.jsonl`)} ` +

@@ -138,7 +138,7 @@ for both the kind and the agent suffix, for example
 
 | File | Written by | Contents |
 | --- | --- | --- |
-| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id and driver. |
+| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver and the instance `env` it launched with. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
 | `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
 | `child.log` | start script | The supervisor's own stdout and stderr. |

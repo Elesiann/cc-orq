@@ -29,6 +29,8 @@ export type JobRecord = {
   model?: string
   instanceId?: string
   driver?: DriverKind
+  /** The instance env the job launched with, as meta.json recorded it. */
+  env?: Record<string, string>
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -56,7 +58,20 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (runner) job.runner = runner
   const driver = DRIVERS.find((d) => d === raw.driver)
   if (driver) job.driver = driver
+  const env = parseEnv(raw.env)
+  if (env) job.env = env
   return job
+}
+
+/** The launch-time env of a job, or null when meta.json has none or a value is not a string. */
+function parseEnv(raw: unknown): Record<string, string> | null {
+  if (!isRecord(raw)) return null
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value !== 'string') return null
+    env[key] = value
+  }
+  return env
 }
 
 /** Quote a word for bash only when it contains anything beyond a plain token. */

@@ -193,6 +193,7 @@ test('launch prints the job id, writes meta.json and prompt.txt, and creates the
     model: 'fixture-model',
     instanceId: 'codex',
     driver: 'codex',
+    env: {},
   })
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Do the thing')
   expect(s.startScripts.length).toBe(1)
@@ -404,6 +405,23 @@ test('result of a finished codex job is its last message and a footer with the r
   await start($)
   expect(await orq($, 'result job-ok')).toBe(
     'The answer is 42.\n\n— orq · manual · fixture-model-rollout · effort high · 2m05s · 1200/34 tokens · session thread-ok',
+  )
+  expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
+})
+
+test('the codex footer probes the CODEX_HOME a job launched with, even when its instance left the config', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-moved', { instanceId: 'codex-gone', env: { CODEX_HOME } }, 1000000)
+  s.files.set(`${JOBS}/job-moved/exit`, '0')
+  s.files.set(`${JOBS}/job-moved/last.txt`, 'Moved.')
+  s.mtimes.set(`${JOBS}/job-moved/exit`, 1125000)
+  s.extractSummary = { tid: 'thread-moved', in: 5, out: 2, error: false }
+  s.rolloutPath = `${CODEX_HOME}/sessions/2026/10/19/rollout-2026-10-19T00-00-00-thread-moved.jsonl`
+  s.files.set(s.rolloutPath, JSON.stringify({ type: 'turn_context', payload: { model: 'fixture-model-moved', effort: 'low' } }) + '\n')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-moved')).toBe(
+    'Moved.\n\n— orq · manual · fixture-model-moved · effort low · 2m05s · 5/2 tokens · session thread-moved',
   )
   expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
 })
