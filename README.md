@@ -21,7 +21,9 @@ and the MCP tools land in the next releases; see the changelog when it exists.
 - Claude Code with function hooks enabled: add
   `"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"` to the `env` block of
   `~/.claude/settings.json`. Tested on Claude Code 2.1.303.
-- Linux or macOS with `bash`, `python3` and `git`.
+- Linux only, with `bash`, `python3` and `git`. macOS is not supported yet: the job start script
+  needs `systemd-run` or `setsid` to give each job its own session, and macOS has neither by
+  default.
 - The CLI of each provider you want to delegate to: `codex`, `opencode`,
   `claude`.
 
