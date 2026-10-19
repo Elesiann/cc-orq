@@ -89,14 +89,34 @@ export async function listJobs($: Engine, jobsDir: string): Promise<JobRecord[]>
     .slice(0, LIST_LIMIT)
 }
 
-/** running | cancelling | cancelled | done | failed, from the job's files. */
-export async function jobStatus($: Engine, job: JobRecord): Promise<JobStatus> {
+export type JobView = { status: JobStatus; endedAt: number | null }
+
+async function mtimeMs($: Engine, path: string): Promise<number | null> {
+  try {
+    return (await $.fs.stat(path)).mtimeMs
+  } catch {
+    return null
+  }
+}
+
+export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
   const exit = await readText($, `${job.dir}/exit`)
-  if (exit === null) return (await exists($, `${job.dir}/cancel`)) ? 'cancelling' : 'running'
+  if (exit !== null) return viewOfExit($, job, exit)
+  const liveness = await jobLiveness($, job)
+  if (liveness === 'gone') return { status: 'interrupted', endedAt: null }
+  if (liveness === 'running') {
+    return { status: (await exists($, `${job.dir}/cancel`)) ? 'cancelling' : 'running', endedAt: null }
+  }
+  const exitAfterLiveness = await readText($, `${job.dir}/exit`)
+  return exitAfterLiveness === null ? { status: 'failed', endedAt: null } : viewOfExit($, job, exitAfterLiveness)
+}
+
+async function viewOfExit($: Engine, job: JobRecord, exit: string): Promise<JobView> {
+  const endedAt = await mtimeMs($, `${job.dir}/exit`)
   const code = Number(exit.trim())
-  if (code === 124) return 'cancelled'
-  if (code === 0 && (await exists($, `${job.dir}/last.txt`))) return 'done'
-  return 'failed'
+  if (code === 124) return { status: 'cancelled', endedAt }
+  if (code === 0 && (await exists($, `${job.dir}/last.txt`))) return { status: 'done', endedAt }
+  return { status: 'failed', endedAt }
 }
 
 function mkdirScript(jobsDir: string, dir: string): string {

@@ -39,6 +39,9 @@ type State = {
   extractFail: boolean
   extractSummary: { tid: string; in: number; out: number; error: boolean; model?: string }
   rolloutPath: string
+  mtimes: Map<string, number>
+  goneJobs: Set<string>
+  livenessScripts: string[]
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -57,6 +60,9 @@ function fresh(o: Partial<State> = {}): State {
     extractFail: false,
     extractSummary: { tid: '', in: 0, out: 0, error: false },
     rolloutPath: '',
+    mtimes: new Map(),
+    goneJobs: new Set(),
+    livenessScripts: [],
     ...o,
   }
 }
@@ -90,6 +96,10 @@ function stubs(on: any, s: State) {
     if (e.path !== JOBS) throw new Error(`ENOENT: ${e.path}`)
     return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
+  on('fs.stat', (_$: unknown, e: any) => {
+    if (!s.files.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file', size: 0, mtimeMs: s.mtimes.get(e.path) ?? s.now, isLink: false } }
+  })
   on('process.run', (_$: unknown, e: any) => {
     const argv: string[] = e.argv
     if (argv[0] === 'python3') {
@@ -110,6 +120,11 @@ function stubs(on: any, s: State) {
       return result(0, s.rolloutPath ? `${s.rolloutPath}\n` : '\n')
     }
     if (script.includes('# orq:stderr')) return result(0, s.stderrTail)
+    if (script.includes('# orq:liveness')) {
+      s.livenessScripts.push(script)
+      const gone = [...s.goneJobs].some((id) => script.includes(`${JOBS}/${id}/pgid`))
+      return result(gone ? 12 : 11)
+    }
     throw new Error(`unexpected process.run: ${script.slice(0, 80)}`)
   })
 }
@@ -293,6 +308,39 @@ test('list reads a job whose meta.json has only the required fields', async ($, 
   await start($)
   const lines = (await orq($, 'list')).split('\n')
   expect(lines[1]?.split(/\s+/)).toEqual(['job-min', 'manual', 'running', '0s', '/w'])
+})
+
+test('list shows a job without exit and a gone supervisor as interrupted, and a live one as running', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-gone', kind: 'dir' },
+    { name: 'job-live', kind: 'dir' },
+  ]
+  seedJob(s, 'job-gone', {}, 4000000)
+  seedJob(s, 'job-live', {}, 4000000)
+  s.goneJobs.add('job-gone')
+  stubs(on, s)
+  await start($)
+  const lines = (await orq($, 'list')).split('\n')
+  const rowOf = (id: string) => lines.find((l) => l.startsWith(id))?.split(/\s+/)
+  expect(rowOf('job-gone')).toEqual(['job-gone', 'manual', 'interrupted', '—', '/work'])
+  expect(rowOf('job-live')).toEqual(['job-live', 'manual', 'running', '10m', '/work'])
+  expect(s.livenessScripts.some((sc) => sc.includes(`${JOBS}/job-gone/pgid`))).toBe(true)
+})
+
+test('a finished job keeps the duration of its exit file however late list runs', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-done', kind: 'dir' }]
+  seedJob(s, 'job-done', {}, 1000000)
+  s.files.set(`${JOBS}/job-done/exit`, '0')
+  s.files.set(`${JOBS}/job-done/last.txt`, 'OK')
+  s.mtimes.set(`${JOBS}/job-done/exit`, 1090000)
+  stubs(on, s)
+  await start($)
+  const elapsedOf = (text: string) => text.split('\n')[1]?.split(/\s+/)[3]
+  expect(elapsedOf(await orq($, 'list'))).toBe('1m30s')
+  s.now = 9000000
+  expect(elapsedOf(await orq($, 'list'))).toBe('1m30s')
 })
 
 test('list with no job directories says so', async ($, on) => {

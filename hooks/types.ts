@@ -13,7 +13,7 @@ export const DRIVER_RUNNER: Record<DriverKind, Runner> = {
 const RUNNERS: readonly Runner[] = ['codex', 'opencode', 'agy', 'claude']
 const DRIVERS: readonly DriverKind[] = ['codex', 'opencode', 'antigravity', 'claudeAgent']
 
-export type JobStatus = 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
+export type JobStatus = 'running' | 'cancelling' | 'interrupted' | 'done' | 'failed' | 'cancelled'
 
 /** A job as its meta.json describes it. Optional fields are absent in older jobs. */
 export type JobRecord = {

@@ -2,8 +2,8 @@ import type { EngineInterface, On } from 'claude-code'
 
 import { loadConfig } from './config.ts'
 import type { OrqConfig } from './config.ts'
-import { jobStatus, launchJob, listJobs, parseLaunch, readMeta, writeCancel, type Engine } from './engine.ts'
-import { DRIVER_RUNNER, formatDuration, renderTable, type TableRow } from './types.ts'
+import { jobView, launchJob, listJobs, parseLaunch, readMeta, writeCancel, type Engine, type JobView } from './engine.ts'
+import { DRIVER_RUNNER, formatDuration, renderTable, type JobRecord, type TableRow } from './types.ts'
 
 const USAGE = 'orq: usage: /orq list | /orq cancel JOB_ID | /orq launch INSTANCE MODEL -- PROMPT'
 
@@ -16,18 +16,21 @@ export async function registerOrqCommand($: Pick<EngineInterface, 'command'>): P
   })
 }
 
+function elapsedText(job: JobRecord, view: JobView, now: number): string {
+  if (view.endedAt !== null) return formatDuration(view.endedAt - job.startedAt)
+  if (view.status === 'running' || view.status === 'cancelling') return formatDuration(now - job.startedAt)
+  return '—'
+}
+
 async function listText($: Engine, config: OrqConfig): Promise<string> {
   const jobs = await listJobs($, config.jobsDir)
   if (jobs.length === 0) return 'orq: no jobs yet'
   const now = await $.clock.now()
   const rows: TableRow[] = await Promise.all(
-    jobs.map(async (job) => ({
-      id: job.id,
-      kind: job.kind,
-      status: await jobStatus($, job),
-      elapsed: formatDuration(now - job.startedAt),
-      cwd: job.cwd,
-    })),
+    jobs.map(async (job) => {
+      const view = await jobView($, job)
+      return { id: job.id, kind: job.kind, status: view.status, elapsed: elapsedText(job, view, now), cwd: job.cwd }
+    }),
   )
   return renderTable(rows)
 }
