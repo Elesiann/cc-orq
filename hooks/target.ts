@@ -114,8 +114,26 @@ export function resolveTarget(input: ResolveTargetInput): ResolvedTarget | Failu
   }
 }
 
+/**
+ * The runtime modes each driver's flags enforce. A mode outside this list has no flag that narrows the
+ * CLI to it, so a child on that driver would run with the CLI's own defaults, which may be broader.
+ */
+export const SUPPORTED_RUNTIME_MODES: Record<DriverKind, readonly RuntimeMode[]> = {
+  codex: ['approval-required', 'auto-accept-edits', 'auto', 'full-access'],
+  opencode: ['approval-required', 'auto'],
+  antigravity: ['approval-required', 'auto-accept-edits', 'auto', 'full-access'],
+  claudeAgent: ['approval-required', 'auto-accept-edits', 'auto', 'full-access'],
+}
+
 /** The runner flags a driver needs to enforce one runtime and interaction mode, or a refusal when it cannot. */
 export function runnerPolicy(driver: DriverKind, runtimeMode: RuntimeMode, interactionMode: InteractionMode): RunnerPolicy | Failure {
+  const supported = SUPPORTED_RUNTIME_MODES[driver]
+  if (!supported.includes(runtimeMode)) {
+    return fail(
+      'runtime_mode_unsupported',
+      `Driver ${driver} cannot enforce runtime mode ${runtimeMode}; it supports ${supported.join(', ')}.`,
+    )
+  }
   switch (driver) {
     case 'codex': {
       if (interactionMode === 'plan') return fail('invalid_request', 'Driver codex cannot enforce interaction mode plan.')
@@ -128,23 +146,11 @@ export function runnerPolicy(driver: DriverKind, runtimeMode: RuntimeMode, inter
           return { flags: ['--approve-for-me'] }
         case 'full-access':
           return { flags: ['-s', 'danger-full-access', '--dangerously-bypass-approvals-and-sandbox'] }
-        default:
-          return fail('invalid_request', `Driver codex cannot enforce runtime mode ${runtimeMode}.`)
       }
     }
-    case 'opencode': {
-      if (interactionMode === 'plan' || runtimeMode === 'approval-required') return { flags: ['--agent', 'plan'] }
-      switch (runtimeMode) {
-        case 'auto-accept-edits':
-          return { flags: [] }
-        case 'auto':
-          return { flags: ['--auto'] }
-        case 'full-access':
-          return fail('invalid_request', 'Driver opencode cannot enforce runtime mode full-access.')
-        default:
-          return fail('invalid_request', `Driver opencode cannot enforce runtime mode ${runtimeMode}.`)
-      }
-    }
+    case 'opencode':
+      // The table above leaves approval-required and auto; plan interaction narrows auto to the plan agent.
+      return runtimeMode === 'auto' && interactionMode === 'default' ? { flags: ['--auto'] } : { flags: ['--agent', 'plan'] }
     case 'antigravity': {
       // agy has no classifier-reviewed mode, so auto runs as accept-edits: narrower, never broader.
       const mode: RuntimeMode = runtimeMode === 'auto' ? 'auto-accept-edits' : runtimeMode
@@ -166,8 +172,6 @@ export function runnerPolicy(driver: DriverKind, runtimeMode: RuntimeMode, inter
           return { flags: ['--permission-mode', 'auto'] }
         case 'full-access':
           return { flags: ['--permission-mode', 'bypassPermissions'] }
-        default:
-          return fail('invalid_request', `Driver claudeAgent cannot enforce runtime mode ${runtimeMode}.`)
       }
     }
   }

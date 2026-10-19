@@ -199,7 +199,6 @@ const RUNNER_CASES: {
   { driver: 'codex', runtime: 'auto', interaction: 'default', flags: ['--approve-for-me'] },
   { driver: 'codex', runtime: 'full-access', interaction: 'default', flags: ['-s', 'danger-full-access', '--dangerously-bypass-approvals-and-sandbox'] },
   { driver: 'opencode', runtime: 'approval-required', interaction: 'default', flags: ['--agent', 'plan'] },
-  { driver: 'opencode', runtime: 'auto-accept-edits', interaction: 'default', flags: [] },
   { driver: 'opencode', runtime: 'auto', interaction: 'default', flags: ['--auto'] },
   { driver: 'opencode', runtime: 'auto', interaction: 'plan', flags: ['--agent', 'plan'] },
   { driver: 'antigravity', runtime: 'approval-required', interaction: 'default', flags: ['--sandbox'] },
@@ -227,10 +226,55 @@ test('runnerPolicy refuses codex in plan interaction, which its exec flags canno
   expect(r.error.code).toBe('invalid_request')
 })
 
-test('runnerPolicy refuses opencode full-access, which its run flags cannot enforce', () => {
+test('runnerPolicy refuses opencode full-access with runtime_mode_unsupported, naming the modes it does support', () => {
   const r = runnerPolicy('opencode', 'full-access', 'default')
   if (!isFailure(r)) throw new Error('expected failure')
-  expect(r.error.code).toBe('invalid_request')
+  expect(r.error.code).toBe('runtime_mode_unsupported')
+  expect(r.error.message).toBe(
+    'Driver opencode cannot enforce runtime mode full-access; it supports approval-required, auto.',
+  )
+})
+
+test('runnerPolicy refuses opencode auto-accept-edits, since no run flag narrows opencode to edits-only', () => {
+  const r = runnerPolicy('opencode', 'auto-accept-edits', 'default')
+  if (!isFailure(r)) throw new Error('expected failure')
+  expect(r.error.code).toBe('runtime_mode_unsupported')
+  expect(r.error.message).toBe(
+    'Driver opencode cannot enforce runtime mode auto-accept-edits; it supports approval-required, auto.',
+  )
+})
+
+test('runnerPolicy refuses opencode auto-accept-edits in plan interaction too, not only the default one', () => {
+  const r = runnerPolicy('opencode', 'auto-accept-edits', 'plan')
+  if (!isFailure(r)) throw new Error('expected failure')
+  expect(r.error.code).toBe('runtime_mode_unsupported')
+})
+
+const RUNTIME_MODES: RuntimeMode[] = ['approval-required', 'auto-accept-edits', 'auto', 'full-access']
+const DRIVERS: DriverKind[] = ['codex', 'opencode', 'antigravity', 'claudeAgent']
+const REFUSED: Record<DriverKind, RuntimeMode[]> = {
+  codex: [],
+  opencode: ['auto-accept-edits', 'full-access'],
+  antigravity: [],
+  claudeAgent: [],
+}
+
+for (const driver of DRIVERS) {
+  for (const runtime of RUNTIME_MODES) {
+    test(`runnerPolicy ${driver} ${runtime} is ${REFUSED[driver].includes(runtime) ? 'refused' : 'enforced by flags'}`, () => {
+      const r = runnerPolicy(driver, runtime, 'default')
+      if (REFUSED[driver].includes(runtime)) {
+        if (!isFailure(r)) throw new Error('expected failure')
+        expect(r.error.code).toBe('runtime_mode_unsupported')
+      } else {
+        expect(isFailure(r)).toBe(false)
+      }
+    })
+  }
+}
+
+test('claudeAgent approval-required sends no flag, because the CLI default permission mode already prompts', () => {
+  expect(runnerPolicy('claudeAgent', 'approval-required', 'default')).toEqual({ flags: [] })
 })
 
 test('runnerPolicy runs antigravity auto as the narrower accept-edits, since agy has no auto-review mode', () => {
