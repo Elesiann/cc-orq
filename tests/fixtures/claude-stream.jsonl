@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"fixture-claude-session"}
+{"type":"assistant","session_id":"fixture-claude-session","message":{"content":[{"type":"text","text":"OK"}]}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"fixture-claude-session","result":"OK","usage":{"input_tokens":44,"cache_creation_input_tokens":30992,"cache_read_input_tokens":217386,"output_tokens":3670},"modelUsage":{"fixture-model-claude":{"inputTokens":44,"outputTokens":3670}}}

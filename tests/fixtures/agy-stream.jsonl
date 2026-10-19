@@ -1,0 +1,3 @@
+{"event":"init","conversation_id":"fixture-agy-session","init":{"model":"fixture-model-agy"}}
+{"event":"step_update","step_update":{"conversation_id":"fixture-agy-session","step_index":1,"state":"DONE","step_type":"agent_response"}}
+{"event":"result","result":{"conversation_id":"fixture-agy-session","status":"SUCCESS","response":"OK\n","usage":{"input_tokens":14298,"output_tokens":1,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":14299}}}

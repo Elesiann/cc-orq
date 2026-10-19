@@ -1,0 +1,2 @@
+{"type": "step_start", "timestamp": 1760000000000, "sessionID": "fixture-opencode-session", "part": {"id": "fixture-part-1", "sessionID": "fixture-opencode-session", "messageID": "fixture-message-1", "type": "step-start"}}
+{"type": "text", "timestamp": 1760000000500, "sessionID": "fixture-opencode-session", "part": {"id": "fixture-part-2", "sessionID": "fixture-opencode-session", "messageID": "fixture-message-1", "type": "text", "text": "PONG", "time": {"start": 1760000000400, "end": 1760000000500}}}

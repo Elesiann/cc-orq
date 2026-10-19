@@ -8,6 +8,7 @@ function harness({ home = '/home/u', text = null, failEnv = false } = {}) {
   const on = (event, handler) => { handlers[event] = handler }
   register(on, {})
   const $ = {
+    command: { register: async () => ({ command: 'orq' }) },
     env: { get: async () => { if (failEnv) throw new Error('env down'); return home } },
     fs: { exists: async () => text !== null, read: async () => text },
     ui: { log: async (line, opts) => { logs.push([line, opts]) } },

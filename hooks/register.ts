@@ -1,7 +1,9 @@
 import type { Register } from 'claude-code'
+import { registerEngine, registerOrqCommand } from './commands.ts'
 import { loadConfig } from './config.ts'
 
 export const register: Register = (on) => {
+  registerEngine(on)
   on('session.start', async ($, e, next) => {
     try {
       const { config, source, warning } = await loadConfig($)
@@ -9,6 +11,11 @@ export const register: Register = (on) => {
       await $.ui.log(`orq loaded: config ${source}, jobsDir ${config.jobsDir}, ${config.instances.length} instances`, { to: 'debug' })
     } catch (err) {
       await $.ui.log(`orq: session.start failed: ${String(err)}`, { to: 'debug' })
+    }
+    try {
+      await registerOrqCommand($)
+    } catch (err) {
+      await $.ui.log(`orq: could not register /orq: ${String(err)}`, { to: 'debug' })
     }
     return next(e)
   })
