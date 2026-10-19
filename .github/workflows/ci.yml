@@ -14,4 +14,4 @@ jobs:
         with:
           node-version: 22
       - run: npm test
-      - run: test -f tests/runners-shell.sh && bash tests/runners-shell.sh || echo "no shell tests yet"
+      - run: bash tests/runners-shell.sh
