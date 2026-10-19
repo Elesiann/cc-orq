@@ -1,5 +1,5 @@
 import type { Register } from 'claude-code'
-import { loadConfig } from './config.js'
+import { loadConfig } from './config.ts'
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {

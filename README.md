@@ -18,9 +18,9 @@ the changelog when it exists.
 
 ## Requirements
 
-- Claude Code 2.1.269 or newer with function hooks enabled: add
+- Claude Code with function hooks enabled: add
   `"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"` to the `env` block of
-  `~/.claude/settings.json`.
+  `~/.claude/settings.json`. Tested on Claude Code 2.1.303.
 - Linux or macOS with `bash`, `python3` and `git`.
 - The CLI of each provider you want to delegate to: `codex`, `opencode`,
   `claude`.
@@ -57,19 +57,26 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
 }
 ```
 
-- `jobsDir`: where each job keeps its files. Default `~/.cache/orq/jobs`.
-- `waitSeconds`: how long one wait step blocks before the next one. Keep it
+- `jobsDir`: where each job keeps its files, as an absolute path or one that
+  starts with `~/`. Default `~/.cache/orq/jobs`.
+- `waitSeconds`: how long one wait step blocks before the next one, between 10 and 600. Keep it
   under 600, the engine's stall limit for a silent subagent. Default 120.
 - `instances`: the provider instances the parent can target. `id` is the name
-  used in a task's `target:` line, `driver` is one of `codex`, `opencode`,
-  `antigravity`, `claudeAgent`, and `env` holds variables passed to that
-  instance's process. A leading `~` in `jobsDir` or in an `env` value expands
-  to your home. Defaults: `codex`, `opencode` and `claudeAgent`.
+  used in a task's `target:` line (letters, digits, `_`, `.`, `-`, up to 64
+  characters, unique), `driver` is one of `codex`, `opencode`, `antigravity`,
+  `claudeAgent`, and `env` holds variables passed to that instance's process,
+  with `UPPER_CASE` keys and string values. A leading `~` in `jobsDir` or in an
+  `env` value expands to your home. Defaults: `codex`, `opencode` and
+  `claudeAgent`.
 
-An invalid file falls back to the defaults and logs a warning in the debug
-log (`claude --debug-file`).
+A file that is not valid JSON falls back to the defaults. A valid file with an
+invalid field keeps the default for that field and drops invalid instances one
+by one. Both cases log a warning naming the field in the debug log
+(`claude --debug-file`).
 
 ## Development
+
+Node 22.18 or newer (the tests import TypeScript directly).
 
 ```bash
 npm install
