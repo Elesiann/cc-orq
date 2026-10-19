@@ -14,7 +14,9 @@ instance and model in every task.
 
 Early. This version loads and reads its configuration, runs detached jobs, and
 lets you list, show, cancel and launch them with `/orq`. The `orq:task` agent
-and the MCP tools land in the next releases; see the changelog when it exists.
+runs a task as a job for the parent session, under the parent's permission
+ceiling; see "Delegating with orq:task". The other MCP tools land in later
+releases; see the changelog when it exists.
 
 ## Requirements
 
@@ -97,6 +99,96 @@ with a model your provider CLI accepts.
 Until the `orq:task` agent brings the permission policy, a manual launch uses
 each provider CLI's own defaults for sandbox, permissions and reasoning effort.
 
+## Delegating with orq:task
+
+The main session starts a task with one agent type:
+
+```
+Agent({ subagent_type: "orq:task", run_in_background: true, prompt: HEADER + TASK })
+```
+
+The prompt starts with header lines, in any order, then the task. The first
+line that is not a header starts the task text.
+
+```
+target: codex my-model effort=high runtime=auto-accept-edits
+cwd: /path/to/repo
+isolation: worktree
+role: review
+
+Review the diff on this branch and list the risks.
+```
+
+- `target: INSTANCE MODEL [effort=VALUE] [runtime=MODE] [interaction=MODE]`
+  (required). `INSTANCE` is an `id` from `instances`. `MODEL` is passed to the
+  CLI as written; orq does not check it against a catalog. `effort` is the
+  reasoning effort, one word. `runtime` and `interaction` narrow the session;
+  they never widen it. Any other `key=value` is refused.
+- `cwd: /absolute/path` (required): an existing directory.
+- `isolation: worktree | shared` (default `worktree`). `worktree` is accepted
+  but does not isolate yet: the job runs in `cwd`, as `shared` does.
+- `role: implementation | research | review | design | test | general`
+  (optional). Any role except `general` prefixes the task with
+  `Act as the ROLE sub-agent for this task.`
+- A refused header answers the subagent with the refusal text, and nothing runs.
+  A refusal from the ceiling or the driver names its code, such as
+  `runtime_mode_unsupported`.
+
+### Permission ceiling
+
+The parent session's permission mode sets the most a task may do. The mode
+comes from the `Agent` call that spawned the task, then from the session's last
+`orq:task` spawn, then from `permissions.defaultMode` in settings.
+
+| Parent permission mode | Runtime ceiling | Interaction ceiling |
+| --- | --- | --- |
+| `plan` | `approval-required` | `plan` |
+| `default` | `approval-required` | `default` |
+| `acceptEdits` | `auto-accept-edits` | `default` |
+| `auto` | `auto` | `default` |
+| `dontAsk` | `approval-required` | `default` |
+| `bypassPermissions` | `full-access` | `default` |
+| none, or any other value | `approval-required` | `default` |
+
+Runtime modes rise in this order: `approval-required`, `auto-accept-edits`,
+`auto`, `full-access`. A task that asks for a broader mode than its ceiling is
+refused with `runtime_mode_escalation_denied`; `interaction=default` under a
+`plan` ceiling is refused with `interaction_mode_escalation_denied`.
+
+Not every driver can enforce every runtime mode with a flag. A mode it cannot
+enforce is refused with `runtime_mode_unsupported`, so a task never runs with a
+CLI default broader than the ceiling.
+
+| Driver | `approval-required` | `auto-accept-edits` | `auto` | `full-access` | `interaction=plan` |
+| --- | --- | --- | --- | --- | --- |
+| `codex` | `-s read-only` | `-s workspace-write` | `--approve-for-me` | `-s danger-full-access --dangerously-bypass-approvals-and-sandbox` | refused |
+| `opencode` | `--agent plan` | refused | `--auto` | refused | `--agent plan` |
+| `antigravity` | `--sandbox` | `--mode accept-edits` | `--mode accept-edits` (narrower) | `--dangerously-skip-permissions` | adds `--mode plan` |
+| `claudeAgent` | no flag: the CLI default prompts | `--permission-mode acceptEdits` | `--permission-mode auto` | `--permission-mode bypassPermissions` | `--permission-mode plan` |
+
+Supported runtime modes per driver: `codex`, `antigravity` and `claudeAgent`
+support all four; `opencode` supports `approval-required` and `auto`. The
+`claudeAgent` `approval-required` row sends no flag because the CLI's default
+permission mode already prompts for dangerous operations.
+
+### Handback
+
+A task's job runs detached. The subagent waits on it through `mcp__orq__wait`,
+one call per `waitSeconds` slice, and each call answers `finished`,
+`still running, DURATION` or `supervisor gone`.
+
+When the job ends, the answer goes back to the parent:
+
+- Under `auto` permission mode, through a `SubagentHandback({ message })` call.
+  A second step after that answers with text, so the report is handed back once.
+- Under any other mode, as the subagent's text.
+
+When the mode cannot be read, the answer is text and the debug log says
+`orq: handback skipped for AGENT_ID: no permission mode`.
+
+Stopping the subagent with `TaskStop` writes the job's `cancel` file, so the
+supervisor stops the job.
+
 ## Configuration
 
 orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
@@ -150,7 +242,7 @@ for both the kind and the agent suffix, for example
 | `last.txt` | the CLI or `supervise.sh` | The final message. Codex writes it with `-o`. The other runners extract it from the event stream after the run. |
 | `cancel` | `/orq cancel` | A request to stop the job. Only its existence counts. |
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
-| `flags` | nothing in this release | Optional. When present, each non-empty line becomes one extra argument to the CLI. |
+| `flags` | `orq:task` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
 The `exit` file holds one number:
 
