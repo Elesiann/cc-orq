@@ -350,6 +350,72 @@ test('list with no job directories says so', async ($, on) => {
   expect((await orq($, 'list'))).toBe('orq: no jobs yet')
 })
 
+test('result of a finished codex job is its last message and a footer with the rollout model and effort', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-ok', { instanceId: 'codex-work' }, 1000000)
+  s.files.set(`${JOBS}/job-ok/exit`, '0')
+  s.files.set(`${JOBS}/job-ok/last.txt`, 'The answer is 42.')
+  s.mtimes.set(`${JOBS}/job-ok/exit`, 1125000)
+  s.extractSummary = { tid: 'thread-ok', in: 1200, out: 34, error: false }
+  s.rolloutPath = `${CODEX_HOME}/sessions/2026/10/19/rollout-2026-10-19T00-00-00-thread-ok.jsonl`
+  s.files.set(s.rolloutPath, JSON.stringify({ type: 'turn_context', payload: { model: 'fixture-model-rollout', effort: 'high' } }) + '\n')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-ok')).toBe(
+    'The answer is 42.\n\n— orq · manual · fixture-model-rollout · effort high · 2m05s · 1200/34 tokens · session thread-ok',
+  )
+  expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
+})
+
+test('result of a failed job gives the exit code and the stderr tail with the token redacted', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-bad', {}, 1000000)
+  s.files.set(`${JOBS}/job-bad/exit`, '1')
+  s.stderrTail = 'Error: request refused\nAuthorization: Bearer fixture-bearer-value\n'
+  stubs(on, s)
+  await start($)
+  const text = await orq($, 'result job-bad')
+  expect(text).toBe('orq: job-bad failed (exit 1)\nError: request refused\nAuthorization: [REDACTED]')
+  expect(text.includes('fixture-bearer-value')).toBe(false)
+})
+
+test('result of a job that exited 124 says it was cancelled', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-cut', {}, 1000000)
+  s.files.set(`${JOBS}/job-cut/exit`, '124')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-cut')).toBe('orq: job-cut was cancelled (exit 124)')
+})
+
+test('result of a job without an exit file says it is still running while its supervisor lives', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-run', {}, 1000000)
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-run')).toBe('orq: job-run is still running')
+})
+
+test('result of a job whose supervisor is gone without an exit file says it was interrupted', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-gone', {}, 1000000)
+  s.goneJobs.add('job-gone')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-gone')).toBe(
+    'orq: job-gone was interrupted: its supervisor is gone and it left no exit file',
+  )
+})
+
+test('result of an unknown job id, an unsafe one or none says unknown job', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result nope')).toBe('orq: unknown job nope')
+  expect(await orq($, 'result ../x')).toBe('orq: unknown job ../x')
+  expect(await orq($, 'result')).toBe('orq: unknown job (missing)')
+})
+
 test('cancel writes the cancel file for a known job and refuses any other id', async ($, on) => {
   const s = fresh()
   seedJob(s, 'job-a')

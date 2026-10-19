@@ -2,18 +2,34 @@ import type { EngineInterface, On } from 'claude-code'
 
 import { loadConfig } from './config.ts'
 import type { OrqConfig } from './config.ts'
-import { jobView, launchJob, listJobs, parseLaunch, readMeta, writeCancel, type Engine, type JobView } from './engine.ts'
+import {
+  composeAnswer,
+  jobView,
+  launchJob,
+  listJobs,
+  parseLaunch,
+  readMeta,
+  writeCancel,
+  type Engine,
+  type JobView,
+} from './engine.ts'
 import { DRIVER_RUNNER, formatDuration, renderTable, type JobRecord, type TableRow } from './types.ts'
 
-const USAGE = 'orq: usage: /orq list | /orq cancel JOB_ID | /orq launch INSTANCE MODEL -- PROMPT'
+const USAGE = 'orq: usage: /orq list | /orq result JOB_ID | /orq cancel JOB_ID | /orq launch INSTANCE MODEL -- PROMPT'
 
 /** Declare /orq in the typeahead. Called from session.start. */
 export async function registerOrqCommand($: Pick<EngineInterface, 'command'>): Promise<void> {
   await $.command.register({
     name: 'orq',
-    description: 'List, launch or cancel detached jobs',
-    argumentHint: 'list | cancel JOB_ID | launch INSTANCE MODEL -- PROMPT',
+    description: 'List, show, cancel or launch detached jobs',
+    argumentHint: 'list | result JOB_ID | cancel JOB_ID | launch INSTANCE MODEL -- PROMPT',
   })
+}
+
+async function resultText($: Engine, config: OrqConfig, id: string): Promise<string> {
+  const job = await readMeta($, config.jobsDir, id)
+  if (!job) return `orq: unknown job ${id || '(missing)'}`
+  return composeAnswer($, config, job)
 }
 
 function elapsedText(job: JobRecord, view: JobView, now: number): string {
@@ -72,6 +88,8 @@ export async function runOrq($: Engine, config: OrqConfig, args: string): Promis
   switch (sub) {
     case 'list':
       return listText($, config)
+    case 'result':
+      return resultText($, config, rest.trim())
     case 'cancel':
       return cancelText($, config, rest.trim())
     case 'launch':

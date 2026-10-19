@@ -331,10 +331,14 @@ async function codexModelEffort(
   }
 }
 
-/** The answer text of a finished job: its last message and a footer, or a failure with a stderr tail. */
 export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord): Promise<string> {
+  const view = await jobView($, job)
+  if (view.status === 'running') return `orq: ${job.id} is still running`
+  if (view.status === 'cancelling') return `orq: ${job.id} is still cancelling`
+  if (view.status === 'interrupted') return `orq: ${job.id} was interrupted: its supervisor is gone and it left no exit file`
+  if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
   const now = await $.clock.now()
-  const durationMs = Math.max(0, now - job.startedAt)
+  const durationMs = Math.max(0, (view.endedAt ?? now) - job.startedAt)
   const exitText = await readText($, `${job.dir}/exit`)
   const parsedExit = Number.parseInt((exitText ?? '').trim(), 10)
   const exitCode = Number.isFinite(parsedExit) ? parsedExit : -1
@@ -343,7 +347,7 @@ export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord
   const summary = runner ? await summarizeEvents($, job, runner) : null
   if (exitCode !== 0 || !lastText || summary?.error) {
     const snippet = await stderrSnippet($, job)
-    return `orq: ${job.kind} failed (exit ${exitCode})` + (snippet ? `\n${snippet}` : '')
+    return `orq: ${job.id} failed (exit ${exitCode})` + (snippet ? `\n${snippet}` : '')
   }
   let model = summary?.model || job.model || 'n/a'
   let effort = 'n/a'
