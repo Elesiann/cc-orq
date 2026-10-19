@@ -458,6 +458,56 @@ test('the footer says tokens n/a when the extractor found no counts, as opencode
   expect(s.probeScripts.length).toBe(0)
 })
 
+test('a claude job footer names the model from the stream and skips the codex probe', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-claude', { runner: 'claude', model: 'fixture-model', driver: 'claudeAgent' }, 1000000)
+  s.files.set(`${JOBS}/job-claude/exit`, '0')
+  s.files.set(`${JOBS}/job-claude/last.txt`, 'FAKE')
+  s.mtimes.set(`${JOBS}/job-claude/exit`, 1060000)
+  s.extractSummary = { tid: 'ses-claude', in: 11, out: 4, error: false, model: 'fixture-model-claude' }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-claude')).toBe(
+    'FAKE\n\n— orq · manual · fixture-model-claude · effort n/a · 1m · 11/4 tokens · session ses-claude',
+  )
+  expect(s.probeScripts.length).toBe(0)
+})
+
+test('a job without runner takes it from its driver, so the extractor still decides its outcome', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-drv', { runner: undefined, driver: 'claudeAgent', model: 'fixture-model' }, 1000000)
+  s.files.set(`${JOBS}/job-drv/exit`, '0')
+  s.files.set(`${JOBS}/job-drv/last.txt`, 'FAKE')
+  s.extractSummary = { tid: 'ses-drv', in: 3, out: 1, error: true }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-drv')).toBe('orq: job-drv failed (exit 0)')
+})
+
+test('list skips a job whose meta.json is corrupt and keeps the others', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-corrupt', kind: 'dir' },
+    { name: 'job-good', kind: 'dir' },
+  ]
+  s.files.set(`${JOBS}/job-corrupt/meta.json`, '{"id": "job-corrupt", "kind":')
+  seedJob(s, 'job-good', {}, 4000000)
+  stubs(on, s)
+  await start($)
+  const lines = (await orq($, 'list')).split('\n')
+  expect(lines.length).toBe(2)
+  expect(lines[1]?.split(/\s+/)[0]).toBe('job-good')
+  expect(await orq($, 'result job-corrupt')).toBe('orq: unknown job job-corrupt')
+})
+
+test('list over a jobs directory that does not exist says there are no jobs', async ($, on) => {
+  const s = fresh()
+  s.files.set(CONFIG_PATH, JSON.stringify({ jobsDir: '/srv/example/missing-jobs' }))
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'list')).toBe('orq: no jobs yet')
+})
+
 test('result of a failed job gives the exit code and the stderr tail with the token redacted', async ($, on) => {
   const s = fresh()
   seedJob(s, 'job-bad', {}, 1000000)

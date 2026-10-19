@@ -55,9 +55,10 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (typeof raw.model === 'string') job.model = raw.model
   if (typeof raw.instanceId === 'string') job.instanceId = raw.instanceId
   const runner = RUNNERS.find((r) => r === raw.runner)
-  if (runner) job.runner = runner
   const driver = DRIVERS.find((d) => d === raw.driver)
   if (driver) job.driver = driver
+  if (runner) job.runner = runner
+  else if (driver) job.runner = DRIVER_RUNNER[driver]
   const env = parseEnv(raw.env)
   if (env) job.env = env
   return job
