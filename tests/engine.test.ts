@@ -343,6 +343,47 @@ test('a finished job keeps the duration of its exit file however late list runs'
   expect(elapsedOf(await orq($, 'list'))).toBe('1m30s')
 })
 
+function rowStatus(listText: string, id: string): string | undefined {
+  return listText.split('\n').find((l) => l.startsWith(id))?.split(/\s+/)[2]
+}
+
+test('a finished job with an empty last.txt is failed in both list and result', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-empty', kind: 'dir' }]
+  seedJob(s, 'job-empty', {}, 4000000)
+  s.files.set(`${JOBS}/job-empty/exit`, '0')
+  s.files.set(`${JOBS}/job-empty/last.txt`, '')
+  stubs(on, s)
+  await start($)
+  expect(rowStatus(await orq($, 'list'), 'job-empty')).toBe('failed')
+  expect(await orq($, 'result job-empty')).toBe('orq: job-empty failed (exit 0)')
+})
+
+test('a finished job whose extractor reports an error is failed in both list and result', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-err', kind: 'dir' }]
+  seedJob(s, 'job-err', {}, 4000000)
+  s.files.set(`${JOBS}/job-err/exit`, '0')
+  s.files.set(`${JOBS}/job-err/last.txt`, 'partial answer')
+  s.extractSummary = { tid: 'thread-err', in: 1, out: 1, error: true }
+  stubs(on, s)
+  await start($)
+  expect(rowStatus(await orq($, 'list'), 'job-err')).toBe('failed')
+  expect(await orq($, 'result job-err')).toBe('orq: job-err failed (exit 0)')
+})
+
+test('an exit file that is not one whole number is failed, not done', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-blank', kind: 'dir' }]
+  seedJob(s, 'job-blank', {}, 4000000)
+  s.files.set(`${JOBS}/job-blank/exit`, '')
+  s.files.set(`${JOBS}/job-blank/last.txt`, 'OK')
+  stubs(on, s)
+  await start($)
+  expect(rowStatus(await orq($, 'list'), 'job-blank')).toBe('failed')
+  expect(await orq($, 'result job-blank')).toBe('orq: job-blank failed (exit -1)')
+})
+
 test('list with no job directories says so', async ($, on) => {
   const s = fresh()
   stubs(on, s)

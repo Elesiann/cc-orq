@@ -150,10 +150,12 @@ for both the kind and the agent suffix, for example
 
 The `exit` file holds one number:
 
-- `0`: the CLI finished. The job is `done` when `last.txt` exists, and `failed` otherwise.
+- `0`: the CLI finished. The job is `done` when `last.txt` holds a non-empty final message and the event extractor reports no error. Otherwise it is `failed`.
 - `124`: the job was cancelled.
 - `125`: the supervisor did not start, so the job never ran.
 - Any other number: the CLI's own exit code. The job is `failed`.
+
+A file that does not hold one whole number, an empty file for example, counts as `failed`. `/orq list` and `/orq result` apply this same rule, so a job shows the same status in both.
 
 A job without an `exit` file is `running` while its process group, named in
 `pgid`, still exists. When that group is gone, `/orq list` shows the job as
