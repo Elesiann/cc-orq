@@ -62,7 +62,7 @@ finished job keeps the elapsed time it had when its `exit` file was written.
 
 Prints the final message of a finished job, followed by a footer with its kind,
 model, effort, duration, token counts and session id. The footer shows `tokens
-unknown` when the CLI reports no counts. A failed job prints its exit code and
+n/a` when the CLI's event stream reports no counts. A failed job prints its exit code and
 the last 20 stderr lines, with secrets redacted. A job that has not ended gets
 one line that says it is running, cancelling or interrupted.
 

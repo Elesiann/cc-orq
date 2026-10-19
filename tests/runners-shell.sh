@@ -151,6 +151,13 @@ printf '%s\n' '{"event":"result","result":{"conversation_id":"c1","status":"FAIL
 check_extract "$T/agy-err.jsonl" agy '{"tid": "c1", "in": 1, "out": 2, "error": true}' failed-status
 printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"session_id":"s9","result":"bad","usage":{"input_tokens":7,"output_tokens":8},"modelUsage":{"m-x":{}}}' > "$T/claude-err.jsonl"
 check_extract "$T/claude-err.jsonl" claude '{"tid": "s9", "in": 7, "out": 8, "error": true, "model": "m-x"}' error-result
+check_extract "$ROOT/tests/fixtures/opencode-stream.jsonl" opencode \
+  '{"tid": "fixture-opencode-session", "in": null, "out": null, "error": false}' no-token-counts
+printf '%s\n' '{"type":"step_start","sessionID":"s-tok","part":{"type":"step-start"}}' \
+  '{"type":"step_finish","sessionID":"s-tok","part":{"type":"step_finish","tokens":{"input":30,"output":5}}}' \
+  '{"type":"text","sessionID":"s-tok","part":{"type":"text","text":"x"}}' \
+  '{"type":"step_finish","sessionID":"s-tok","part":{"type":"step-finish","tokens":{"input":12,"output":2}}}' > "$T/opencode-tokens.jsonl"
+check_extract "$T/opencode-tokens.jsonl" opencode '{"tid": "s-tok", "in": 42, "out": 7, "error": false}' step-finish-counts
 
 CJOB="$T/job-cancel"
 mkdir -p "$CJOB"

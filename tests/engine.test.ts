@@ -37,7 +37,7 @@ type State = {
   startExit: number
   stderrTail: string
   extractFail: boolean
-  extractSummary: { tid: string; in: number; out: number; error: boolean; model?: string }
+  extractSummary: { tid: string; in: number | null; out: number | null; error: boolean; model?: string }
   rolloutPath: string
   mtimes: Map<string, number>
   goneJobs: Set<string>
@@ -443,6 +443,21 @@ test('the codex footer probes the CODEX_HOME a job launched with, even when its 
   expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
 })
 
+test('the footer says tokens n/a when the extractor found no counts, as opencode runs do today', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-oc', { runner: 'opencode', model: 'fixture-model' }, 1000000)
+  s.files.set(`${JOBS}/job-oc/exit`, '0')
+  s.files.set(`${JOBS}/job-oc/last.txt`, 'PONG')
+  s.mtimes.set(`${JOBS}/job-oc/exit`, 1014000)
+  s.extractSummary = { tid: 'fixture-opencode-session', in: null, out: null, error: false }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-oc')).toBe(
+    'PONG\n\n— orq · manual · fixture-model · effort n/a · 14s · tokens n/a · session fixture-opencode-session',
+  )
+  expect(s.probeScripts.length).toBe(0)
+})
+
 test('result of a failed job gives the exit code and the stderr tail with the token redacted', async ($, on) => {
   const s = fresh()
   seedJob(s, 'job-bad', {}, 1000000)
@@ -532,7 +547,7 @@ test('shell words, footer, duration, job ids and redaction keep their contracts'
   expect(formatDuration(725000)).toBe('12m05s')
   expect(
     buildFooter({ kind: 'manual', model: 'm', effort: 'n/a', durationMs: 60000, inTokens: null, outTokens: null, session: 's' }),
-  ).toBe('— orq · manual · m · effort n/a · 1m · tokens unknown · session s')
+  ).toBe('— orq · manual · m · effort n/a · 1m · tokens n/a · session s')
   expect(isSafeJobId('manual-1-a1b2c3d4-xyz')).toBe(true)
   expect(isSafeJobId('../evil')).toBe(false)
   expect(isSafeJobId('a/b')).toBe(false)

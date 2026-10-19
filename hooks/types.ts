@@ -90,7 +90,7 @@ export function formatDuration(ms: number): string {
   return `${m}m${String(rest).padStart(2, '0')}s`
 }
 
-/** The one footer line of every answer. Null token counts render as `tokens unknown`. */
+/** The one footer line of every answer. Null token counts, when the extractor found none, render as `tokens n/a`. */
 export function buildFooter(args: {
   kind: string
   model: string
@@ -100,8 +100,7 @@ export function buildFooter(args: {
   outTokens: number | null
   session: string
 }): string {
-  const tokens =
-    args.inTokens === null || args.outTokens === null ? 'tokens unknown' : `${args.inTokens}/${args.outTokens} tokens`
+  const tokens = args.inTokens === null || args.outTokens === null ? 'tokens n/a' : `${args.inTokens}/${args.outTokens} tokens`
   return `— orq · ${args.kind} · ${args.model} · effort ${args.effort} · ${formatDuration(args.durationMs)} · ${tokens} · session ${args.session}`
 }
 

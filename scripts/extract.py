@@ -3,10 +3,12 @@
 
 Usage: extract.py <events.jsonl> <codex|opencode|agy|claude>
 
-Prints: {"tid": "<thread/session id or ''>", "in": <int>, "out": <int>,
-         "error": <bool>} plus an optional "model" key when the stream names
-the model (agy `init.init.model`, claude the first `result.modelUsage`
-key). Reads line by line, so logs larger than the mod's read cap are fine.
+Prints: {"tid": "<thread/session id or ''>", "in": <int or null>,
+         "out": <int or null>, "error": <bool>} plus an optional "model" key
+when the stream names the model (agy `init.init.model`, claude the first
+`result.modelUsage` key). "in" and "out" are null when the stream carries no
+token counts, so a caller can tell zero tokens from unknown ones. Reads line
+by line, so logs larger than the mod's read cap are fine.
 Per-line parse failures are skipped; only a missing/unreadable file exits
 nonzero.
 """
@@ -20,8 +22,8 @@ def main() -> int:
         return 2
     path, runner = sys.argv[1], sys.argv[2]
     tid = ""
-    in_tok = 0
-    out_tok = 0
+    in_tok = None
+    out_tok = None
     error = False
     model = ""
     try:
@@ -59,13 +61,13 @@ def main() -> int:
                 if not tid and isinstance(o.get("sessionID"), str) and o["sessionID"]:
                     tid = o["sessionID"]
                 part = o.get("part")
-                if isinstance(part, dict) and part.get("type") == "step-finish":
+                if isinstance(part, dict) and part.get("type") in ("step-finish", "step_finish"):
                     toks = part.get("tokens")
                     if isinstance(toks, dict):
                         if isinstance(toks.get("input"), int):
-                            in_tok += toks["input"]
+                            in_tok = (in_tok or 0) + toks["input"]
                         if isinstance(toks.get("output"), int):
-                            out_tok += toks["output"]
+                            out_tok = (out_tok or 0) + toks["output"]
             elif runner == "agy":
                 if not tid and isinstance(o.get("conversation_id"), str) and o["conversation_id"]:
                     tid = o["conversation_id"]
