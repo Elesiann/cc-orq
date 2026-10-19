@@ -54,6 +54,11 @@ async function listText($: Engine, config: OrqConfig): Promise<string> {
 async function cancelText($: Engine, config: OrqConfig, id: string): Promise<string> {
   const job = await readMeta($, config.jobsDir, id)
   if (!job) return `orq: unknown job ${id || '(missing)'}`
+  const { status } = await jobView($, job)
+  if (status === 'interrupted') return `orq: ${job.id} has no live supervisor; nothing to cancel`
+  if (status === 'done' || status === 'failed' || status === 'cancelled') {
+    return `orq: ${job.id} already finished (${status})`
+  }
   await writeCancel($, job)
   return `orq: cancel requested for ${job.id}`
 }

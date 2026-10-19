@@ -75,7 +75,9 @@ one line that says it is running, cancelling or interrupted.
 Asks the job's supervisor to stop it. The supervisor sends SIGTERM to the job's
 process group, sends SIGKILL after 5 seconds, and records exit code 124. The
 command only writes the request, so the job may show `cancelling` for a few
-seconds.
+seconds. A job that has already ended is not touched: the command answers that it
+finished and writes nothing. An `interrupted` job has no supervisor to stop, so the
+command says so and writes nothing.
 
 ```
 /orq cancel manual-1760000000000-manual-k3j9x2

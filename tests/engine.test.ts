@@ -486,6 +486,20 @@ test('cancel writes the cancel file for a known job and refuses any other id', a
   expect((await orq($, 'cancel'))).toBe('orq: unknown job (missing)')
 })
 
+test('cancel says so and writes nothing for a finished or interrupted job', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-fin')
+  s.files.set(`${JOBS}/job-fin/exit`, '0')
+  s.files.set(`${JOBS}/job-fin/last.txt`, 'OK')
+  seedJob(s, 'job-int')
+  s.goneJobs.add('job-int')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'cancel job-fin')).toBe('orq: job-fin already finished (done)')
+  expect(await orq($, 'cancel job-int')).toBe('orq: job-int has no live supervisor; nothing to cancel')
+  expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
+})
+
 test('parseLaunch splits at the first -- and refuses what cannot run', () => {
   expect(parseLaunch('codex fixture-model -- do -- it')).toEqual({ instance: 'codex', model: 'fixture-model', prompt: 'do -- it' })
   expect(parseLaunch('codex fixture-model -- -dash prompt')).toEqual({ instance: 'codex', model: 'fixture-model', prompt: '-dash prompt' })
