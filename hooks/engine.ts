@@ -220,6 +220,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       await $.fs.write(`${dir}/meta.json`, JSON.stringify(meta))
       await $.fs.write(`${dir}/prompt.txt`, spec.prompt)
     } catch (err) {
+      await markLaunchFailed($, dir)
       return { refusal: `orq: ${spec.kind} could not write its job directory: ${String(err)}` }
     }
     const script = startScript({

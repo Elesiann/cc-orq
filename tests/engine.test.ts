@@ -42,6 +42,7 @@ type State = {
   mtimes: Map<string, number>
   goneJobs: Set<string>
   livenessScripts: string[]
+  failWritesTo: string
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -63,6 +64,7 @@ function fresh(o: Partial<State> = {}): State {
     mtimes: new Map(),
     goneJobs: new Set(),
     livenessScripts: [],
+    failWritesTo: '',
     ...o,
   }
 }
@@ -88,6 +90,7 @@ function stubs(on: any, s: State) {
     throw new Error(`ENOENT: ${e.path}`)
   })
   on('fs.write', (_$: unknown, e: any) => {
+    if (s.failWritesTo && String(e.path).endsWith(s.failWritesTo)) throw new Error(`EIO: ${e.path}`)
     s.writes.push({ path: e.path, text: e.text })
     s.files.set(e.path, e.text)
     return { value: undefined }
@@ -238,6 +241,20 @@ test('the instance env reaches the systemd unit and the setsid fallback', async 
   await orq($, 'launch codex fixture-model -- no env')
   expect(s.startScripts[1]?.includes('CODEX_HOME')).toBe(false)
   expect(s.startScripts[1]).toContain('--unit=orq-manual-')
+})
+
+test('a launch whose prompt.txt cannot be written lists as failed, not interrupted', async ($, on) => {
+  const s = fresh({ now: 2200000, failWritesTo: '/prompt.txt' })
+  stubs(on, s)
+  await start($)
+  const refused = await orq($, 'launch codex fixture-model -- go')
+  expect(refused).toContain('could not write its job directory')
+  expect(s.startScripts.length).toBe(0)
+  const metaPath = [...s.files.keys()].find((path) => path.startsWith(JOBS) && path.endsWith('/meta.json')) ?? ''
+  const id = metaPath.slice(JOBS.length + 1, -'/meta.json'.length)
+  expect(s.writes.find((w) => w.path === `${JOBS}/${id}/exit`)?.text).toBe('125')
+  s.dirEntries = [{ name: id, kind: 'dir' }]
+  expect(rowStatus(await orq($, 'list'), id)).toBe('failed')
 })
 
 test('refused launches say what is wrong', async ($, on) => {
