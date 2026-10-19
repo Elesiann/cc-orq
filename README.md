@@ -12,9 +12,9 @@ instance and model in every task.
 
 ## Status
 
-Early. This version loads, reads its configuration and logs it. The job
-engine, the `orq:task` agent and the tools land in the next releases; see
-the changelog when it exists.
+Early. This version loads and reads its configuration, runs detached jobs, and
+lets you list, show, cancel and launch them with `/orq`. The `orq:task` agent
+and the MCP tools land in the next releases; see the changelog when it exists.
 
 ## Requirements
 
@@ -39,6 +39,59 @@ For one session only, without installing:
 ```bash
 claude --plugin-dir /path/to/orq
 ```
+
+## Commands
+
+`/orq` takes one subcommand. `list` prints a table, `result` prints a job's
+answer, and `cancel` and `launch` print one line.
+
+### `/orq list`
+
+Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed` and `cwd`.
+Status is `running`, `cancelling`, `interrupted`, `done`, `failed` or
+`cancelled`. An `interrupted` job has no `exit` file and no live supervisor. A
+finished job keeps the elapsed time it had when its `exit` file was written.
+
+```
+/orq list
+```
+
+### `/orq result JOB_ID`
+
+Prints the final message of a finished job, followed by a footer with its kind,
+model, effort, duration, token counts and session id. The footer shows `tokens
+unknown` when the CLI reports no counts. A failed job prints its exit code and
+the last 20 stderr lines, with secrets redacted. A job that has not ended gets
+one line that says it is running, cancelling or interrupted.
+
+```
+/orq result manual-1760000000000-manual-k3j9x2
+```
+
+### `/orq cancel JOB_ID`
+
+Asks the job's supervisor to stop it. The supervisor sends SIGTERM to the job's
+process group, sends SIGKILL after 5 seconds, and records exit code 124. The
+command only writes the request, so the job may show `cancelling` for a few
+seconds.
+
+```
+/orq cancel manual-1760000000000-manual-k3j9x2
+```
+
+### `/orq launch INSTANCE MODEL -- PROMPT`
+
+Starts a job for one instance from `instances`, in the session's working
+directory. Everything after ` -- ` is the prompt. The command prints
+`orq: launched JOB_ID`, or the reason it refused the launch. Replace `my-model`
+with a model your provider CLI accepts.
+
+```
+/orq launch codex my-model -- Run the test suite and list the failing tests
+```
+
+Until the `orq:task` agent brings the permission policy, a manual launch uses
+each provider CLI's own defaults for sandbox, permissions and reasoning effort.
 
 ## Configuration
 
@@ -73,6 +126,38 @@ A file that is not valid JSON falls back to the defaults. A valid file with an
 invalid field keeps the default for that field and drops invalid instances one
 by one. Both cases log a warning naming the field in the debug log
 (`claude --debug-file`).
+
+## Job directory layout
+
+Each job gets its own directory, `<jobsDir>/<id>`. The job id has the form
+`<kind>-<start in ms>-<agent suffix>-<random>`. A manual launch uses `manual`
+for both the kind and the agent suffix, for example
+`manual-1760000000000-manual-k3j9x2`.
+
+| File | Written by | Contents |
+| --- | --- | --- |
+| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id and driver. |
+| `prompt.txt` | `/orq launch` | The prompt, as given. |
+| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
+| `child.log` | start script | The supervisor's own stdout and stderr. |
+| `pgid` | `supervise.sh` | The supervisor's pid. The supervisor leads its process group, so this is also the group id. |
+| `events.jsonl` | `supervise.sh` | The CLI's stdout. For the supported runners it is a JSON event stream. |
+| `stderr.txt` | `supervise.sh` | The CLI's stderr. |
+| `last.txt` | the CLI or `supervise.sh` | The final message. Codex writes it with `-o`. The other runners extract it from the event stream after the run. |
+| `cancel` | `/orq cancel` | A request to stop the job. Only its existence counts. |
+| `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
+| `flags` | nothing in this release | Optional. When present, each non-empty line becomes one extra argument to the CLI. |
+
+The `exit` file holds one number:
+
+- `0`: the CLI finished. The job is `done` when `last.txt` exists, and `failed` otherwise.
+- `124`: the job was cancelled.
+- `125`: the supervisor did not start, so the job never ran.
+- Any other number: the CLI's own exit code. The job is `failed`.
+
+A job without an `exit` file is `running` while its process group, named in
+`pgid`, still exists. When that group is gone, `/orq list` shows the job as
+`interrupted` and leaves its elapsed time as `—`.
 
 ## Development
 
