@@ -1,0 +1,4 @@
+{
+  "description": "orq function hooks",
+  "modules": ["./register.ts"]
+}
