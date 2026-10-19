@@ -200,6 +200,7 @@ function mkdirScript(jobsDir: string, dir: string): string {
 /**
  * Start script for one job. The instance env is passed as --setenv for the
  * systemd unit and as `env K=V` for the setsid fallback, so both reach the CLI.
+ * ORQ_JOB_DIR comes last, so an instance env cannot override the job's own directory.
  */
 export function startScript(args: {
   id: string
@@ -212,7 +213,8 @@ export function startScript(args: {
 }): string {
   const supervisorArgs = [args.supervise, args.dir, args.runner, args.cwd, args.model]
   const supervisorCmd = `bash ${supervisorArgs.map(shellWord).join(' ')} </dev/null >${shellWord(`${args.dir}/child.log`)} 2>&1`
-  const pairs = Object.entries(args.env).map(([k, v]) => shellWord(`${k}=${v}`))
+  const env = { ...args.env, ORQ_JOB_DIR: args.dir }
+  const pairs = Object.entries(env).map(([k, v]) => shellWord(`${k}=${v}`))
   const setenv = pairs.map((pair) => `--setenv=${pair}`).join(' ')
   const envAssign = pairs.join(' ')
   // A job in the caller's cgroup dies with the terminal or session that launched it; a transient user

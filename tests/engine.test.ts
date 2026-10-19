@@ -236,7 +236,7 @@ test('the instance env reaches the systemd unit and the setsid fallback', async 
   await orq($, 'launch codex-work fixture-model -- with env')
   const withEnv = s.startScripts[0] ?? ''
   expect(withEnv).toContain(`--setenv=CODEX_HOME=${CODEX_HOME}`)
-  expect(withEnv).toContain(`setsid env CODEX_HOME=${CODEX_HOME} bash`)
+  expect(withEnv).toContain(`setsid env CODEX_HOME=${CODEX_HOME} ORQ_JOB_DIR=`)
   const metaWithEnv = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
   expect(metaWithEnv.codexHome).toBe(CODEX_HOME)
   expect(metaWithEnv.env).toBeUndefined()
