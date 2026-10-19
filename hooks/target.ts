@@ -27,9 +27,13 @@ export type ResolveTargetInput = {
 
 export type RunnerPolicy = { flags: string[] }
 
-/** One argv item the runner receives unchanged: no leading "-", no control characters. */
+export function hasControlCharacters(text: string): boolean {
+  return /[\u0000-\u001f\u007f]/.test(text)
+}
+
+/** A model name the runner receives as one argv item: no leading "-", no control characters. */
 export function plainArgument(text: string): boolean {
-  return !text.startsWith('-') && !/[\u0000-\u001f\u007f]/.test(text)
+  return !text.startsWith('-') && !hasControlCharacters(text)
 }
 
 function runtimeModeRank(mode: RuntimeMode): number {

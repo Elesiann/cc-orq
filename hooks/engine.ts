@@ -1,7 +1,9 @@
 import type { EngineInterface } from 'claude-code'
 
-import type { DriverKind, OrqConfig } from './config.ts'
+import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
+import { hasControlCharacters, plainArgument } from './target.ts'
 import {
+  DRIVER_RUNNER,
   buildFooter,
   failureSnippet,
   isRecord,
@@ -29,6 +31,17 @@ export type LaunchSpec = {
   env: Record<string, string>
   instanceId: string
   driver: DriverKind
+  /** Extra runner arguments, one argv item each, written to the job's flags file. */
+  flags?: string[]
+}
+
+export type TaskLaunchSpec = {
+  agentId: string
+  instance: InstanceConfig
+  model: string
+  cwd: string
+  prompt: string
+  flags: string[]
 }
 
 export type LaunchResult = { job: JobRecord } | { refusal: string }
@@ -219,6 +232,9 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
     try {
       await $.fs.write(`${dir}/meta.json`, JSON.stringify(meta))
       await $.fs.write(`${dir}/prompt.txt`, spec.prompt)
+      if (spec.flags !== undefined && spec.flags.length > 0) {
+        await $.fs.write(`${dir}/flags`, spec.flags.map((flag) => `${flag}\n`).join(''))
+      }
     } catch (err) {
       await markLaunchFailed($, dir)
       return { refusal: `orq: ${spec.kind} could not write its job directory: ${String(err)}` }
@@ -268,6 +284,31 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
     return { job }
   }
   return { refusal: `orq: ${spec.kind} could not pick a job id without collision` }
+}
+
+/**
+ * Launch one orq:task job. The model and each runner flag reach the CLI as one argv item, so a value
+ * that could read as an option or span lines is refused before anything is written.
+ */
+export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
+  if (!plainArgument(spec.model)) {
+    return { refusal: 'orq: task refused: the model must be one word that does not start with "-" and has no control characters.' }
+  }
+  if (spec.flags.some((flag) => flag === '' || hasControlCharacters(flag))) {
+    return { refusal: 'orq: task refused: a runner flag is empty or contains a control character.' }
+  }
+  return launchJob($, config, {
+    kind: 'task',
+    agentId: spec.agentId,
+    runner: DRIVER_RUNNER[spec.instance.driver],
+    model: spec.model,
+    cwd: spec.cwd,
+    prompt: spec.prompt,
+    env: spec.instance.env ?? {},
+    instanceId: spec.instance.id,
+    driver: spec.instance.driver,
+    flags: spec.flags,
+  })
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. */
