@@ -35,6 +35,14 @@ export type JobRecord = {
   /** The runtime and interaction modes an orq:task job was resolved to; absent on older and manual jobs. */
   runtimeMode?: RuntimeMode
   interactionMode?: InteractionMode
+  /** The checkout the task was launched from. Set only for a worktree task, where cwd is the worktree. */
+  repo?: string
+  /** The commit the task branch was cut from. */
+  baseSha?: string
+  /** The task branch, orq/TASK_ID. */
+  branch?: string
+  /** The task's worktree path, the same as cwd. */
+  worktree?: string
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,6 +76,11 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (runtimeMode) job.runtimeMode = runtimeMode
   const interactionMode = INTERACTION_MODES.find((mode) => mode === raw.interactionMode)
   if (interactionMode) job.interactionMode = interactionMode
+  // Worktree fields are optional and tolerated: a value of the wrong type is ignored, never a reason to drop the job.
+  if (typeof raw.repo === 'string' && raw.repo !== '') job.repo = raw.repo
+  if (typeof raw.baseSha === 'string' && raw.baseSha !== '') job.baseSha = raw.baseSha
+  if (typeof raw.branch === 'string' && raw.branch !== '') job.branch = raw.branch
+  if (typeof raw.worktree === 'string' && raw.worktree !== '') job.worktree = raw.worktree
   return job
 }
 
