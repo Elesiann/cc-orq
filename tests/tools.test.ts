@@ -20,6 +20,10 @@ type State = {
   catalogCalls: string[]
   settings: Record<string, unknown>
   store: Record<string, unknown>
+  /** When set, the engine call named by the flag throws, as a failing engine would. */
+  sessionIdThrow: boolean
+  storeThrow: boolean
+  settingsThrow: boolean
   tools: string[]
   logs: string[]
 }
@@ -63,6 +67,9 @@ function fresh(o: Partial<State> = {}): State {
     catalogCalls: [],
     settings: {},
     store: {},
+    sessionIdThrow: false,
+    storeThrow: false,
+    settingsThrow: false,
     tools: [],
     logs: [],
     ...o,
@@ -79,9 +86,18 @@ function stubs(on: any, s: State) {
     s.logs.push(e.text)
     return { value: undefined }
   })
-  on('session.id', () => ({ value: s.sessionId }))
-  on('settings.read', () => ({ value: s.settings }))
-  on('store.get', (_$: unknown, e: any) => ({ value: s.store[e.key] }))
+  on('session.id', () => {
+    if (s.sessionIdThrow) throw new Error('session unavailable')
+    return { value: s.sessionId }
+  })
+  on('settings.read', () => {
+    if (s.settingsThrow) throw new Error('settings unavailable')
+    return { value: s.settings }
+  })
+  on('store.get', (_$: unknown, e: any) => {
+    if (s.storeThrow) throw new Error('store unavailable')
+    return { value: s.store[e.key] }
+  })
   on('tool.register', (_$: unknown, e: any) => {
     s.tools.push(e.name)
     return { value: { tool: `mcp__orq__${e.name}` } }
@@ -379,6 +395,47 @@ test('capabilities maps an unknown or missing permission mode to approval-requir
     runtimeMode: 'approval-required',
     interactionMode: 'default',
   })
+})
+
+const modesOf = (answer: any) => ({ runtimeMode: answer.runtimeMode, interactionMode: answer.interactionMode })
+
+test('capabilities falls through to the settings when the session id cannot be read', async ($, on) => {
+  const s = fresh({ settings: { permissions: { defaultMode: 'plan' } }, sessionIdThrow: true })
+  stubs(on, s)
+  await start($)
+  expect(modesOf(await call($, 'mcp__orq__capabilities', {}))).toEqual({
+    runtimeMode: 'approval-required',
+    interactionMode: 'plan',
+  })
+})
+
+test('capabilities falls through to the settings when the recorded mode cannot be read', async ($, on) => {
+  const s = fresh({ settings: { permissions: { defaultMode: 'plan' } }, store: { 'perm:session:sess-1': 'acceptEdits' }, storeThrow: true })
+  stubs(on, s)
+  await start($)
+  expect(modesOf(await call($, 'mcp__orq__capabilities', {}))).toEqual({
+    runtimeMode: 'approval-required',
+    interactionMode: 'plan',
+  })
+})
+
+test('capabilities answers the recorded mode when the settings cannot be read', async ($, on) => {
+  const s = fresh({ store: { 'perm:session:sess-1': 'acceptEdits' }, settingsThrow: true })
+  stubs(on, s)
+  await start($)
+  expect(modesOf(await call($, 'mcp__orq__capabilities', {}))).toEqual({
+    runtimeMode: 'auto-accept-edits',
+    interactionMode: 'default',
+  })
+})
+
+test('capabilities answers approval-required when every permission source throws, and still lists the providers', async ($, on) => {
+  const s = fresh({ sessionIdThrow: true, storeThrow: true, settingsThrow: true })
+  stubs(on, s)
+  await start($)
+  const answer = await call($, 'mcp__orq__capabilities', {})
+  expect(modesOf(answer)).toEqual({ runtimeMode: 'approval-required', interactionMode: 'default' })
+  expect(answer.providers.map((p: any) => p.providerInstanceId)).toEqual(['codex', 'opencode'])
 })
 
 test('the catalog probe is cached for ten minutes', async ($, on) => {
