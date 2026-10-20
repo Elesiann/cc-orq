@@ -550,7 +550,7 @@ export function parseLaunch(
   const trimmed = rest.trim()
   const flag = /^--worktree(?:\s+|$)/.exec(trimmed)
   const m = /^(\S+)\s+(\S+)\s+--(?:\s+([\s\S]*))?$/.exec(flag ? trimmed.slice(flag[0].length) : trimmed)
-  if (!m) return { error: 'usage: /orq launch INSTANCE MODEL -- PROMPT' }
+  if (!m) return { error: 'usage: /orq launch [--worktree] INSTANCE MODEL -- PROMPT' }
   const instance = m[1] ?? ''
   const model = m[2] ?? ''
   const prompt = (m[3] ?? '').trim()

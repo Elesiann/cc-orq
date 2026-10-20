@@ -98,7 +98,7 @@ test('the worktree meta fields are read when present and ignored when malformed'
   expect(malformed?.worktree).toBe(undefined)
 })
 
-test('parseLaunch reads --worktree only before the instance, and its usage stays the same', () => {
+test('parseLaunch reads --worktree only before the instance, and its usage names the flag', () => {
   expect(parseLaunch('--worktree codex fixture-model -- do -- it')).toEqual({
     instance: 'codex',
     model: 'fixture-model',
@@ -110,7 +110,7 @@ test('parseLaunch reads --worktree only before the instance, and its usage stays
     model: 'fixture-model',
     prompt: '--worktree go',
   })
-  expect(parseLaunch('--worktree')).toEqual({ error: 'usage: /orq launch INSTANCE MODEL -- PROMPT' })
+  expect(parseLaunch('--worktree')).toEqual({ error: 'usage: /orq launch [--worktree] INSTANCE MODEL -- PROMPT' })
 })
 
 // The kit's $ carries the plugin's own nouns only, so the engine's git, fs and process calls are

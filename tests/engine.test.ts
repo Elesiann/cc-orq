@@ -273,7 +273,7 @@ test('refused launches say what is wrong', async ($, on) => {
     'orq: the model must not start with "-"',
   )
   expect((await orq($, 'launch codex fixture-model go'))).toBe(
-    'orq: usage: /orq launch INSTANCE MODEL -- PROMPT',
+    'orq: usage: /orq launch [--worktree] INSTANCE MODEL -- PROMPT',
   )
   expect(s.mkdirScripts.length).toBe(0)
 })
@@ -588,7 +588,7 @@ test('parseLaunch splits at the first -- and refuses what cannot run', () => {
   expect(parseLaunch('codex fixture-model -- do -- it')).toEqual({ instance: 'codex', model: 'fixture-model', prompt: 'do -- it' })
   expect(parseLaunch('codex fixture-model -- -dash prompt')).toEqual({ instance: 'codex', model: 'fixture-model', prompt: '-dash prompt' })
   expect(parseLaunch('codex fixture-model --')).toEqual({ error: 'the prompt after -- is empty' })
-  expect(parseLaunch('codex -- go')).toEqual({ error: 'usage: /orq launch INSTANCE MODEL -- PROMPT' })
+  expect(parseLaunch('codex -- go')).toEqual({ error: 'usage: /orq launch [--worktree] INSTANCE MODEL -- PROMPT' })
 })
 
 test('shell words, footer, duration, job ids and redaction keep their contracts', () => {

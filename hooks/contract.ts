@@ -103,7 +103,8 @@ export type IntegrateInput = { taskId: string; strategy: IntegrateStrategy }
 export type Integrated = { taskId: string; mergedSha: string; branch: string; worktree: string }
 
 export const INTEGRATE_DESCRIPTION =
-  "Merges a finished task's branch into the checkout the task was launched from. The default strategy " +
+  "Merges a finished task's branch into the checkout the task was launched from. Call it once the task has " +
+  'finished: only its commits are merged, and uncommitted work in the task worktree is not. The default strategy ' +
   'ff-only moves HEAD without a merge commit; merge makes one. A conflict is aborted and its files are ' +
   'listed: redelegate a rebase to the same worker, then integrate again. The task worktree stays in place, ' +
   'and orq never forces a merge.'

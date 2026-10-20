@@ -15,7 +15,7 @@ import {
 } from './engine.ts'
 import { DRIVER_RUNNER, formatDuration, renderTable, type JobRecord, type TableRow } from './types.ts'
 
-const USAGE = 'orq: usage: /orq list | /orq result JOB_ID | /orq cancel JOB_ID | /orq launch INSTANCE MODEL -- PROMPT'
+const USAGE = 'orq: usage: /orq list | /orq result JOB_ID | /orq cancel JOB_ID | /orq launch [--worktree] INSTANCE MODEL -- PROMPT'
 
 /** Declare /orq in the typeahead. Called from session.start. */
 export async function registerOrqCommand($: Pick<EngineInterface, 'command'>): Promise<void> {
