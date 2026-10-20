@@ -13,7 +13,6 @@ import {
   parseRolloutModelEffort,
   TASK_REFUSAL,
   rand36,
-  redactSecrets,
   shellWord,
   type JobRecord,
   type Runner,
@@ -22,7 +21,7 @@ import {
   GIT_TIMEOUT_MS,
   branchFor,
   busyJob,
-  outputLines,
+  gitDetail,
   type JobPlace,
   revParseHeadArgv,
   revParseToplevelArgv,
@@ -218,12 +217,6 @@ async function markLaunchFailed($: Engine, dir: string): Promise<void> {
   } catch {
     /* the refusal the caller returns is the signal */
   }
-}
-
-/** The first line of a git error, redacted and cut, so it can sit in a refusal. */
-function gitDetail(stderr: string): string {
-  const line = outputLines(stderr)[0] ?? ''
-  return line === '' ? '' : `: ${redactSecrets(line).slice(0, 200)}`
 }
 
 /**

@@ -66,7 +66,7 @@ export function isFailure(value: unknown): value is Failure {
  */
 
 export const INTEGRATE_TOOL = 'integrate'
-export const INTEGRATE_TOOL_NAME = `mcp__orq__${INTEGRATE_TOOL}`
+export const INTEGRATE_TOOL_NAME = 'mcp__orq__integrate'
 
 export const FAILURE_CODES = [
   // The directory is not inside a git checkout, or git cannot read the checkout.

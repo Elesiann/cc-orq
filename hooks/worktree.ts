@@ -1,5 +1,5 @@
 import type { IntegrateStrategy } from './contract.ts'
-import { isSafeJobId } from './types.ts'
+import { isSafeJobId, redactSecrets } from './types.ts'
 
 /** Pure planning of the git argv orq runs. No I/O here: the engine and integrate run the argv. */
 
@@ -73,6 +73,12 @@ export type JobPlace = { id: string; cwd: string; worktree?: string; exited: boo
 export function busyJob(jobs: readonly JobPlace[], path: string): string | null {
   const holder = jobs.find((job) => !job.exited && (job.cwd === path || job.worktree === path))
   return holder?.id ?? null
+}
+
+/** The first line of a git error, redacted and cut, so it can sit in a failure message. */
+export function gitDetail(stderr: string): string {
+  const line = outputLines(stderr)[0] ?? ''
+  return line === '' ? '' : `: ${redactSecrets(line).slice(0, 200)}`
 }
 
 /** The non-empty lines of a git list output, kept as git wrote them. */
