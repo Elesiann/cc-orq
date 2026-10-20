@@ -5,7 +5,6 @@
 import type { EngineInterface, On } from 'claude-code'
 
 import {
-  EFFORT_OPTION,
   type CapabilitiesResult,
   type Failure,
   type FailureCode,
@@ -19,9 +18,9 @@ import { loadConfig, type OrqConfig } from './config.ts'
 import { jobView, listJobs, readJobStatus, readMeta, taskStatusOf, writeCancel } from './engine.ts'
 import { formatDuration, isRecord } from './types.ts'
 
-export const CAPABILITIES_TOOL = 'mcp__orq__capabilities'
-export const STATUS_TOOL = 'mcp__orq__status'
-export const CANCEL_TOOL = 'mcp__orq__cancel'
+const CAPABILITIES_TOOL = 'mcp__orq__capabilities'
+const STATUS_TOOL = 'mcp__orq__status'
+const CANCEL_TOOL = 'mcp__orq__cancel'
 
 const NO_INPUT = { type: 'object', properties: {}, required: [], additionalProperties: false }
 const TASK_ID_INPUT = {
@@ -36,7 +35,7 @@ const TOOL_SPECS = [
     name: 'capabilities',
     description:
       'List the orq provider instances (as configured: codex, opencode, antigravity, claudeAgent) with their live models from the catalog probe, ' +
-      `each model's options and allowed values (such as ${EFFORT_OPTION}), each instance's constraints, and the parent session's runtimeMode and interactionMode. ` +
+      `each model's options and allowed values (such as reasoningEffort), each instance's constraints, and the parent session's runtimeMode and interactionMode. ` +
       'Read it before you name a target in an orq:task brief, and do not guess model ids. Takes no input.',
     inputSchema: NO_INPUT,
   },
@@ -122,7 +121,7 @@ async function parentPermissionMode($: EngineInterface): Promise<string | undefi
 }
 
 /** T3's mapping of a Claude Code permission mode to the modes a child task may run in. */
-export function parentRuntimeModeFromPermissionMode(mode: string | undefined): {
+function parentRuntimeModeFromPermissionMode(mode: string | undefined): {
   runtimeMode: RuntimeMode
   interactionMode: InteractionMode
 } {
