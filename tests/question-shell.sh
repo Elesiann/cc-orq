@@ -58,7 +58,7 @@ STUB
 cat > "$T/drive.mjs" <<'DRIVE'
 import { pathToFileURL } from 'node:url'
 const { default: tool } = await import(pathToFileURL(process.argv[2]).href)
-console.log((await tool.execute({ question: process.argv[3] })).output)
+process.stdout.write(`${(await tool.execute({ question: process.argv[3] })).output}\n`)
 DRIVE
 
 # Run from an empty directory: a tool that fell back to a relative path would leave question.txt there.

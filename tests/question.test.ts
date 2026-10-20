@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { QUESTION_FILE, QUESTION_PROTOCOL } from '../hooks/question.ts'
 
 // The child-question paths need only launch, list and result, so this file carries a trimmed copy of
-// the engine.test.ts harness. Shared helpers wait until the O3 and O4 tests settle.
+// the engine.test.ts harness. Shared helpers can move into one file once the suites settle.
 
 const JOBS = '/srv/example/jobs'
 const CODEX_HOME = '/srv/example/codex-home'
