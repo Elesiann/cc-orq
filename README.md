@@ -54,8 +54,8 @@ answer, and `cancel` and `launch` print one line.
 
 Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed` and `cwd`.
 Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
-`cancelled`. A `waiting` job has asked a question and waits for an answer (see
-[Child questions](#child-questions)). An `interrupted` job has no `exit` file and no
+`cancelled`. A `waiting` job has a non-blank `question.txt`, its supervisor is still
+running, and it waits for an answer (see [Child questions](#child-questions)). An `interrupted` job has no `exit` file and no
 live supervisor. A finished job keeps the elapsed time it had when its `exit` file
 was written.
 
@@ -360,12 +360,12 @@ for both the kind and the agent suffix, for example
 | `last.txt` | the CLI or `supervise.sh` | The final message. Codex writes it with `-o`. The other runners extract it from the event stream after the run. |
 | `cancel` | `/orq cancel` | A request to stop the job. Only its existence counts. |
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
-| `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with this file and no `exit` is `waiting`. |
+| `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
 | `flags` | `orq:task` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
 The `exit` file holds one number:
 
-- `0`: the CLI finished. The job is `done` when `last.txt` holds a non-empty final message and the event extractor reports no error. Otherwise it is `failed`. A job that left a `question.txt` is `done` even when `last.txt` is empty.
+- `0`: the CLI finished. The job is `done` when `last.txt` holds a non-empty final message and the event extractor reports no error. Otherwise it is `failed`. A job that left a non-blank `question.txt` is `done` even when `last.txt` is empty.
 - `124`: the job was cancelled.
 - `125`: the supervisor did not start, so the job never ran.
 - Any other number: the CLI's own exit code. The job is `failed`.
@@ -375,10 +375,10 @@ A file that does not hold one whole number, an empty file for example, counts as
 A `meta.json` without `runner` takes the runner of its `driver`. A job with neither
 skips the event extraction, so it is `done` when its exit is 0 and `last.txt` is not empty.
 
-A job without an `exit` file is `waiting` when it has a `question.txt`. Otherwise
-it is `running` while its process group, named in `pgid`, still exists. When that
-group is gone, `/orq list` shows the job as `interrupted` and leaves its elapsed time
-as `—`.
+A job without an `exit` file is `waiting` while its process group, named in `pgid`,
+still exists and its `question.txt` is non-blank. Otherwise it is `running` while
+that group exists. When the group is gone, `/orq list` shows the job as `interrupted`
+and leaves its elapsed time as `—`, whether or not it wrote a question.
 
 ## Child questions
 
@@ -387,9 +387,10 @@ instead of guessing. orq sets `ORQ_JOB_DIR` to the job's own directory in every
 job's environment. The job writes its question to `$ORQ_JOB_DIR/question.txt`,
 prints `BLOCKED:` followed by the question as its final message, and stops.
 
-- While the file exists and the job has not exited, `/orq list` shows the job as
-  `waiting`, and `/orq result` says it is waiting for an answer.
-- When the job exits 0 after writing the file, it is `done`, and `/orq result`
+- While `question.txt` is non-blank, the job has no `exit` file, and its supervisor
+  still runs, `/orq list` shows the job as `waiting`, and `/orq result` says it is
+  waiting for an answer.
+- When the job exits 0 after writing a non-blank question, it is `done`, and `/orq result`
   prints `BLOCKED on a question`, with the question. The parent answers it in a new
   task that carries the original brief plus the answer.
 - A job that fails or is cancelled keeps its failed or cancelled answer, even when
@@ -416,7 +417,8 @@ The tool writes the same file. Without the link, an OpenCode worker still has it
 shell tool, and the paragraph works the same way.
 
 Limit: when a job's supervisor dies after it wrote a question, no `exit` file
-follows. The job stays `waiting`, and it is not reported as `interrupted`.
+follows, so the job is `interrupted`. `/orq result` reports the interruption and
+does not show the question, although the question stays in `question.txt`.
 
 ## Development
 
