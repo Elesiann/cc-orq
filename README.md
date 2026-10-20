@@ -396,7 +396,7 @@ prints `BLOCKED:` followed by the question as its final message, and stops.
 - A job that fails or is cancelled keeps its failed or cancelled answer, even when
   it left a question.
 
-Every `/orq launch` prompt ends with the protocol paragraph, `QUESTION_PROTOCOL` in
+Every `orq:task` and `/orq launch` prompt ends with the protocol paragraph, `QUESTION_PROTOCOL` in
 `hooks/question.ts`. A Codex or Claude worker writes its question with its shell
 tool:
 

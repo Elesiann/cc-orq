@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { QUESTION_PROTOCOL } from '../hooks/question.ts'
 
 const JOBS = '/srv/example/jobs'
 const REPO = '/srv/example/repo'
@@ -267,7 +268,7 @@ test('a header launches one task job on the named instance and the step waits th
     interactionMode: 'default',
   })
   expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('--approve-for-me\n-c\nmodel_reasoning_effort=high\n')
-  expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Say OK.')
+  expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe(`Say OK.\n\n${QUESTION_PROTOCOL}`)
 })
 
 test('a task without an isolation line runs in its own worktree on branch orq/JOB_ID, and meta.json records it', async ($, on) => {
@@ -456,6 +457,22 @@ test('a finished task answers through SubagentHandback under auto mode, with its
   expect(answer.startsWith('OK')).toBe(true)
   expect(answer).toContain('— orq · task · fixture-model')
   expect(answer).toContain(`· taskId ${jobDir(s).split('/').pop()} · session `)
+})
+
+test('a task that exits 0 after writing question.txt hands back BLOCKED with the question and its taskId', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nisolation: shared\nShip it.`, 'auto')
+  await step($, agentId)
+  const dir = jobDir(s)
+  s.files.set(`${dir}/question.txt`, 'Which branch should I target?\n')
+  finish(s, 'BLOCKED: Which branch should I target?')
+  const chunks = await step($, agentId, 1)
+  expect(chunks[0].name).toBe('SubagentHandback')
+  const answer = answerOf(chunks)
+  expect(answer).toContain(`BLOCKED on a question (taskId ${dir.split('/').pop()}): Which branch should I target?`)
+  expect(answer).toContain('Answer it in a new orq:task')
 })
 
 test('a second step after the handback answers with text, not a second handback', async ($, on) => {
