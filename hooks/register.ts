@@ -3,7 +3,7 @@ import { registerEngine, registerOrqCommand } from './commands.ts'
 import { loadConfig } from './config.ts'
 import { registerTask, registerTaskSurface } from './task.ts'
 import { declareIntegrateTool, registerIntegrate } from './integrate.ts'
-import { registerTools } from './tools.ts'
+import { registerTools, startTools } from './tools.ts'
 
 export const register: Register = (on) => {
   registerEngine(on)
@@ -32,6 +32,11 @@ export const register: Register = (on) => {
       await declareIntegrateTool($)
     } catch (err) {
       await $.ui.log(`orq: could not register the integrate tool: ${String(err)}`, { to: 'debug' })
+    }
+    try {
+      await startTools($, (await loadConfig($)).config)
+    } catch (err) {
+      await $.ui.log(`orq: could not declare the tools: ${String(err)}`, { to: 'debug' })
     }
     return next(e)
   })

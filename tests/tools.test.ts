@@ -7,23 +7,64 @@ const CONFIG = JSON.stringify({ jobsDir: JOBS })
 
 type State = {
   now: number
+  sessionId: string
   files: Map<string, string>
   writes: { path: string; text: string }[]
   mtimes: Map<string, number>
   goneJobs: Set<string>
+  dirEntries: { name: string; kind: string }[]
   stderrTail: string
   extractSummary: { tid: string; in: number | null; out: number | null; error: boolean }
+  catalogJson: string
+  catalogExit: number
+  catalogCalls: string[]
+  settings: Record<string, unknown>
+  store: Record<string, unknown>
+  tools: string[]
+  logs: string[]
 }
+
+const CATALOG = JSON.stringify([
+  {
+    instanceId: 'codex',
+    driver: 'codex',
+    displayName: null,
+    enabled: true,
+    installed: true,
+    authenticated: true,
+    unavailableReason: null,
+    models: [{ id: 'fixture-model-1', label: 'Fixture Model One', options: [{ id: 'reasoningEffort', label: 'Reasoning effort', type: 'select', options: [{ id: 'low', label: 'low' }], currentValue: 'low' }] }],
+  },
+  {
+    instanceId: 'opencode',
+    driver: 'opencode',
+    displayName: null,
+    enabled: true,
+    installed: false,
+    authenticated: null,
+    unavailableReason: "Executable 'opencode' was not found on PATH.",
+    models: [],
+  },
+])
 
 function fresh(o: Partial<State> = {}): State {
   return {
     now: 9000000,
+    sessionId: 'sess-1',
     files: new Map([[CONFIG_PATH, CONFIG]]),
     writes: [],
     mtimes: new Map(),
     goneJobs: new Set(),
+    dirEntries: [],
     stderrTail: '',
     extractSummary: { tid: '', in: 0, out: 0, error: false },
+    catalogJson: CATALOG,
+    catalogExit: 0,
+    catalogCalls: [],
+    settings: {},
+    store: {},
+    tools: [],
+    logs: [],
     ...o,
   }
 }
@@ -34,7 +75,21 @@ const result = (exitCode: number, stdout = '') => ({
 
 function stubs(on: any, s: State) {
   on('session.start', () => ({ cwd: '/work' }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_$: unknown, e: any) => {
+    s.logs.push(e.text)
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: s.sessionId }))
+  on('settings.read', () => ({ value: s.settings }))
+  on('store.get', (_$: unknown, e: any) => ({ value: s.store[e.key] }))
+  on('tool.register', (_$: unknown, e: any) => {
+    s.tools.push(e.name)
+    return { value: { tool: `mcp__orq__${e.name}` } }
+  })
+  on('fs.list', (_$: unknown, e: any) => {
+    if (e.path !== JOBS) throw new Error(`ENOENT: ${e.path}`)
+    return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
+  })
   on('env.get', () => ({ value: '/home/test' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('command.register', (_$: unknown, e: any) => ({ value: { command: e.name } }))
@@ -55,6 +110,10 @@ function stubs(on: any, s: State) {
   })
   on('process.run', (_$: unknown, e: any) => {
     const argv: string[] = e.argv
+    if (argv[0] === 'python3' && String(argv[1]).endsWith('catalog.py')) {
+      s.catalogCalls.push(String(e.init?.stdin))
+      return result(s.catalogExit, s.catalogJson + '\n')
+    }
     if (argv[0] === 'python3') return result(0, JSON.stringify(s.extractSummary) + '\n')
     const script = argv[2] ?? ''
     if (script.includes('# orq:stderr')) return result(0, s.stderrTail)
@@ -236,4 +295,132 @@ test('cancel of a finished or interrupted job is task_not_cancellable and writes
   })
   expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
   expect((await call($, 'mcp__orq__cancel', { taskId: 'nope' })).error.code).toBe('task_not_found')
+})
+
+test('capabilities lists the probed providers with the modes of the settings and the probe sees the configured instances', async ($, on) => {
+  const s = fresh({ settings: { permissions: { defaultMode: 'plan' } } })
+  stubs(on, s)
+  await start($)
+  expect(await call($, 'mcp__orq__capabilities', {})).toEqual({
+    parentThreadId: null,
+    inheritedProviderInstanceId: null,
+    inheritedModel: null,
+    runtimeMode: 'approval-required',
+    interactionMode: 'plan',
+    providers: [
+      {
+        providerInstanceId: 'codex',
+        driverKind: 'codex',
+        displayName: null,
+        models: [
+          {
+            id: 'fixture-model-1',
+            label: 'Fixture Model One',
+            options: [
+              {
+                id: 'reasoningEffort',
+                label: 'Reasoning effort',
+                type: 'select',
+                options: [{ id: 'low', label: 'low' }],
+                currentValue: 'low',
+              },
+            ],
+          },
+        ],
+        canRunChildTask: true,
+        canRunCrossProviderChildTask: true,
+        constraints: [],
+      },
+      {
+        providerInstanceId: 'opencode',
+        driverKind: 'opencode',
+        displayName: null,
+        models: [],
+        canRunChildTask: false,
+        canRunCrossProviderChildTask: false,
+        constraints: ['Provider executable is not installed.', "Executable 'opencode' was not found on PATH."],
+      },
+    ],
+    features: {
+      appOwnedSubagents: true,
+      asyncPolling: true,
+      cancellation: true,
+      batchThreadCreation: false,
+      threadManagement: false,
+      incrementalThreadRead: false,
+      scheduledTasks: false,
+      maxBatchThreads: 0,
+    },
+  })
+  expect(JSON.parse(s.catalogCalls[0] ?? '[]')).toEqual([
+    { instanceId: 'codex', driver: 'codex' },
+    { instanceId: 'opencode', driver: 'opencode' },
+    { instanceId: 'claudeAgent', driver: 'claudeAgent' },
+  ])
+})
+
+test('capabilities answers with the mode recorded for the session before the settings default', async ($, on) => {
+  const s = fresh({ settings: { permissions: { defaultMode: 'plan' } }, store: { 'perm:session:sess-1': 'acceptEdits' } })
+  stubs(on, s)
+  await start($)
+  const answer = await call($, 'mcp__orq__capabilities', {})
+  expect({ runtimeMode: answer.runtimeMode, interactionMode: answer.interactionMode }).toEqual({
+    runtimeMode: 'auto-accept-edits',
+    interactionMode: 'default',
+  })
+})
+
+test('capabilities maps an unknown or missing permission mode to approval-required', async ($, on) => {
+  const s = fresh({ settings: { permissions: { defaultMode: 'something-new' } } })
+  stubs(on, s)
+  await start($)
+  const answer = await call($, 'mcp__orq__capabilities', {})
+  expect({ runtimeMode: answer.runtimeMode, interactionMode: answer.interactionMode }).toEqual({
+    runtimeMode: 'approval-required',
+    interactionMode: 'default',
+  })
+})
+
+test('the catalog probe is cached for ten minutes', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  await call($, 'mcp__orq__capabilities', {})
+  await call($, 'mcp__orq__capabilities', {})
+  expect(s.catalogCalls.length).toBe(1)
+  s.now += 9 * 60 * 1000
+  await call($, 'mcp__orq__capabilities', {})
+  expect(s.catalogCalls.length).toBe(1)
+  s.now += 2 * 60 * 1000
+  await call($, 'mcp__orq__capabilities', {})
+  expect(s.catalogCalls.length).toBe(2)
+})
+
+test('a failed catalog probe answers no providers, logs why and is probed again on the next call', async ($, on) => {
+  const s = fresh({ catalogExit: 1, catalogJson: '' })
+  stubs(on, s)
+  await start($)
+  const answer = await call($, 'mcp__orq__capabilities', {})
+  expect(answer.providers).toEqual([])
+  expect(s.logs).toContain('orq: catalog probe failed: Error: catalog.py exited 1')
+  await call($, 'mcp__orq__capabilities', {})
+  expect(s.catalogCalls.length).toBe(2)
+})
+
+test('session.start declares the three tools and logs one unfinished job with its age', async ($, on) => {
+  const s = fresh()
+  s.dirEntries = [
+    { name: 'job-done', kind: 'dir' },
+    { name: 'job-open', kind: 'dir' },
+  ]
+  seedJob(s, 'job-done', 1000000)
+  s.files.set(`${JOBS}/job-done/exit`, '0')
+  s.files.set(`${JOBS}/job-done/last.txt`, 'OK')
+  seedJob(s, 'job-open', 8000000)
+  stubs(on, s)
+  await start($)
+  expect(s.tools).toEqual(['capabilities', 'status', 'cancel'])
+  expect(s.logs.filter((line) => line.startsWith('orq: unfinished'))).toEqual([
+    'orq: unfinished job job-open (manual), started 16m40s ago',
+  ])
 })
