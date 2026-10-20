@@ -88,9 +88,11 @@ async function start($: any) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/srv/example/work' })
 }
 
-async function integrate($: any, args: Record<string, unknown>) {
+// The answer the model reads: a string holding the payload as JSON, parsed here for the assertions.
+async function integrate($: any, args: Record<string, unknown>): Promise<Record<string, any>> {
   const r = await $.tool.call({ tool: 'mcp__orq__integrate', ...args })
-  return r.result as { content: { text: string }[]; isError: boolean; structuredContent: Record<string, unknown> }
+  expect(typeof r.result).toBe('string')
+  return JSON.parse(r.result as string)
 }
 
 // The git subcommands of a call, in order, after checking that each one names the destination with -C.
@@ -105,6 +107,7 @@ test('the tool is declared at session start with the conflict instruction in its
   await start($)
   expect(s.registered.map((t) => t.name)).toEqual(['integrate'])
   expect(s.registered[0]?.description).toContain('redelegate a rebase to the same worker, then integrate again')
+  expect(s.registered[0]?.description).toContain('uncommitted work in the task worktree is not')
   expect(s.registered[0]?.inputSchema).toMatchObject({ required: ['taskId'] })
 })
 
@@ -115,8 +118,7 @@ test('ff-only is the default: the branch moves HEAD with --ff-only and the answe
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK })
-  expect(r.isError).toBe(false)
-  expect(r.structuredContent).toEqual({ ok: true, taskId: TASK, mergedSha: 'newsha0001', branch: BRANCH, worktree: WORKTREE })
+  expect(r).toEqual({ ok: true, taskId: TASK, mergedSha: 'newsha0001', branch: BRANCH, worktree: WORKTREE })
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
@@ -133,7 +135,7 @@ test('strategy merge makes a merge commit with --no-ff --no-edit', async ($, on)
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK, strategy: 'merge' })
-  expect(r.structuredContent).toMatchObject({ ok: true, mergedSha: 'newsha0001' })
+  expect(r).toMatchObject({ ok: true, mergedSha: 'newsha0001' })
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
@@ -150,8 +152,7 @@ test('a dirty destination is refused before any merge', async ($, on) => {
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK })
-  expect(r.isError).toBe(true)
-  expect(r.structuredContent).toMatchObject({ ok: false, code: 'dirty_worktree' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'dirty_worktree' } })
   expect(subcommands(s)).toEqual(['status --porcelain'])
 })
 
@@ -163,7 +164,7 @@ test('a task branch already reachable from HEAD is already_integrated and nothin
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK })
-  expect(r.structuredContent).toMatchObject({ ok: false, code: 'already_integrated' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'already_integrated' } })
   expect(subcommands(s).some((sub) => sub.startsWith('merge --'))).toBe(false)
 })
 
@@ -176,9 +177,8 @@ test('a conflicting merge lists the unmerged files, aborts, and says so', async 
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK, strategy: 'merge' })
-  expect(r.isError).toBe(true)
-  expect(r.structuredContent).toMatchObject({ ok: false, code: 'merge_conflict', files: ['a.txt', 'b/c.txt'] })
-  expect(r.content[0]?.text).toContain('a.txt\nb/c.txt')
+  expect(r).toMatchObject({ ok: false, error: { code: 'merge_conflict', files: ['a.txt', 'b/c.txt'] } })
+  expect(r.error.message).toContain('the merge was aborted')
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
@@ -196,7 +196,7 @@ test('an ff-only merge that cannot fast-forward is not_fast_forward, with no abo
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK })
-  expect(r.structuredContent).toMatchObject({ ok: false, code: 'not_fast_forward' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'not_fast_forward' } })
   expect(subcommands(s).includes('merge --abort')).toBe(false)
 })
 
@@ -204,7 +204,7 @@ test('an unknown task is task_not_found, with no git call', async ($, on) => {
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect((await integrate($, { taskId: 'manual-404' })).structuredContent).toMatchObject({ ok: false, code: 'task_not_found' })
+  expect(await integrate($, { taskId: 'manual-404' })).toMatchObject({ ok: false, error: { code: 'task_not_found' } })
   expect(s.gitCalls.length).toBe(0)
 })
 
@@ -213,7 +213,7 @@ test('a task that ran without a worktree has nothing to merge: no_worktree', asy
   s.files.set(`${JOBS}/${TASK}/meta.json`, JSON.stringify({ id: TASK, kind: 'manual', agentId: 'manual', cwd: REPO, startedAt: 1 }))
   stubs(on, s)
   await start($)
-  expect((await integrate($, { taskId: TASK })).structuredContent).toMatchObject({ ok: false, code: 'no_worktree' })
+  expect(await integrate($, { taskId: TASK })).toMatchObject({ ok: false, error: { code: 'no_worktree' } })
   expect(s.gitCalls.length).toBe(0)
 })
 
@@ -223,7 +223,7 @@ test('a destination that is not a git checkout is not_a_repository, and nothing 
   s.replies.set('status --porcelain', { exitCode: 128, stderr: 'fatal: not a git repository\n' })
   stubs(on, s)
   await start($)
-  expect((await integrate($, { taskId: TASK })).structuredContent).toMatchObject({ ok: false, code: 'not_a_repository' })
+  expect(await integrate($, { taskId: TASK })).toMatchObject({ ok: false, error: { code: 'not_a_repository' } })
   expect(subcommands(s)).toEqual(['status --porcelain'])
 })
 
@@ -232,11 +232,8 @@ test('invalid input is refused at the edge, before git runs', async ($, on) => {
   seedTask(s)
   stubs(on, s)
   await start($)
-  expect((await integrate($, {})).structuredContent).toMatchObject({ ok: false, code: 'invalid_input' })
-  expect((await integrate($, { taskId: TASK, strategy: 'rebase' })).structuredContent).toMatchObject({
-    ok: false,
-    code: 'invalid_input',
-  })
+  expect(await integrate($, {})).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+  expect(await integrate($, { taskId: TASK, strategy: 'rebase' })).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
   expect(s.gitCalls.length).toBe(0)
   expect(parseIntegrateInput({ taskId: TASK })).toEqual({ input: { taskId: TASK, strategy: 'ff-only' } })
 })

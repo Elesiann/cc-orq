@@ -251,6 +251,15 @@ On success the answer gives the merged commit, the branch and the worktree. The
 worktree and the branch stay. Remove them with `git worktree remove` and
 `git branch -d` when you no longer need them.
 
+The model reads one JSON string. A merge answers
+`{"ok": true, "taskId": "...", "mergedSha": "...", "branch": "...", "worktree": "..."}`.
+A refusal answers `{"ok": false, "error": {"code": "...", "message": "..."}}`,
+and `error` also carries `files` when the code is `merge_conflict`:
+
+```json
+{"ok": false, "error": {"code": "merge_conflict", "message": "orq/JOB_ID conflicts with CHECKOUT in 1 file(s); the merge was aborted", "files": ["a.txt"]}}
+```
+
 A refusal names one of these codes:
 
 | Code | Meaning |

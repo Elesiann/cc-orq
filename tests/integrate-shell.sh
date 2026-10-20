@@ -84,7 +84,7 @@ async function integrate(taskId, strategy) {
   const r = await handler(dollar, { tool: 'mcp__orq__integrate', tool_use_id: `use-${taskId}`, ...input }, async () => {
     throw new Error('the integrate tool answers every call itself')
   })
-  return r.result.structuredContent
+  return JSON.parse(r.result)
 }
 
 // A task as the launch writes it: the worktree from prepareWorktree, and the meta.json beside it.
@@ -123,17 +123,17 @@ const first = await integrate(A)
 const headAfterA = must(repo, 'rev-parse', 'HEAD')
 check('ff-only moves the checkout to the task commit and names it', first.ok === true && first.mergedSha === headAfterA && headAfterA === must(planA.worktree, 'rev-parse', 'HEAD'))
 check('the answer keeps the worktree and names the branch', first.branch === `orq/${A}` && first.worktree === planA.worktree)
-check('a second integrate of the same task is already_integrated', (await integrate(A)).code === 'already_integrated')
+check('a second integrate of the same task is already_integrated', (await integrate(A)).error?.code === 'already_integrated')
 
 writeFileSync(`${repo}/notes.txt`, 'untracked\n')
-check('an untracked file in the checkout is dirty_worktree', (await integrate(C)).code === 'dirty_worktree')
+check('an untracked file in the checkout is dirty_worktree', (await integrate(C)).error?.code === 'dirty_worktree')
 rmSync(`${repo}/notes.txt`)
 
 commit(repo, 'shared.txt', 'main change\n', 'main change')
 const ffAfterMove = await integrate(B)
-check('ff-only cannot follow once the checkout moved: not_fast_forward', ffAfterMove.code === 'not_fast_forward')
+check('ff-only cannot follow once the checkout moved: not_fast_forward', ffAfterMove.error?.code === 'not_fast_forward')
 const conflict = await integrate(B, 'merge')
-check('a conflicting merge lists the file', conflict.code === 'merge_conflict' && JSON.stringify(conflict.files) === '["shared.txt"]')
+check('a conflicting merge lists the file', conflict.error?.code === 'merge_conflict' && JSON.stringify(conflict.error.files) === '["shared.txt"]')
 check('the conflict is aborted: no merge in progress, tree clean', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '')
 check('the checkout still points at the main change after the abort', must(repo, 'rev-parse', 'HEAD') === must(repo, 'rev-parse', 'main') && must(repo, 'show', 'HEAD:shared.txt') === 'main change')
 
@@ -142,11 +142,11 @@ const merged = await integrate(C, 'merge')
 check('strategy merge makes a merge commit with both parents', merged.ok === true && must(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length === 3 && merged.mergedSha !== headBeforeC)
 check('the merged checkout holds both sides', must(repo, 'show', 'HEAD:a.txt') === 'task a' && must(repo, 'show', 'HEAD:c.txt') === 'task c')
 
-check('an unknown task is task_not_found', (await integrate('task-nope')).code === 'task_not_found')
+check('an unknown task is task_not_found', (await integrate('task-nope')).error?.code === 'task_not_found')
 const plain = `${home}/plain`
 mkdirSync(plain, { recursive: true })
 writeMeta(D, { repo: plain, cwd: `${plain}-wt/${D}`, baseSha: 'abc123', branch: `orq/${D}`, worktree: `${plain}-wt/${D}` })
-check('a destination outside any checkout is not_a_repository', (await integrate(D)).code === 'not_a_repository')
+check('a destination outside any checkout is not_a_repository', (await integrate(D)).error?.code === 'not_a_repository')
 
 console.log(`pass=${passed} fail=${failed}`)
 process.exit(failed === 0 ? 0 : 1)

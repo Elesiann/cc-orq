@@ -97,29 +97,13 @@ export async function integrate($: Engine, jobsDir: string, input: IntegrateInpu
   }
 }
 
-/** The answer the model reads: one text line, and the same facts as structured content. */
-function answer(outcome: IntegrateOutcome, strategy: IntegrateStrategy) {
-  if ('failure' in outcome) {
-    const { failure } = outcome
-    const files = failure.files ? `\n${failure.files.join('\n')}` : ''
-    const payload = { ok: false, ...failure }
-    return {
-      result: {
-        content: [{ type: 'text', text: `orq: integrate refused: ${failure.code}: ${failure.message}${files}` }],
-        isError: true,
-        structuredContent: payload,
-      },
-    }
-  }
-  const done = outcome.integrated
-  const text = `orq: merged ${done.branch} at ${done.mergedSha} (${strategy}); the worktree ${done.worktree} stays until you remove it`
-  return {
-    result: {
-      content: [{ type: 'text', text }],
-      isError: false,
-      structuredContent: { ok: true, ...done },
-    },
-  }
+/**
+ * The answer the model reads: the payload as one JSON string. A plugin tool answers with a string
+ * result; an MCP-shaped object is read as invalid input by the model.
+ */
+function answer(outcome: IntegrateOutcome) {
+  const payload = 'failure' in outcome ? { ok: false, error: outcome.failure } : { ok: true, ...outcome.integrated }
+  return { result: JSON.stringify(payload) }
 }
 
 /** Declare the integrate tool; called from session.start, since a tool registers before the first prompt. */
@@ -132,9 +116,9 @@ export function registerIntegrate(on: On): void {
   on('tool.call', { tool: INTEGRATE_TOOL_NAME }, async ($, e) => {
     try {
       const parsed = parseIntegrateInput(e)
-      if ('failure' in parsed) return answer({ failure: parsed.failure }, 'ff-only')
+      if ('failure' in parsed) return answer({ failure: parsed.failure })
       const { config } = await loadConfig($)
-      return answer(await integrate($, config.jobsDir, parsed.input), parsed.input.strategy)
+      return answer(await integrate($, config.jobsDir, parsed.input))
     } catch (err) {
       return { deny: `orq: ${INTEGRATE_TOOL_NAME} failed: ${String(err)}` }
     }
