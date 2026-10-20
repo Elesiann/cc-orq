@@ -132,6 +132,16 @@ test('the job directory reaches every CLI as ORQ_JOB_DIR, through the systemd un
   expect(s.startScripts[1]).toContain(`setsid env ORQ_JOB_DIR=${JOBS}/${plain} bash`)
 })
 
+test('an instance env cannot replace ORQ_JOB_DIR in the start script', async ($, on) => {
+  const s = fresh({ now: 2000000 })
+  s.files.set(CONFIG_PATH, JSON.stringify({ jobsDir: JOBS, instances: [{ id: 'evil', driver: 'codex', env: { ORQ_JOB_DIR: '/evil' } }] }))
+  stubs(on, s)
+  await start($)
+  const id = launchedId(await orq($, 'launch evil fixture-model -- no override'))
+  expect(s.startScripts[0]).toContain(`ORQ_JOB_DIR=${JOBS}/${id}`)
+  expect(s.startScripts[0]).not.toContain('/evil')
+})
+
 test('a job that wrote question.txt and has no exit is waiting, and a blank question is not', async ($, on) => {
   const s = fresh({ now: 4600000 })
   s.dirEntries = [
@@ -168,6 +178,21 @@ test('a job that exits 0 after asking lists as done and composes the BLOCKED ans
   expect(rowStatus(await orq($, 'list'), 'job-asked')).toBe('done')
   expect(await orq($, 'result job-asked')).toBe(
     'BLOCKED on a question (taskId job-asked): Use `main` or `release/1.x`? (see $ORQ_JOB_DIR)\n\n' +
+      'Answer it in a new orq:task with the original brief plus the answer.',
+  )
+})
+
+test('a job that exits 0 after asking, with no last.txt, lists as done and answers BLOCKED', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-quiet', kind: 'dir' }]
+  seedJob(s, 'job-quiet', 4000000)
+  s.files.set(`${JOBS}/job-quiet/question.txt`, 'Which database?\n')
+  s.files.set(`${JOBS}/job-quiet/exit`, '0')
+  stubs(on, s)
+  await start($)
+  expect(rowStatus(await orq($, 'list'), 'job-quiet')).toBe('done')
+  expect(await orq($, 'result job-quiet')).toBe(
+    'BLOCKED on a question (taskId job-quiet): Which database?\n\n' +
       'Answer it in a new orq:task with the original brief plus the answer.',
   )
 })

@@ -218,7 +218,6 @@ function mkdirScript(jobsDir: string, dir: string): string {
 /**
  * Start script for one job. The instance env is passed as --setenv for the
  * systemd unit and as `env K=V` for the setsid fallback, so both reach the CLI.
- * ORQ_JOB_DIR comes last, so an instance env cannot override the job's own directory.
  */
 export function startScript(args: {
   id: string
