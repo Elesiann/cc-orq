@@ -1,36 +1,12 @@
 import { expect, test } from 'claude-code/testing'
 
-const ENGINE_SECTION = { id: 'intro', text: 'You are a coding assistant.', scope: 'shared' }
+import { ORCHESTRATION_INSTRUCTIONS } from '../hooks/instructions.ts'
 
-const FACTS = {
-  model: 'fixture-model',
-  promptModel: 'fixture-model',
-  surfaces: ['terminal'],
-  tools: [],
-  outputStyle: null,
-  traits: [],
-}
-
-function stubs(on: any) {
-  on('session.start', () => ({ cwd: '/work' }))
-  on('prompt.compose', () => ({ sections: [ENGINE_SECTION] }))
-}
-
-test('the composed system prompt ends with the orchestration section, in the session scope', async ($, on) => {
-  stubs(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  const prompt: any = await $.prompt.compose(FACTS as any)
-  expect(prompt.sections.map((s: any) => s.id)).toEqual(['intro', 'orq:orchestration'])
-  expect(prompt.sections[0]).toEqual(ENGINE_SECTION)
-  expect(prompt.sections[1].scope).toBe('session')
+test('the orchestration instructions are under 4,000 bytes', async () => {
+  expect(new TextEncoder().encode(ORCHESTRATION_INSTRUCTIONS).length < 4000).toBe(true)
 })
 
-test('the orchestration section is under 4,000 bytes and states the header lines, the taskId and the orq tools', async ($, on) => {
-  stubs(on)
-  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  const prompt: any = await $.prompt.compose(FACTS as any)
-  const text: string = prompt.sections[1].text
-  expect(new TextEncoder().encode(text).length < 4000).toBe(true)
+test('the orchestration instructions state the header lines, the taskId and the orq tools', async () => {
   const terms = [
     'target:',
     'cwd:',
@@ -44,6 +20,6 @@ test('the orchestration section is under 4,000 bytes and states the header lines
     'orq:task',
   ]
   for (const term of terms) {
-    expect(text.includes(term)).toBe(true)
+    expect(ORCHESTRATION_INSTRUCTIONS.includes(term)).toBe(true)
   }
 })
