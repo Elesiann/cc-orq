@@ -55,10 +55,12 @@ export async function integrate($: Engine, jobsDir: string, input: IntegrateInpu
   try {
     const job = await readMeta($, jobsDir, input.taskId)
     if (job === null) return fail('task_not_found', `no task ${input.taskId}`)
-    if (job.repo === undefined || job.branch === undefined || job.worktree === undefined) {
+    const repo = job.repo
+    const branch = job.branch
+    const worktree = job.worktree
+    if (repo === undefined || branch === undefined || worktree === undefined) {
       return fail('no_worktree', `task ${job.id} ran without a worktree, so it has no branch to merge`)
     }
-    const { repo, branch, worktree } = { repo: job.repo, branch: job.branch, worktree: job.worktree }
 
     const status = await run(statusArgv(repo))
     if (status.exitCode !== 0) {
