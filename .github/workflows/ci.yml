@@ -16,3 +16,4 @@ jobs:
       - run: npm test
       - run: bash tests/runners-shell.sh
       - run: bash tests/integrate-shell.sh
+      - run: bash tests/question-shell.sh
