@@ -20,7 +20,7 @@ git -C "$REPO" add shared.txt
 git -C "$REPO" commit -q -m base
 
 cat > "$T/driver.mjs" <<'JS'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
@@ -141,6 +141,20 @@ const headBeforeC = must(repo, 'rev-parse', 'HEAD')
 const merged = await integrate(C, 'merge')
 check('strategy merge makes a merge commit with both parents', merged.ok === true && must(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length === 3 && merged.mergedSha !== headBeforeC)
 check('the merged checkout holds both sides', must(repo, 'show', 'HEAD:a.txt') === 'task a' && must(repo, 'show', 'HEAD:c.txt') === 'task c')
+
+// A pre-merge-commit hook refuses the merge commit. git leaves the merge pending, so integrate must abort it.
+const E = 'task-e'
+const planE = await startTask(E)
+commit(planE.worktree, 'e.txt', 'task e\n', 'task e work')
+commit(repo, 'main.txt', 'main moves on\n', 'main moves on')
+const headBeforeE = must(repo, 'rev-parse', 'HEAD')
+const hook = `${repo}/.git/hooks/pre-merge-commit`
+writeFileSync(hook, '#!/bin/sh\nexit 1\n')
+chmodSync(hook, 0o755)
+const refused = await integrate(E, 'merge')
+check('a merge refused by pre-merge-commit is git_failed, with no MERGE_HEAD, a clean tree and HEAD unmoved', refused.error?.code === 'git_failed' && !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '' && must(repo, 'rev-parse', 'HEAD') === headBeforeE)
+rmSync(hook)
+check('the same task merges once the hook is gone, so the hook was the only cause', (await integrate(E, 'merge')).ok === true)
 
 check('an unknown task is task_not_found', (await integrate('task-nope')).error?.code === 'task_not_found')
 const plain = `${home}/plain`

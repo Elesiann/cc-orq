@@ -8,6 +8,7 @@ import {
   isAncestorArgv,
   mergeAbortArgv,
   mergeArgv,
+  mergeHeadArgv,
   revParseHeadArgv,
   revParseToplevelArgv,
   statusArgv,
@@ -48,6 +49,7 @@ test('the git argv of each step names the checkout with -C and passes no shell s
   expect(isAncestorArgv(CHECKOUT, `orq/${TASK}`)).toEqual(['git', '-C', CHECKOUT, 'merge-base', '--is-ancestor', `orq/${TASK}`, 'HEAD'])
   expect(unmergedFilesArgv(CHECKOUT)).toEqual(['git', '-C', CHECKOUT, 'diff', '--name-only', '--diff-filter=U'])
   expect(mergeAbortArgv(CHECKOUT)).toEqual(['git', '-C', CHECKOUT, 'merge', '--abort'])
+  expect(mergeHeadArgv(CHECKOUT)).toEqual(['git', '-C', CHECKOUT, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'])
 })
 
 test('ff-only and merge differ only in their flags, and neither forces', () => {

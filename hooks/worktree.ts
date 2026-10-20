@@ -45,6 +45,11 @@ export function mergeAbortArgv(cwd: string): string[] {
   return gitArgv(cwd, 'merge', '--abort')
 }
 
+/** Exit 0 while a merge is pending in the checkout, since MERGE_HEAD exists; 1 when none is. */
+export function mergeHeadArgv(cwd: string): string[] {
+  return gitArgv(cwd, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')
+}
+
 /** The branch a task works on: orq/TASK_ID. */
 export function branchFor(taskId: string): string {
   return `orq/${taskId}`

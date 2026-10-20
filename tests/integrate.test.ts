@@ -30,6 +30,8 @@ function clean(s: State, merge: Reply = { exitCode: 0 }) {
   s.replies.set('merge --ff-only', merge)
   s.replies.set('merge --no-ff', merge)
   s.replies.set('rev-parse HEAD', { exitCode: 0, stdout: 'newsha0001\n' })
+  // No merge is in progress unless a test says so: MERGE_HEAD is absent.
+  s.replies.set('rev-parse -q', { exitCode: 1 })
 }
 
 function seedTask(s: State, fields: Record<string, unknown> = {}) {
@@ -174,6 +176,7 @@ test('a conflicting merge lists the unmerged files, aborts, and says so', async 
   clean(s, { exitCode: 1, stdout: 'CONFLICT (content): Merge conflict in a.txt\n' })
   s.replies.set('diff --name-only', { exitCode: 0, stdout: 'a.txt\nb/c.txt\n' })
   s.replies.set('merge --abort', { exitCode: 0 })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
   stubs(on, s)
   await start($)
   const r = await integrate($, { taskId: TASK, strategy: 'merge' })
@@ -184,8 +187,38 @@ test('a conflicting merge lists the unmerged files, aborts, and says so', async 
     `merge-base --is-ancestor ${BRANCH} HEAD`,
     `merge --no-ff --no-edit ${BRANCH}`,
     'diff --name-only --diff-filter=U',
+    'rev-parse -q --verify MERGE_HEAD',
     'merge --abort',
   ])
+})
+
+test('a failed merge that left MERGE_HEAD is aborted even with no unmerged file, and is git_failed', async ($, on) => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, { exitCode: 1, stderr: 'error: pre-merge-commit hook refused the merge\n' })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  stubs(on, s)
+  await start($)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('the merge was aborted')
+  expect(subcommands(s).slice(-2)).toEqual(['rev-parse -q --verify MERGE_HEAD', 'merge --abort'])
+})
+
+test('a merge abort that fails is git_failed, and the message says the checkout may be mid-merge', async ($, on) => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, { exitCode: 1, stdout: 'CONFLICT (content): Merge conflict in a.txt\n' })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: 'a.txt\n' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 128, stderr: 'fatal: abort failed\n' })
+  stubs(on, s)
+  await start($)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('may still be mid-merge')
 })
 
 test('an ff-only merge that cannot fast-forward is not_fast_forward, with no abort', async ($, on) => {
@@ -197,7 +230,13 @@ test('an ff-only merge that cannot fast-forward is not_fast_forward, with no abo
   await start($)
   const r = await integrate($, { taskId: TASK })
   expect(r).toMatchObject({ ok: false, error: { code: 'not_fast_forward' } })
-  expect(subcommands(s).includes('merge --abort')).toBe(false)
+  expect(subcommands(s)).toEqual([
+    'status --porcelain',
+    `merge-base --is-ancestor ${BRANCH} HEAD`,
+    `merge --ff-only ${BRANCH}`,
+    'diff --name-only --diff-filter=U',
+    'rev-parse -q --verify MERGE_HEAD',
+  ])
 })
 
 test('an unknown task is task_not_found, with no git call', async ($, on) => {

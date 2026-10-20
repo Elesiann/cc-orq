@@ -20,6 +20,7 @@ import {
   isAncestorArgv,
   mergeAbortArgv,
   mergeArgv,
+  mergeHeadArgv,
   outputLines,
   revParseHeadArgv,
   statusArgv,
@@ -76,16 +77,21 @@ export async function integrate($: Engine, jobsDir: string, input: IntegrateInpu
 
     const merged = await run(mergeArgv(repo, branch, input.strategy))
     if (merged.exitCode !== 0) {
+      // The unmerged files are read before any abort, since merge --abort clears them from the index.
       const files = outputLines((await run(unmergedFilesArgv(repo))).stdout)
-      if (files.length === 0) {
-        const code = input.strategy === 'ff-only' ? 'not_fast_forward' : 'git_failed'
-        return fail(code, `git merge ${branch} into ${repo} failed${gitDetail(merged.stderr)}`)
+      const pending = (await run(mergeHeadArgv(repo))).exitCode === 0
+      if (pending) {
+        const abort = await run(mergeAbortArgv(repo))
+        if (abort.exitCode !== 0) {
+          return fail('git_failed', `git merge of ${branch} into ${repo} failed, and git merge --abort failed; ${repo} may still be mid-merge${gitDetail(abort.stderr)}`)
+        }
       }
-      const abort = await run(mergeAbortArgv(repo))
-      if (abort.exitCode !== 0) {
-        return fail('git_failed', `merge of ${branch} conflicted and git merge --abort failed; ${repo} may still be mid-merge${gitDetail(abort.stderr)}`, files)
+      if (files.length > 0) {
+        return fail('merge_conflict', `${branch} conflicts with ${repo} in ${files.length} file(s); the merge was aborted`, files)
       }
-      return fail('merge_conflict', `${branch} conflicts with ${repo} in ${files.length} file(s); the merge was aborted`, files)
+      const code = input.strategy === 'ff-only' ? 'not_fast_forward' : 'git_failed'
+      const aborted = pending ? '; the merge was aborted' : ''
+      return fail(code, `git merge ${branch} into ${repo} failed${gitDetail(merged.stderr)}${aborted}`)
     }
 
     const head = await run(revParseHeadArgv(repo))
