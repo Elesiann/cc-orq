@@ -124,7 +124,8 @@ Review the diff on this branch and list the risks.
   CLI as written; orq does not check it against a catalog. `effort` is the
   reasoning effort, one word. `runtime` and `interaction` narrow the session;
   they never widen it. Any other `key=value` is refused.
-- `cwd: /absolute/path` (required): an existing directory.
+- `cwd: /absolute/path` (required): an existing directory, inside the session's
+  working directory or an `allowedRoots` entry (see "Working directory").
 - `isolation: worktree | shared` (default `worktree`). `worktree` is accepted
   but does not isolate yet: the job runs in `cwd`, as `shared` does.
 - `role: implementation | research | review | design | test | general`
@@ -137,8 +138,11 @@ Review the diff on this branch and list the risks.
 ### Permission ceiling
 
 The parent session's permission mode sets the most a task may do. The mode
-comes from the `Agent` call that spawned the task, then from the session's last
-`orq:task` spawn, then from `permissions.defaultMode` in settings.
+comes only from the `Agent` call that spawned that task. When that call set no
+mode, the ceiling is `approval-required` with interaction `default`, and the
+debug log says `orq: ceiling for AGENT_ID: no permission mode captured at spawn`.
+The session's last `orq:task` mode and `permissions.defaultMode` in settings never
+raise a task's ceiling.
 
 | Parent permission mode | Runtime ceiling | Interaction ceiling |
 | --- | --- | --- |
@@ -149,6 +153,15 @@ comes from the `Agent` call that spawned the task, then from the session's last
 | `dontAsk` | `approval-required` | `default` |
 | `bypassPermissions` | `full-access` | `default` |
 | none, or any other value | `approval-required` | `default` |
+
+### Working directory
+
+`cwd` is resolved through symlinks (`realpath`), and the resolved path must lie
+inside the session's working directory or inside one of the `allowedRoots` in
+the configuration. A path outside both is refused with `cwd_out_of_scope`, and
+the answer names the roots. A symlink is judged where it points, so a link inside
+the session that points elsewhere is refused. A path that does not exist, or is
+not a directory, is refused too.
 
 Runtime modes rise in this order: `approval-required`, `auto-accept-edits`,
 `auto`, `full-access`. A task that asks for a broader mode than its ceiling is
@@ -172,6 +185,11 @@ support all four; `opencode` supports `approval-required` and `auto`. The
 permission mode already prompts for dangerous operations.
 
 ### Handback
+
+How a finished task is delivered reads the mode in this order: the task's own
+spawn, then the session's last `orq:task` spawn, then `permissions.defaultMode`
+in settings. This choice only sets the format of the answer. It never changes
+the ceiling above.
 
 A task's job runs detached. The subagent waits on it through `mcp__orq__wait`,
 one call per `waitSeconds` slice, and each call answers `finished`,
@@ -197,6 +215,7 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
 {
   "jobsDir": "~/.cache/orq/jobs",
   "waitSeconds": 120,
+  "allowedRoots": ["~/work/shared"],
   "instances": [
     { "id": "codex", "driver": "codex" },
     { "id": "opencode", "driver": "opencode" },
@@ -210,6 +229,10 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
   starts with `~/`. Default `~/.cache/orq/jobs`.
 - `waitSeconds`: how long one wait step blocks before the next one, between 10 and 600. Keep it
   under 600, the engine's stall limit for a silent subagent. Default 120.
+- `allowedRoots`: directories, as absolute paths or paths that start with `~/`,
+  where an `orq:task` may run besides the session's own working directory. A
+  `cwd` must resolve inside one of them. Default: none. Entries that are not
+  absolute are dropped with a warning in the debug log.
 - `instances`: the provider instances the parent can target. `id` is the name
   used in a task's `target:` line (letters, digits, `_`, `.`, `-`, up to 64
   characters, unique), `driver` is one of `codex`, `opencode`, `antigravity`,
