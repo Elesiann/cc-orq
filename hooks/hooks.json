@@ -1,4 +1,18 @@
 {
-  "description": "orq function hooks",
-  "modules": ["./register.ts"]
+  "description": "orq function hooks, and the SessionStart hook that delivers the orchestration instructions",
+  "modules": ["./register.ts"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }

@@ -238,7 +238,7 @@ test('session start registers the wait tool and the orq:task agent, which runs i
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate'])
+  expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate', 'capabilities', 'status', 'cancel'])
   expect(s.agents.map((a) => a.name)).toEqual(['task'])
   expect(s.agents[0].tools).toEqual(['mcp__orq__wait'])
   expect(s.agents[0].background).toBe(true)

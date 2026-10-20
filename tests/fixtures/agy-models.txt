@@ -1,0 +1,3 @@
+fixture-model-8-high	Fixture Model Eight (High)
+fixture-model-8-low	Fixture Model Eight (Low)
+fixture-model-9	Fixture Model Nine

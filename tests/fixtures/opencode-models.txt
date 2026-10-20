@@ -1,0 +1,4 @@
+fixture-provider-1/fixture-model-4
+fixture-provider-1/fixture-model-5
+fixture-provider-2/fixture-model-6
+fixture-provider-4/fixture-model-7

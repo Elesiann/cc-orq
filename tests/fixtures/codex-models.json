@@ -1,0 +1,65 @@
+{
+ "models": [
+  {
+   "slug": "fixture-model-1",
+   "display_name": "Fixture Model One",
+   "visibility": "list",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+    {
+     "effort": "low",
+     "description": "Fixture effort low"
+    },
+    {
+     "effort": "medium",
+     "description": "Fixture effort medium"
+    },
+    {
+     "effort": "high",
+     "description": "Fixture effort high"
+    },
+    {
+     "effort": "max",
+     "description": "Fixture effort max"
+    }
+   ],
+   "description": "Fixture model for tests."
+  },
+  {
+   "slug": "fixture-model-2",
+   "display_name": "Fixture Model Two",
+   "visibility": "list",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+    {
+     "effort": "low",
+     "description": "Fixture effort low"
+    },
+    {
+     "effort": "medium",
+     "description": "Fixture effort medium"
+    },
+    {
+     "effort": "high",
+     "description": "Fixture effort high"
+    }
+   ]
+  },
+  {
+   "slug": "fixture-model-3",
+   "display_name": "Fixture Model Three",
+   "visibility": "hide",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+    {
+     "effort": "low",
+     "description": "Fixture effort low"
+    },
+    {
+     "effort": "medium",
+     "description": "Fixture effort medium"
+    }
+   ]
+  }
+ ]
+}

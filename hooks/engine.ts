@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation } from './contract.ts'
+import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation, TaskStatus, TaskStatusResult, WorkState } from './contract.ts'
 import { hasControlCharacters, plainArgument } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
 import {
@@ -666,4 +666,58 @@ export function parseLaunch(
   if (model.startsWith('-')) return { error: 'the model must not start with "-"' }
   if (prompt === '') return { error: 'the prompt after -- is empty' }
   return flag ? { instance, model, prompt, worktree: true } : { instance, model, prompt }
+}
+
+/** The task status a job view answers with. A cancel marker on a live job still reads as running. */
+export function taskStatusOf(view: JobView): TaskStatus {
+  switch (view.status) {
+    case 'running':
+    case 'cancelling':
+      return 'running'
+    case 'done':
+      return 'completed'
+    case 'failed':
+      return 'failed'
+    case 'cancelled':
+      return 'cancelled'
+    case 'interrupted':
+      return 'interrupted'
+    case 'waiting':
+      return 'waiting'
+  }
+}
+
+/** A task that has ended has a final result or error for its parent to read: result_available. */
+function workStateOf(status: TaskStatus): WorkState {
+  if (status === 'running' || status === 'queued') return 'working'
+  // A waiting task waits on its parent's answer, not on children of its own.
+  if (status === 'waiting') return 'working'
+  return 'result_available'
+}
+
+const INTERRUPTED_ERROR = 'its supervisor is gone and it left no exit file'
+
+/** One job as the task tools answer it, read from its directory alone. Null for an unknown or unsafe id. */
+export async function readJobStatus($: Engine, config: OrqConfig, jobId: string): Promise<TaskStatusResult | null> {
+  const job = await readMeta($, config.jobsDir, jobId)
+  if (!job) return null
+  const view = await jobView($, job)
+  const status = taskStatusOf(view)
+  const answer: TaskStatusResult = {
+    taskId: job.id,
+    status,
+    workState: workStateOf(status),
+    kind: job.kind,
+    startedAtIso: job.startedAtIso,
+    ...(job.instanceId ? { instanceId: job.instanceId } : {}),
+    ...(job.model ? { model: job.model } : {}),
+    ...(view.endedAt !== null ? { finishedAtIso: new Date(view.endedAt).toISOString() } : {}),
+  }
+  if (view.status === 'done') return { ...answer, result: view.question !== null ? blockedText(job.id, view.question) : view.lastText }
+  if (view.status === 'failed') {
+    const snippet = await stderrSnippet($, job)
+    return { ...answer, error: `failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '') }
+  }
+  if (view.status === 'interrupted') return { ...answer, error: INTERRUPTED_ERROR }
+  return answer
 }
