@@ -504,3 +504,21 @@ test('a wait blocks 240 s at most, the largest waitSeconds the config allows', a
   expect(s.waitCalls[0]?.script).toContain('$(seq 1 120)')
   expect(s.waitCalls[0]?.timeoutMs).toBe(245000)
 })
+
+test('a wait whose script exits with a code other than 0, 11 or 12 answers an error text', async ($, on) => {
+  const s = fresh({ waitExit: 1 })
+  stubs(on, s)
+  seedJob(s)
+  await start($)
+  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toBe('orq: wait failed (exit 1)')
+})
+
+test('a jobs directory with a single quote is quoted in the wait script', async ($, on) => {
+  const s = fresh({ jobsDir: "/srv/example/it's jobs" })
+  stubs(on, s)
+  seedJob(s)
+  await start($)
+  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toMatch(/^still running, /)
+  expect(s.waitCalls[0]?.script).toContain(`[ -e '/srv/example/it'\\''s jobs/${JOB}/exit' ]`)
+  expect(s.waitCalls[0]?.script).toContain(`cat '/srv/example/it'\\''s jobs/${JOB}/pgid'`)
+})

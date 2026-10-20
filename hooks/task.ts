@@ -15,7 +15,7 @@ import {
   runnerPolicy,
   taskPrompt,
 } from './target.ts'
-import { formatDuration, isRecord } from './types.ts'
+import { formatDuration, isRecord, shellWord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -275,14 +275,14 @@ async function* waitStep(e: TurnStepInput, jobId: string): AsyncGenerator<TurnSt
 
 /** Sleeps in 2-second steps until the job exits (0), its supervisor is gone (12), or the budget ends (11). */
 function waitScript(dir: string, iterations: number): string {
-  const exit = `${dir}/exit`
-  const pgid = `${dir}/pgid`
+  const exit = shellWord(`${dir}/exit`)
+  const pgid = shellWord(`${dir}/pgid`)
   return (
     `# orq:wait\nfor i in $(seq 1 ${iterations}); do\n` +
-    `  [ -e '${exit}' ] && exit 0\n` +
-    `  pgid=$(cat '${pgid}' 2>/dev/null | tr -d ' \\t\\n')\n` +
+    `  [ -e ${exit} ] && exit 0\n` +
+    `  pgid=$(cat ${pgid} 2>/dev/null | tr -d ' \\t\\n')\n` +
     `  case "$pgid" in ''|*[!0-9]*) exit 12 ;; esac\n` +
-    `  kill -0 -"$pgid" 2>/dev/null || { [ -e '${exit}' ] && exit 0; exit 12; }\n` +
+    `  kill -0 -"$pgid" 2>/dev/null || { [ -e ${exit} ] && exit 0; exit 12; }\n` +
     `  sleep 2\n` +
     `done\nexit 11`
   )
@@ -347,6 +347,7 @@ export function registerTask(on: On): void {
       })
       if (w.exitCode === 0) return { result: 'finished' }
       if (w.exitCode === 12) return { result: 'supervisor gone' }
+      if (w.exitCode !== 11) return { result: `orq: wait failed (exit ${w.exitCode})` }
       const now = await $.clock.now()
       return { result: `still running, ${formatDuration(now - job.startedAt)}` }
     } catch {
