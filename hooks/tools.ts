@@ -118,7 +118,6 @@ async function probeInstances($: EngineInterface, config: OrqConfig): Promise<Pr
   }
 }
 
-/** A value the engine reads, or undefined when the read rejects, so the caller falls through to the next source. */
 async function readOrUndefined<T>(read: () => Promise<T>): Promise<T | undefined> {
   try {
     return await read()
@@ -127,10 +126,6 @@ async function readOrUndefined<T>(read: () => Promise<T>): Promise<T | undefined
   }
 }
 
-/**
- * The permission mode the parent session runs under: `perm:session:<id>` when recorded, else the settings' defaultMode.
- * A source that cannot be read is skipped, and when none answers the caller maps the mode to approval-required.
- */
 async function parentPermissionMode($: EngineInterface): Promise<string | undefined> {
   const sessionId = await readOrUndefined(() => $.session.id())
   const recorded = sessionId === undefined ? undefined : await readOrUndefined(() => $.store.get(`perm:session:${sessionId}`))

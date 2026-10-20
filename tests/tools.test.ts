@@ -20,7 +20,6 @@ type State = {
   catalogCalls: string[]
   settings: Record<string, unknown>
   store: Record<string, unknown>
-  /** When set, the engine call named by the flag throws, as a failing engine would. */
   sessionIdThrow: boolean
   storeThrow: boolean
   settingsThrow: boolean
