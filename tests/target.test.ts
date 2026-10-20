@@ -12,6 +12,7 @@ import {
   runnerPolicy,
   taskPrompt,
 } from '../hooks/target.ts'
+import { QUESTION_PROTOCOL } from '../hooks/question.ts'
 
 const INSTANCES: InstanceConfig[] = [
   { id: 'codex', driver: 'codex' },
@@ -301,11 +302,12 @@ test('effortFlag returns [] without a non-empty reasoningEffort string', () => {
   expect(effortFlag('codex', [{ id: 'reasoningEffort', value: '' }])).toEqual([])
 })
 
-test('taskPrompt returns the bare task for general and missing roles, and names the role otherwise', () => {
-  expect(taskPrompt('do it', undefined)).toBe('do it')
-  expect(taskPrompt('do it', 'general')).toBe('do it')
-  expect(taskPrompt('do it', 'review')).toBe('Act as the review sub-agent for this task.\n\ndo it')
-  expect(taskPrompt('do it', 'implementation')).toBe('Act as the implementation sub-agent for this task.\n\ndo it')
+test('taskPrompt ends with the question protocol, and names the role only for a role other than general', () => {
+  const tail = `\n\n${QUESTION_PROTOCOL}`
+  expect(taskPrompt('do it', undefined)).toBe(`do it${tail}`)
+  expect(taskPrompt('do it', 'general')).toBe(`do it${tail}`)
+  expect(taskPrompt('do it', 'review')).toBe(`Act as the review sub-agent for this task.\n\ndo it${tail}`)
+  expect(taskPrompt('do it', 'implementation')).toBe(`Act as the implementation sub-agent for this task.\n\ndo it${tail}`)
 })
 
 test('plainArgument refuses a leading dash and control characters, and accepts a plain word', () => {

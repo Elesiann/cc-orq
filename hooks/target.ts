@@ -15,6 +15,7 @@ import {
   type Target,
   type TaskRole,
 } from './contract.ts'
+import { QUESTION_PROTOCOL } from './question.ts'
 
 export type ResolveTargetInput = {
   target: Target
@@ -192,6 +193,8 @@ export function effortFlag(driver: DriverKind, options: readonly OptionSelection
   }
 }
 
+/** The prompt a task job runs: the role line when a role is given, the task, then the question protocol. */
 export function taskPrompt(task: string, role: TaskRole | undefined): string {
-  return role === undefined || role === 'general' ? task : `Act as the ${role} sub-agent for this task.\n\n${task}`
+  const body = role === undefined || role === 'general' ? task : `Act as the ${role} sub-agent for this task.\n\n${task}`
+  return `${body}\n\n${QUESTION_PROTOCOL}`
 }

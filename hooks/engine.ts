@@ -3,6 +3,7 @@ import type { EngineInterface } from 'claude-code'
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
 import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation } from './contract.ts'
 import { hasControlCharacters, plainArgument } from './target.ts'
+import { QUESTION_FILE } from './question.ts'
 import {
   DRIVER_RUNNER,
   buildFooter,
@@ -94,6 +95,12 @@ async function isDirectory($: Engine, path: string): Promise<boolean> {
   }
 }
 
+/** The question a job wrote to question.txt, trimmed; null when the file is missing or blank. */
+async function readQuestion($: Engine, job: JobRecord): Promise<string | null> {
+  const text = ((await readText($, `${job.dir}/${QUESTION_FILE}`)) ?? '').trim()
+  return text === '' ? null : text
+}
+
 async function exists($: Engine, path: string): Promise<boolean> {
   try {
     return await $.fs.exists(path)
@@ -160,26 +167,35 @@ export type Finished = {
   endedAt: number | null
   lastText: string
   summary: StreamSummary | null
+  /** The question a job left in question.txt when it exited 0 and stopped there; null otherwise. */
+  question: string | null
 }
 
 /**
  * The one rule for a job that has ended, shared by /orq list and /orq result. Exit 124 is cancelled.
- * Otherwise the job is done only when the exit is 0, last.txt holds a non-empty message, and the
- * extractor reports no error; anything else is failed.
+ * A clean exit 0 that left a question is done, and its answer is the question. Otherwise the job is
+ * done only when the exit is 0, last.txt holds a non-empty message, and the extractor reports no
+ * error; anything else is failed.
  */
 export async function finishedOutcome($: Engine, job: JobRecord, exitText: string | null): Promise<Finished> {
   const exitCode = parseExit(exitText)
   const endedAt = await mtimeMs($, `${job.dir}/exit`)
-  if (exitCode === 124) return { status: 'cancelled', exitCode, endedAt, lastText: '', summary: null }
+  if (exitCode === 124) return { status: 'cancelled', exitCode, endedAt, lastText: '', summary: null, question: null }
+  const question = await readQuestion($, job)
+  if (exitCode === 0 && question !== null) {
+    return { status: 'done', exitCode, endedAt, lastText: '', summary: null, question }
+  }
   const lastText = (await readText($, `${job.dir}/last.txt`)) ?? ''
-  if (exitCode !== 0 || lastText.trim() === '') return { status: 'failed', exitCode, endedAt, lastText, summary: null }
+  if (exitCode !== 0 || lastText.trim() === '') {
+    return { status: 'failed', exitCode, endedAt, lastText, summary: null, question: null }
+  }
   const summary = job.runner ? await summarizeEvents($, job, job.runner) : null
   const status = summary?.error ? 'failed' : 'done'
-  return { status, exitCode, endedAt, lastText, summary }
+  return { status, exitCode, endedAt, lastText, summary, question: null }
 }
 
 export type JobView =
-  | { status: 'running' | 'cancelling' | 'interrupted'; endedAt: null }
+  | { status: 'running' | 'cancelling' | 'interrupted' | 'waiting'; endedAt: null }
   | Finished
 
 export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
@@ -188,6 +204,7 @@ export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
   const liveness = await jobLiveness($, job)
   if (liveness === 'gone') return { status: 'interrupted', endedAt: null }
   if (liveness === 'running') {
+    if ((await readQuestion($, job)) !== null) return { status: 'waiting', endedAt: null }
     return { status: (await exists($, `${job.dir}/cancel`)) ? 'cancelling' : 'running', endedAt: null }
   }
   return finishedOutcome($, job, await readText($, `${job.dir}/exit`))
@@ -212,7 +229,8 @@ export function startScript(args: {
 }): string {
   const supervisorArgs = [args.supervise, args.dir, args.runner, args.cwd, args.model]
   const supervisorCmd = `bash ${supervisorArgs.map(shellWord).join(' ')} </dev/null >${shellWord(`${args.dir}/child.log`)} 2>&1`
-  const pairs = Object.entries(args.env).map(([k, v]) => shellWord(`${k}=${v}`))
+  const env = { ...args.env, ORQ_JOB_DIR: args.dir }
+  const pairs = Object.entries(env).map(([k, v]) => shellWord(`${k}=${v}`))
   const setenv = pairs.map((pair) => `--setenv=${pair}`).join(' ')
   const envAssign = pairs.join(' ')
   // A job in the caller's cgroup dies with the terminal or session that launched it; a transient user
@@ -586,16 +604,23 @@ async function codexModelEffort(
 }
 
 /** The one-line answer for a job that has not ended, or was interrupted. */
-export function notEndedText(id: string, status: 'running' | 'cancelling' | 'interrupted'): string {
+export function notEndedText(id: string, status: 'running' | 'cancelling' | 'interrupted' | 'waiting'): string {
   if (status === 'running') return `orq: ${id} is still running`
   if (status === 'cancelling') return `orq: ${id} is still cancelling`
+  if (status === 'waiting') return `orq: ${id} is waiting for an answer to its question`
   return `orq: ${id} was interrupted: its supervisor is gone and it left no exit file`
+}
+
+/** The answer for a job that stopped on a question. The parent answers it in a new task, not in this one. */
+export function blockedText(id: string, question: string): string {
+  return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new orq:task with the original brief plus the answer.`
 }
 
 export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord): Promise<string> {
   const view = await jobView($, job)
   if (!('exitCode' in view)) return notEndedText(job.id, view.status)
   if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
+  if (view.question !== null) return blockedText(job.id, view.question)
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return `orq: ${job.id} failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '')
