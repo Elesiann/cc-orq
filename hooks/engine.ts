@@ -86,6 +86,14 @@ async function readText($: Engine, path: string): Promise<string | null> {
   }
 }
 
+async function isDirectory($: Engine, path: string): Promise<boolean> {
+  try {
+    return (await $.fs.stat(path)).kind === 'dir'
+  } catch {
+    return false
+  }
+}
+
 async function exists($: Engine, path: string): Promise<boolean> {
   try {
     return await $.fs.exists(path)
@@ -321,6 +329,16 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string, sc
       // A timeout or a kill can leave a half-made worktree and its branch behind.
       await unwindWorktree($, plan)
       return { failure: { code: 'git_failed', message: `git worktree add ${worktree} did not finish: ${String(err)}` } }
+    }
+    // The worktree holds HEAD only, so an untracked or new cwd has no counterpart there.
+    if (!(await isDirectory($, plan.workdir))) {
+      await unwindWorktree($, plan)
+      return {
+        failure: {
+          code: 'invalid_request',
+          message: `${cwd} is not in HEAD of its checkout, so the worktree has no such directory; commit it, or use isolation: shared`,
+        },
+      }
     }
     return { plan }
   } catch (err) {

@@ -48,7 +48,7 @@ const dollar = {
     exists: async (p) => existsSync(p),
     list: async (dir) => readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, kind: d.isDirectory() ? 'dir' : 'file' })),
     write: async (p, text) => writeFileSync(p, text),
-    stat: async (p) => ({ kind: 'file', size: 0, mtimeMs: statSync(p).mtimeMs, isLink: false }),
+    stat: async (p) => { const st = statSync(p); return { kind: st.isDirectory() ? 'dir' : 'file', size: st.size, mtimeMs: st.mtimeMs, isLink: false } },
   },
   clock: { now: async () => Date.now() },
   env: { get: async (name) => process.env[name] },

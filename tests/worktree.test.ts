@@ -199,6 +199,8 @@ function stubs(on: any, s: State) {
     return { value: undefined }
   })
   on('fs.stat', (_$: unknown, e: any) => {
+    // git worktree add is stubbed, so the worktree it would have made is a directory.
+    if (String(e.path).includes('-wt/')) return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: false } }
     if (!s.files.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file', size: 0, mtimeMs: s.now, isLink: false } }
   })

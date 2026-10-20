@@ -231,9 +231,12 @@ checkout's HEAD when the job started.
 A task whose `cwd` is a subdirectory of its checkout runs in the same
 subdirectory of the worktree. For an `orq:task`, the whole checkout must lie
 inside the session directory or an `allowedRoots` entry, since the worktree
-copies all of it; otherwise the task is refused with `cwd_out_of_scope`. orq
-creates the worktree with the checkout's git hooks and fsmonitor turned off, so
-a hook left in the checkout does not run with orq's rights.
+copies all of it; otherwise the task is refused with `cwd_out_of_scope`. A
+`cwd` that is not in the checkout's HEAD, such as an untracked directory, has
+no counterpart in the worktree, so the task is refused and the worktree is
+removed. orq creates the worktree with the checkout's git hooks and fsmonitor
+turned off. `integrate` runs git in your checkout as you would, so the
+checkout's own hooks run there.
 
 An `orq:task` runs in a worktree unless its header says `isolation: shared`.
 A manual launch asks for one with `--worktree`:

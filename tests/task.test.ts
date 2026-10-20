@@ -55,6 +55,8 @@ type State = {
   toplevel?: string
   /** When set, git worktree add throws, as a timeout would. */
   addThrows: boolean
+  /** When set, the task cwd is missing from HEAD, so the worktree has no such directory. */
+  missingInHead: boolean
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -87,6 +89,7 @@ function fresh(o: Partial<State> = {}): State {
     gitCalls: [],
     notRepo: false,
     addThrows: false,
+    missingInHead: false,
     ...o,
   }
   s.files.set(CONFIG_PATH, configText(s))
@@ -152,6 +155,7 @@ function stubs(on: any, s: State) {
   })
   on('fs.stat', (_$: unknown, e: any) => {
     if (s.statMissing) throw new Error(`ENOENT: ${e.path}`)
+    if (s.missingInHead && String(e.path).includes('-wt/')) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: false } }
   })
   on('process.run', (_$: unknown, e: any) => {
@@ -312,6 +316,18 @@ test('a worktree task whose checkout reaches above the session directory is refu
   const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')))
   expect(answer).toContain('orq: task refused (taskId none): cwd_out_of_scope: the git checkout /srv that holds')
   expect(s.gitCalls.some((argv) => argv.includes('worktree'))).toBe(false)
+  expect(s.startScripts).toEqual([])
+})
+
+test('a task whose cwd is not in HEAD is refused, the worktree and branch are removed, and nothing starts', async ($, on) => {
+  const s = fresh({ toplevel: REPO, missingInHead: true })
+  stubs(on, s)
+  await start($)
+  const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}/scratch\nGo.`, 'auto')))
+  expect(answer).toContain(`invalid_request: ${REPO}/scratch is not in HEAD of its checkout`)
+  const subs = s.gitCalls.map((argv) => argv.filter((a) => !a.startsWith('core.') && a !== '-c').slice(3).join(' '))
+  expect(subs.some((sub) => sub.startsWith('worktree remove --force'))).toBe(true)
+  expect(subs.some((sub) => sub.startsWith('branch -D orq/'))).toBe(true)
   expect(s.startScripts).toEqual([])
 })
 
