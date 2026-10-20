@@ -5,7 +5,7 @@
 import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { loadConfig, type OrqConfig } from './config.ts'
-import { isFailure, type Failure } from './contract.ts'
+import { fail, isFailure, type Failure } from './contract.ts'
 import { composeAnswer, jobLiveness, launchTaskJob, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
 import {
@@ -78,9 +78,17 @@ function parseTaskRun(value: unknown): TaskRun | null {
   return null
 }
 
-/** The permission mode a task's ceiling and handback read: the spawn's, then the session's last, then the settings default. */
-async function permissionMode($: TaskEngine, agentId: string): Promise<string | undefined> {
-  const own = stringValue(await storeRead($, `perm:${agentId}`))
+/** The mode this task's own spawn captured. It is the only input to the task's privilege ceiling. */
+async function spawnPermissionMode($: TaskEngine, agentId: string): Promise<string | undefined> {
+  return stringValue(await storeRead($, `perm:${agentId}`))
+}
+
+/**
+ * The mode that picks how a finished task is delivered: the spawn's, then the session's last orq:task spawn,
+ * then the settings default. It chooses a delivery format, never a privilege.
+ */
+async function handbackPermissionMode($: TaskEngine, agentId: string): Promise<string | undefined> {
+  const own = await spawnPermissionMode($, agentId)
   if (own !== undefined) return own
   const sid = await sessionId($)
   const bySession = sid === undefined ? undefined : stringValue(await storeRead($, `perm:session:${sid}`))
@@ -93,17 +101,80 @@ async function permissionMode($: TaskEngine, agentId: string): Promise<string | 
   }
 }
 
-function refusalText(failure: Failure): string {
-  return `orq: task refused (${failure.error.code}): ${failure.error.message}`
+/** A path with its symlinks resolved through realpath: -e needs the path to exist, -m does not. Null when refused. */
+async function resolvePath($: TaskEngine, path: string, mode: '-e' | '-m'): Promise<string | null> {
+  try {
+    const r = await $.process.run(['realpath', mode, '--', path], { timeoutMs: 10000 })
+    const resolved = r.stdout.trim()
+    return r.exitCode === 0 && resolved.startsWith('/') ? resolved : null
+  } catch {
+    return null
+  }
 }
 
-async function directoryProblem($: TaskEngine, cwd: string): Promise<string | null> {
+/** True when `path` is `root` or lies beneath it, on whole path segments: "/a/bc" is not inside "/a/b". */
+export function isWithin(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
+}
+
+/** The session's directory and each allowedRoots entry, resolved through symlinks. An entry that cannot be resolved is left out. */
+async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
+  let session = ''
   try {
-    const stat = await $.fs.stat(cwd)
-    return stat.kind === 'dir' ? null : `not a directory: ${cwd}`
+    session = await $.session.cwd()
   } catch {
-    return `directory does not exist: ${cwd}`
+    session = ''
   }
+  const roots: string[] = []
+  for (const candidate of [session, ...config.allowedRoots]) {
+    if (candidate === '') continue
+    const resolved = await resolvePath($, candidate, '-m')
+    if (resolved !== null) roots.push(resolved)
+  }
+  return roots
+}
+
+/**
+ * The directory a task runs in, resolved through symlinks. It must lie inside the session's directory or an
+ * allowedRoots entry; a path that does not exist, or is not a directory, is refused too.
+ */
+async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): Promise<{ cwd: string } | { refusal: string }> {
+  const cwd = await resolvePath($, requested, '-e')
+  if (cwd === null) return { refusal: `orq: task refused: directory does not exist: ${requested}` }
+  const roots = await scopeRoots($, config)
+  if (!roots.some((root) => isWithin(cwd, root))) {
+    const named = roots.length > 0 ? roots.join(', ') : 'none'
+    return {
+      refusal: refusalText(fail('cwd_out_of_scope', `cwd ${cwd} is outside the session directory and the allowed roots (${named}).`)),
+    }
+  }
+  try {
+    if ((await $.fs.stat(cwd)).kind === 'dir') return { cwd }
+  } catch {
+    /* reported below as not a directory */
+  }
+  return { refusal: `orq: task refused: not a directory: ${cwd}` }
+}
+
+function firstUserText(messages: { role: string; text: string }[]): string | undefined {
+  return messages.find((message) => message.role === 'user')?.text
+}
+
+/**
+ * A task agent is one whose spawn the mod saw as orq:task. When the spawn was not seen, a first message whose
+ * first line is a target header still serves the agent, under the restrictive ceiling, and the step logs it.
+ */
+async function isTaskAgent($: TaskEngine, agentId: string): Promise<boolean> {
+  if ((await storeRead($, `task:${agentId}`)) === TASK_SUBAGENT) return true
+  const first = firstUserText(await readMessages($, agentId)) ?? ''
+  const firstLine = first.split('\n').find((line) => line.trim() !== '') ?? ''
+  if (!/^\s*target\s*:/i.test(firstLine)) return false
+  await $.ui.log(`orq: task agent ${agentId} was not seen at spawn; serving it by its header`, { to: 'debug' })
+  return true
+}
+
+function refusalText(failure: Failure): string {
+  return `orq: task refused (${failure.error.code}): ${failure.error.message}`
 }
 
 async function readMessages($: TaskEngine, agentId: string): Promise<{ role: string; text: string }[]> {
@@ -117,11 +188,15 @@ async function readMessages($: TaskEngine, agentId: string): Promise<{ role: str
 
 /** Resolve the header against the ceiling and the configured instances, then launch. Every refusal is text. */
 async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string): Promise<TaskRun> {
-  const first = (await readMessages($, agentId)).find((message) => message.role === 'user')
-  if (first === undefined) return { refusal: 'orq: task refused: its prompt could not be read.' }
-  const header = parseTaskHeader(first.text)
+  const text = firstUserText(await readMessages($, agentId))
+  if (text === undefined) return { refusal: 'orq: task refused: its prompt could not be read.' }
+  const header = parseTaskHeader(text)
   if (isFailure(header)) return { refusal: `orq: task refused: ${header.error.message}` }
-  const ceiling = parentRuntimeModeFromPermissionMode(await permissionMode($, agentId))
+  const spawnMode = await spawnPermissionMode($, agentId)
+  if (spawnMode === undefined) {
+    await $.ui.log(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`, { to: 'debug' })
+  }
+  const ceiling = parentRuntimeModeFromPermissionMode(spawnMode)
   const resolved = resolveTarget({
     target: header.target,
     instances: config.instances,
@@ -133,16 +208,16 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (isFailure(resolved)) return { refusal: refusalText(resolved) }
   const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
   if (isFailure(policy)) return { refusal: refusalText(policy) }
-  const problem = await directoryProblem($, header.cwd)
-  if (problem !== null) return { refusal: `orq: task refused: ${problem}` }
+  const scoped = await scopedCwd($, config, header.cwd)
+  if ('refusal' in scoped) return scoped
   if (header.isolation === 'worktree') {
-    await $.ui.log(`orq: isolation worktree is not implemented yet; the task for ${agentId} runs in ${header.cwd}`, { to: 'debug' })
+    await $.ui.log(`orq: isolation worktree is not implemented yet; the task for ${agentId} runs in ${scoped.cwd}`, { to: 'debug' })
   }
   const launched = await launchTaskJob($, config, {
     agentId,
     instance: resolved.instance,
     model: resolved.model,
-    cwd: header.cwd,
+    cwd: scoped.cwd,
     prompt: taskPrompt(header.prompt, header.role),
     flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
   })
@@ -176,7 +251,7 @@ async function cancelRun($: TaskEngine, config: OrqConfig, agentId: string, reas
 
 async function handbackDue($: TaskEngine, agentId: string): Promise<boolean> {
   if ((await storeRead($, `handedback:${agentId}`)) === true) return false
-  const mode = await permissionMode($, agentId)
+  const mode = await handbackPermissionMode($, agentId)
   if (mode === 'auto') return true
   const why = mode === undefined ? 'no permission mode' : `mode is ${mode}, not auto`
   await $.ui.log(`orq: handback skipped for ${agentId}: ${why}`, { to: 'debug' })
@@ -255,7 +330,7 @@ export function registerTask(on: On): void {
 
   on('turn.step', async function* ($, e, next) {
     const agentId = e.agentId
-    if (agentId === undefined || (await storeRead($, `task:${agentId}`)) !== TASK_SUBAGENT) return yield* next(e)
+    if (agentId === undefined || !(await isTaskAgent($, agentId))) return yield* next(e)
     const { config } = await loadConfig($)
     next.signal.addEventListener('abort', () => void cancelRun($, config, agentId, 'turn-abort'), { once: true })
     const run = await runFor($, config, agentId)

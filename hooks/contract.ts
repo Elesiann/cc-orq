@@ -38,6 +38,7 @@ export type FailureCode =
   | 'interaction_mode_escalation_denied'
   | 'invalid_request'
   | 'runtime_mode_unsupported'
+  | 'cwd_out_of_scope'
   | 'merge_conflict'
   | 'dirty_worktree'
   | 'already_integrated'

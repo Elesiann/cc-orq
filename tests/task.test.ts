@@ -3,14 +3,18 @@ import { expect, test } from 'claude-code/testing'
 const JOBS = '/srv/example/jobs'
 const REPO = '/srv/example/repo'
 const CONFIG_PATH = '/home/test/.config/orq/config.json'
-const CONFIG = JSON.stringify({
-  jobsDir: JOBS,
-  instances: [
-    { id: 'codex', driver: 'codex' },
-    { id: 'opencode', driver: 'opencode' },
-  ],
-  waitSeconds: 120,
-})
+// The session runs in SESSION; REPO lies inside it, so a task there is in scope.
+const SESSION = '/srv/example'
+const configText = (allowedRoots: string[]) =>
+  JSON.stringify({
+    jobsDir: JOBS,
+    instances: [
+      { id: 'codex', driver: 'codex' },
+      { id: 'opencode', driver: 'opencode' },
+    ],
+    waitSeconds: 120,
+    allowedRoots,
+  })
 
 type State = {
   now: number
@@ -19,6 +23,9 @@ type State = {
   store: Map<string, unknown>
   messages: { role: string; text: string; toolUses: unknown[] }[]
   settingsMode: string | undefined
+  /** realpath results for paths that are not their own resolution (symlinks). */
+  realpaths: Record<string, string>
+  allowedRoots: string[]
   statMissing: boolean
   tools: any[]
   agents: any[]
@@ -33,13 +40,15 @@ type State = {
 }
 
 function fresh(o: Partial<State> = {}): State {
-  return {
+  const s: State = {
     now: 2000000,
-    files: new Map([[CONFIG_PATH, CONFIG]]),
+    files: new Map(),
     writes: [],
     store: new Map(),
     messages: [],
     settingsMode: undefined,
+    realpaths: {},
+    allowedRoots: [],
     statMissing: false,
     tools: [],
     agents: [],
@@ -53,6 +62,8 @@ function fresh(o: Partial<State> = {}): State {
     summary: { tid: '', in: 0, out: 0, error: false },
     ...o,
   }
+  s.files.set(CONFIG_PATH, configText(s.allowedRoots))
+  return s
 }
 
 const run = (exitCode: number, stdout = '') => ({
@@ -62,7 +73,7 @@ const run = (exitCode: number, stdout = '') => ({
 function stubs(on: any, s: State) {
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: 'sess-1' }))
-  on('session.cwd', () => ({ value: '/work' }))
+  on('session.cwd', () => ({ value: SESSION }))
   on('session.messages', () => ({ value: s.messages }))
   on('env.get', () => ({ value: '/home/test' }))
   on('clock.now', () => ({ value: s.now }))
@@ -105,6 +116,11 @@ function stubs(on: any, s: State) {
   })
   on('process.run', (_$: unknown, e: any) => {
     const argv: string[] = e.argv
+    if (argv[0] === 'realpath') {
+      const path = argv[argv.length - 1] ?? ''
+      if (argv[1] === '-e' && s.statMissing) return run(1)
+      return run(0, `${s.realpaths[path] ?? path}\n`)
+    }
     if (argv[0] === 'python3') return run(0, JSON.stringify(s.summary) + '\n')
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) return run(0)
@@ -355,4 +371,84 @@ test('a wait on an unknown or unsafe job id answers unknown job and runs nothing
   await start($)
   expect((await $.tool.call({ tool: 'mcp__orq__wait', job: '../x' })).result).toBe('unknown job ../x')
   expect((await $.tool.call({ tool: 'mcp__orq__wait' })).result).toBe('unknown job (missing)')
+})
+
+test('a task whose spawn was never seen runs under approval-required, even when the session and settings say auto', async ($, on) => {
+  const s = fresh({ settingsMode: 'auto' })
+  stubs(on, s)
+  await start($)
+  await spawnTask($, s, 'Another task.', 'auto')
+  s.messages = [{ role: 'user', text: `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, toolUses: [] }]
+  const chunks = await step($, 'a-unseen')
+  expect(answerOf(chunks)).toContain('orq: task refused (runtime_mode_escalation_denied)')
+  expect(s.startScripts.length).toBe(0)
+  expect(s.logs).toContain('orq: task agent a-unseen was not seen at spawn; serving it by its header')
+  expect(s.logs).toContain('orq: ceiling for a-unseen: no permission mode captured at spawn, using approval-required')
+})
+
+test('a finished task hands back under the session mode when its spawn captured none, and its ceiling stays approval-required', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  await spawnTask($, s, 'Another task.', 'auto')
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nSay OK.`)
+  await step($, agentId)
+  expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('-s\nread-only\n')
+  finish(s)
+  const chunks = await step($, agentId, 1)
+  expect(chunks[0].name).toBe('SubagentHandback')
+  expect(answerOf(chunks).startsWith('OK')).toBe(true)
+  expect(s.logs).toContain(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`)
+})
+
+test('a cwd inside the session directory is accepted, and the job runs there', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/nested/repo\nGo.`, 'auto')
+  const chunks = await step($, agentId)
+  expect(chunks[0].name).toBe('mcp__orq__wait')
+  expect(s.startScripts[0]).toContain(` codex ${SESSION}/nested/repo fixture-model`)
+})
+
+test('a cwd outside the session directory and the allowed roots is refused with cwd_out_of_scope, naming the roots', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/elsewhere/repo\nGo.', 'auto')
+  const chunks = await step($, agentId)
+  expect(answerOf(chunks)).toBe(
+    'orq: task refused (cwd_out_of_scope): cwd /srv/elsewhere/repo is outside the session directory and the allowed roots (/srv/example).',
+  )
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a cwd under an allowedRoots entry is accepted', async ($, on) => {
+  const s = fresh({ allowedRoots: ['/srv/shared'] })
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/shared/tool\nGo.', 'auto')
+  const chunks = await step($, agentId)
+  expect(chunks[0].name).toBe('mcp__orq__wait')
+  expect(s.startScripts[0]).toContain(' codex /srv/shared/tool fixture-model')
+})
+
+test('a sibling directory that shares a name prefix with the session directory is outside it', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/example-other/repo\nGo.', 'auto')
+  expect(answerOf(await step($, agentId))).toContain('orq: task refused (cwd_out_of_scope)')
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a symlink inside the session directory that resolves outside it is refused', async ($, on) => {
+  const s = fresh({ realpaths: { [`${SESSION}/link`]: '/srv/elsewhere/real' } })
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/link\nGo.`, 'auto')
+  expect(answerOf(await step($, agentId))).toBe(
+    'orq: task refused (cwd_out_of_scope): cwd /srv/elsewhere/real is outside the session directory and the allowed roots (/srv/example).',
+  )
+  expect(s.startScripts.length).toBe(0)
 })
