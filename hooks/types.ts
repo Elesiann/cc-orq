@@ -1,4 +1,5 @@
 import type { DriverKind } from './config.ts'
+import { INTERACTION_MODES, RUNTIME_MODES, type InteractionMode, type RuntimeMode } from './contract.ts'
 
 /** The CLI that runs a job; each provider driver maps to exactly one. */
 export type Runner = 'codex' | 'opencode' | 'agy' | 'claude'
@@ -31,6 +32,9 @@ export type JobRecord = {
   driver?: DriverKind
   /** The CODEX_HOME the job launched with, when its instance set one; the only env value meta.json keeps. */
   codexHome?: string
+  /** The runtime and interaction modes an orq:task job was resolved to; absent on older and manual jobs. */
+  runtimeMode?: RuntimeMode
+  interactionMode?: InteractionMode
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,6 +64,10 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (runner) job.runner = runner
   else if (driver) job.runner = DRIVER_RUNNER[driver]
   if (typeof raw.codexHome === 'string' && raw.codexHome !== '') job.codexHome = raw.codexHome
+  const runtimeMode = RUNTIME_MODES.find((mode) => mode === raw.runtimeMode)
+  if (runtimeMode) job.runtimeMode = runtimeMode
+  const interactionMode = INTERACTION_MODES.find((mode) => mode === raw.interactionMode)
+  if (interactionMode) job.interactionMode = interactionMode
   return job
 }
 
@@ -79,7 +87,13 @@ export function formatDuration(ms: number): string {
   return `${m}m${String(rest).padStart(2, '0')}s`
 }
 
-/** The one footer line of every answer. Null token counts, when the extractor found none, render as `tokens n/a`. */
+/** Starts every refusal a task step answers. "taskId none" tells the parent there is no job to query. */
+export const TASK_REFUSAL = 'orq: task refused (taskId none)'
+
+/**
+ * The one footer line of every answer. The taskId is the job id a parent passes to the job tools. Null token
+ * counts, when the extractor found none, render as `tokens n/a`.
+ */
 export function buildFooter(args: {
   kind: string
   model: string
@@ -87,10 +101,11 @@ export function buildFooter(args: {
   durationMs: number
   inTokens: number | null
   outTokens: number | null
+  taskId: string
   session: string
 }): string {
   const tokens = args.inTokens === null || args.outTokens === null ? 'tokens n/a' : `${args.inTokens}/${args.outTokens} tokens`
-  return `— orq · ${args.kind} · ${args.model} · effort ${args.effort} · ${formatDuration(args.durationMs)} · ${tokens} · session ${args.session}`
+  return `— orq · ${args.kind} · ${args.model} · effort ${args.effort} · ${formatDuration(args.durationMs)} · ${tokens} · taskId ${args.taskId} · session ${args.session}`
 }
 
 /** Read model and effort from the last turn_context of a Codex rollout file. */

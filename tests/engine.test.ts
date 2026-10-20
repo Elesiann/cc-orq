@@ -423,7 +423,7 @@ test('result of a finished codex job is its last message and a footer with the r
   stubs(on, s)
   await start($)
   expect(await orq($, 'result job-ok')).toBe(
-    'The answer is 42.\n\n— orq · manual · fixture-model-rollout · effort high · 2m05s · 1200/34 tokens · session thread-ok',
+    'The answer is 42.\n\n— orq · manual · fixture-model-rollout · effort high · 2m05s · 1200/34 tokens · taskId job-ok · session thread-ok',
   )
   expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
 })
@@ -440,7 +440,7 @@ test('the codex footer probes the CODEX_HOME a job launched with, even when its 
   stubs(on, s)
   await start($)
   expect(await orq($, 'result job-moved')).toBe(
-    'Moved.\n\n— orq · manual · fixture-model-moved · effort low · 2m05s · 5/2 tokens · session thread-moved',
+    'Moved.\n\n— orq · manual · fixture-model-moved · effort low · 2m05s · 5/2 tokens · taskId job-moved · session thread-moved',
   )
   expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
 })
@@ -455,7 +455,7 @@ test('the footer says tokens n/a when the extractor found no counts, as opencode
   stubs(on, s)
   await start($)
   expect(await orq($, 'result job-oc')).toBe(
-    'PONG\n\n— orq · manual · fixture-model · effort n/a · 14s · tokens n/a · session fixture-opencode-session',
+    'PONG\n\n— orq · manual · fixture-model · effort n/a · 14s · tokens n/a · taskId job-oc · session fixture-opencode-session',
   )
   expect(s.probeScripts.length).toBe(0)
 })
@@ -470,7 +470,7 @@ test('a claude job footer names the model from the stream and skips the codex pr
   stubs(on, s)
   await start($)
   expect(await orq($, 'result job-claude')).toBe(
-    'FAKE\n\n— orq · manual · fixture-model-claude · effort n/a · 1m · 11/4 tokens · session ses-claude',
+    'FAKE\n\n— orq · manual · fixture-model-claude · effort n/a · 1m · 11/4 tokens · taskId job-claude · session ses-claude',
   )
   expect(s.probeScripts.length).toBe(0)
 })
@@ -598,8 +598,8 @@ test('shell words, footer, duration, job ids and redaction keep their contracts'
   expect(formatDuration(45000)).toBe('45s')
   expect(formatDuration(725000)).toBe('12m05s')
   expect(
-    buildFooter({ kind: 'manual', model: 'm', effort: 'n/a', durationMs: 60000, inTokens: null, outTokens: null, session: 's' }),
-  ).toBe('— orq · manual · m · effort n/a · 1m · tokens n/a · session s')
+    buildFooter({ kind: 'manual', model: 'm', effort: 'n/a', durationMs: 60000, inTokens: null, outTokens: null, taskId: 'manual-1', session: 's' }),
+  ).toBe('— orq · manual · m · effort n/a · 1m · tokens n/a · taskId manual-1 · session s')
   expect(isSafeJobId('manual-1-a1b2c3d4-xyz')).toBe(true)
   expect(isSafeJobId('../evil')).toBe(false)
   expect(isSafeJobId('a/b')).toBe(false)

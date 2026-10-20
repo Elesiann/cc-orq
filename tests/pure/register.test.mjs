@@ -9,6 +9,8 @@ function harness({ home = '/home/u', text = null, failEnv = false } = {}) {
   register(on, {})
   const $ = {
     command: { register: async () => ({ command: 'orq' }) },
+    tool: { register: async () => ({ tool: 'mcp__orq__wait' }) },
+    agent: { register: async () => ({ agent: 'orq:task' }) },
     env: { get: async () => { if (failEnv) throw new Error('env down'); return home } },
     fs: { exists: async () => text !== null, read: async () => text },
     ui: { log: async (line, opts) => { logs.push([line, opts]) } },

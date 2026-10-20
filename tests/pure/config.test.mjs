@@ -61,13 +61,13 @@ test('bad jobsDir values keep the default and warn', () => {
 })
 
 test('bad waitSeconds values keep the default and warn', () => {
-  for (const text of ['{"waitSeconds":3}', '{"waitSeconds":"120"}', '{"waitSeconds":1e999}', '{"waitSeconds":601}', '{"waitSeconds":null}']) {
+  for (const text of ['{"waitSeconds":3}', '{"waitSeconds":"120"}', '{"waitSeconds":1e999}', '{"waitSeconds":241}', '{"waitSeconds":600}', '{"waitSeconds":null}']) {
     const r = parseConfig(text, HOME)
     assert.equal(r.config.waitSeconds, 120, text)
-    assert.match(r.warning, /waitSeconds must be a number between 10 and 600/, text)
+    assert.match(r.warning, /waitSeconds must be a number between 10 and 240/, text)
   }
   assert.equal(parseConfig(j({ waitSeconds: 10 }), HOME).config.waitSeconds, 10)
-  assert.equal(parseConfig(j({ waitSeconds: 600 }), HOME).config.waitSeconds, 600)
+  assert.equal(parseConfig(j({ waitSeconds: 240 }), HOME).config.waitSeconds, 240)
 })
 
 test('invalid instances are dropped one by one, each with a warning', () => {
@@ -149,4 +149,19 @@ test('loadConfig treats an unset or empty HOME as unset', async () => {
     assert.match(r.warning, /HOME is not set/, String(home))
     assert.equal($.calls.filter((c) => c[0] !== 'env.get').length, 0, String(home))
   }
+})
+
+test('allowedRoots keeps absolute entries after ~ expansion and drops the rest with a warning', () => {
+  const r = parseConfig(j({ allowedRoots: ['~/shared', '/srv/tools', 'relative/x', '', 7, '~'] }), HOME)
+  assert.deepEqual(r.config.allowedRoots, ['/home/u/shared', '/srv/tools', '/home/u'])
+  assert.match(r.warning, /allowedRoots\[2\] must be an absolute path or start with ~\//)
+  assert.match(r.warning, /allowedRoots\[3\] must be an absolute path/)
+  assert.match(r.warning, /allowedRoots\[4\] must be an absolute path/)
+})
+
+test('allowedRoots defaults to none, and a non-array keeps none with a warning', () => {
+  assert.deepEqual(parseConfig(null, HOME).config.allowedRoots, [])
+  const r = parseConfig(j({ allowedRoots: '/srv' }), HOME)
+  assert.deepEqual(r.config.allowedRoots, [])
+  assert.match(r.warning, /allowedRoots must be an array of absolute paths, keeping none/)
 })

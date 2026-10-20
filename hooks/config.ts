@@ -8,10 +8,15 @@ export type InstanceConfig = {
   env?: Record<string, string>
 }
 
+/** The longest a wait call blocks: the engine aborts a subagent silent for 600 s, so each wait stays well under it. */
+export const MAX_WAIT_SECONDS = 240
+
 export type OrqConfig = {
   jobsDir: string
   instances: InstanceConfig[]
   waitSeconds: number
+  /** Absolute directories, besides the session's own, that an orq:task may run in. */
+  allowedRoots: string[]
 }
 
 export const CONFIG_PATH = '.config/orq/config.json'
@@ -25,7 +30,12 @@ export const DEFAULT_INSTANCES: InstanceConfig[] = [
 const DRIVERS: DriverKind[] = ['codex', 'opencode', 'antigravity', 'claudeAgent']
 
 export function defaultConfig(home: string): OrqConfig {
-  return { jobsDir: `${home}/.cache/orq/jobs`, instances: DEFAULT_INSTANCES.map((i) => ({ ...i })), waitSeconds: 120 }
+  return {
+    jobsDir: `${home}/.cache/orq/jobs`,
+    instances: DEFAULT_INSTANCES.map((i) => ({ ...i })),
+    waitSeconds: 120,
+    allowedRoots: [],
+  }
 }
 
 export function expandHome(path: string, home: string): string {
@@ -54,10 +64,23 @@ export function parseConfig(text: string | null, home: string): ParsedConfig {
     if (dir.startsWith('/')) config.jobsDir = dir
     else warnings.push('jobsDir must be an absolute path or start with ~/, keeping the default')
   }
+  if (obj.allowedRoots !== undefined) {
+    if (!Array.isArray(obj.allowedRoots)) {
+      warnings.push('allowedRoots must be an array of absolute paths, keeping none')
+    } else {
+      const roots: string[] = []
+      obj.allowedRoots.forEach((item: unknown, index) => {
+        const dir = typeof item === 'string' ? expandHome(item.trim(), home) : ''
+        if (dir.startsWith('/')) roots.push(dir)
+        else warnings.push(`allowedRoots[${index}] must be an absolute path or start with ~/, dropped`)
+      })
+      config.allowedRoots = roots
+    }
+  }
   if (obj.waitSeconds !== undefined) {
-    const w = obj.waitSeconds
-    if (typeof w === 'number' && Number.isFinite(w) && w >= 10 && w <= 600) config.waitSeconds = Math.floor(w)
-    else warnings.push('waitSeconds must be a number between 10 and 600, keeping the default')
+    const w = typeof obj.waitSeconds === 'number' && Number.isFinite(obj.waitSeconds) ? Math.floor(obj.waitSeconds) : Number.NaN
+    if (w >= 10 && w <= MAX_WAIT_SECONDS) config.waitSeconds = w
+    else warnings.push(`waitSeconds must be a number between 10 and ${MAX_WAIT_SECONDS}, keeping the default`)
   }
   if (obj.instances !== undefined) {
     if (!Array.isArray(obj.instances)) {
