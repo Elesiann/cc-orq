@@ -315,6 +315,16 @@ test('cancel of a running job writes the cancel marker and answers cancel_reques
   expect(marker?.text.startsWith('cancelled at ')).toBe(true)
 })
 
+test('cancel of a waiting job, one that wrote a question and still runs, writes the marker and answers cancel_requested', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-ask', 8000000)
+  s.files.set(`${JOBS}/job-ask/question.txt`, 'Which branch?\n')
+  stubs(on, s)
+  await start($)
+  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-ask' })).toEqual({ taskId: 'job-ask', status: 'cancel_requested' })
+  expect(s.writes.some((w) => w.path === `${JOBS}/job-ask/cancel`)).toBe(true)
+})
+
 test('cancel of a finished or interrupted job is task_not_cancellable and writes nothing', async ($, on) => {
   const s = fresh()
   seedJob(s, 'job-fin', 1000000)
@@ -325,10 +335,10 @@ test('cancel of a finished or interrupted job is task_not_cancellable and writes
   stubs(on, s)
   await start($)
   expect(await call($, 'mcp__orq__cancel', { taskId: 'job-fin' })).toEqual({
-    error: { code: 'task_not_cancellable', message: 'task job-fin is completed, not running' },
+    error: { code: 'task_not_cancellable', message: 'task job-fin is completed, so it has nothing left to cancel' },
   })
   expect(await call($, 'mcp__orq__cancel', { taskId: 'job-int' })).toEqual({
-    error: { code: 'task_not_cancellable', message: 'task job-int is interrupted, not running' },
+    error: { code: 'task_not_cancellable', message: 'task job-int is interrupted, so it has nothing left to cancel' },
   })
   expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
   expect((await call($, 'mcp__orq__cancel', { taskId: 'nope' })).error.code).toBe('task_not_found')

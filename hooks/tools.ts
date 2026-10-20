@@ -57,7 +57,7 @@ const TOOL_SPECS = [
   {
     name: 'cancel',
     description:
-      'Cancel a running orq task. Input: {"taskId": "<id>", "reason": "<optional, up to 200 characters>"}. A running task answers cancel_requested and ends as cancelled once its supervisor stops it. ' +
+      'Cancel a running or waiting orq task. Input: {"taskId": "<id>", "reason": "<optional, up to 200 characters>"}. A running or waiting task answers cancel_requested and ends as cancelled once its supervisor stops it. ' +
       'A task that has already ended answers task_not_cancellable, and nothing is written.',
     inputSchema: CANCEL_INPUT,
   },
@@ -194,7 +194,9 @@ async function cancelAnswer($: EngineInterface, input: unknown): Promise<{ resul
   const job = await readMeta($, config.jobsDir, taskId)
   if (!job) return fail('task_not_found', `no task ${taskId}`)
   const status = taskStatusOf(await jobView($, job))
-  if (status !== 'running') return fail('task_not_cancellable', `task ${taskId} is ${status}, not running`)
+  if (status !== 'running' && status !== 'waiting') {
+    return fail('task_not_cancellable', `task ${taskId} is ${status}, so it has nothing left to cancel`)
+  }
   await writeCancel($, job, reason)
   const answer: TaskCancelResult = { taskId: job.id, status: 'cancel_requested' }
   return { result: JSON.stringify(answer) }

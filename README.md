@@ -304,8 +304,9 @@ conflict for you.
 
 ## Tools
 
-The mod serves three MCP tools, named `mcp__orq__capabilities`,
-`mcp__orq__status` and `mcp__orq__cancel`. Each answers with a JSON text. A
+Beside `mcp__orq__integrate`, the mod serves three MCP tools for the parent
+session, named `mcp__orq__capabilities`, `mcp__orq__status` and
+`mcp__orq__cancel`. Each answers with a JSON text. A
 refusal has the shape `{"error": {"code": "...", "message": "..."}}`, and the
 codes orq answers with are `task_not_found`, `task_not_cancellable` and
 `invalid_request`. A task is one job: its `taskId` is the job id that
@@ -407,9 +408,10 @@ recorded them.
 Takes `{"taskId": "<id>", "reason": "<optional text>"}`. The reason is up to 200
 characters; a longer one, or one that is not text, answers `invalid_request` and
 nothing is written. orq writes it into the cancel marker as `why="..."`. A running
-task answers `{"taskId": "...", "status": "cancel_requested"}` and gets the cancel
-request that the supervisor acts on; it then reads `cancelled`. A task whose cancel
-was already requested still reads `running`, and a repeated cancel answers
+or waiting task answers `{"taskId": "...", "status": "cancel_requested"}` and gets
+the cancel request that the supervisor acts on; it then reads `cancelled`. A task
+whose cancel was already requested still reads `running`, or `waiting` when it has
+written a question, and a repeated cancel answers
 `cancel_requested` again and rewrites the marker with its own reason. A task that
 has ended, or is `interrupted`, answers `task_not_cancellable` and nothing is written.
 
