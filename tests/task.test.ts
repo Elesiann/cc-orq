@@ -22,6 +22,8 @@ type State = {
   writes: { path: string; text: string }[]
   store: Map<string, unknown>
   messages: { role: string; text: string; toolUses: unknown[] }[]
+  /** How many times the mod read the agent's messages to resolve its header. */
+  messageReads: number
   settingsMode: string | undefined
   /** realpath results for paths that are not their own resolution (symlinks). */
   realpaths: Record<string, string>
@@ -50,6 +52,7 @@ function fresh(o: Partial<State> = {}): State {
     writes: [],
     store: new Map(),
     messages: [],
+    messageReads: 0,
     settingsMode: undefined,
     realpaths: {},
     allowedRoots: [],
@@ -81,7 +84,10 @@ function stubs(on: any, s: State) {
   on('session.start', () => ({ cwd: '/work' }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: SESSION }))
-  on('session.messages', () => ({ value: s.messages }))
+  on('session.messages', () => {
+    s.messageReads += 1
+    return { value: s.messages }
+  })
   on('env.get', () => ({ value: '/home/test' }))
   on('clock.now', () => ({ value: s.now }))
   on('ui.log', (_$: unknown, e: any) => {
@@ -521,4 +527,31 @@ test('a jobs directory with a single quote is quoted in the wait script', async 
   expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toMatch(/^still running, /)
   expect(s.waitCalls[0]?.script).toContain(`[ -e '/srv/example/it'\\''s jobs/${JOB}/exit' ]`)
   expect(s.waitCalls[0]?.script).toContain(`cat '/srv/example/it'\\''s jobs/${JOB}/pgid'`)
+})
+
+test('a step after a refusal repeats it, without reading the header again or launching, even once the header would pass', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, 'plan')
+  const first = await step($, agentId)
+  expect(answerOf(first)).toContain('orq: task refused (runtime_mode_escalation_denied)')
+  const reads = s.messageReads
+  s.messages = [{ role: 'user', text: `target: codex fixture-model\ncwd: ${REPO}\nEdit it.`, toolUses: [] }]
+  const second = await step($, agentId, 1)
+  expect(answerOf(second)).toBe(answerOf(first))
+  expect(s.messageReads).toBe(reads)
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a job whose supervisor is gone without an exit file is answered as interrupted', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  await step($, agentId)
+  s.liveExit = 12
+  const chunks = await step($, agentId, 1)
+  expect(chunks.map((c: any) => c.kind)).toEqual(['tool', 'input', 'stop'])
+  expect(answerOf(chunks)).toMatch(/^orq: task-\S+ was interrupted: its supervisor is gone and it left no exit file$/)
 })
