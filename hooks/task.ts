@@ -323,15 +323,23 @@ export function registerTask(on: On): void {
   on('turn.step', async function* ($, e, next) {
     const agentId = e.agentId
     if (agentId === undefined || !(await isTaskAgent($, agentId))) return yield* next(e)
-    const { config } = await loadConfig($)
-    next.signal.addEventListener('abort', () => void cancelRun($, config, agentId, 'turn-abort'), { once: true })
-    const run = await runFor($, config, agentId)
-    if (next.signal.aborted) await cancelRun($, config, agentId, 'turn-abort')
-    if ('refusal' in run) return yield* answerStep($, e, agentId, run.refusal)
-    const job = await readMeta($, config.jobsDir, run.jobId)
-    if (job === null) return yield* answerStep($, e, agentId, `orq: task job ${run.jobId} has no readable metadata.`)
-    if ((await jobLiveness($, job)) === 'running') return yield* waitStep(e, job.id)
-    return yield* answerStep($, e, agentId, await composeAnswer($, config, job))
+    try {
+      const { config } = await loadConfig($)
+      next.signal.addEventListener('abort', () => void cancelRun($, config, agentId, 'turn-abort'), { once: true })
+      const run = await runFor($, config, agentId)
+      if (next.signal.aborted) await cancelRun($, config, agentId, 'turn-abort')
+      if ('refusal' in run) return yield* answerStep($, e, agentId, run.refusal)
+      const job = await readMeta($, config.jobsDir, run.jobId)
+      if (job === null) return yield* answerStep($, e, agentId, `orq: task job ${run.jobId} has no readable metadata.`)
+      if ((await jobLiveness($, job)) === 'running') return yield* waitStep(e, job.id)
+      return yield* answerStep($, e, agentId, await composeAnswer($, config, job))
+    } catch (err) {
+      // Nothing is yielded before the body's last step, so this text is the whole answer. The model never sees a throw.
+      const answer = `orq: task failed: ${err instanceof Error ? err.message : String(err)}`
+      yield { kind: 'text', index: 0, text: answer }
+      yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+      return { turnId: e.turnId, index: e.index, answer, toolUses: [], stopReason: 'end_turn', usage: null }
+    }
   })
 
   on('tool.call', { tool: WAIT_TOOL }, async ($, e, next) => {

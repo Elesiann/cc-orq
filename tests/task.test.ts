@@ -24,6 +24,8 @@ type State = {
   messages: { role: string; text: string; toolUses: unknown[] }[]
   /** How many times the mod read the agent's messages to resolve its header. */
   messageReads: number
+  /** When set, env.get throws, as a failing engine call would. */
+  envThrow: boolean
   settingsMode: string | undefined
   /** realpath results for paths that are not their own resolution (symlinks). */
   realpaths: Record<string, string>
@@ -53,6 +55,7 @@ function fresh(o: Partial<State> = {}): State {
     store: new Map(),
     messages: [],
     messageReads: 0,
+    envThrow: false,
     settingsMode: undefined,
     realpaths: {},
     allowedRoots: [],
@@ -88,7 +91,10 @@ function stubs(on: any, s: State) {
     s.messageReads += 1
     return { value: s.messages }
   })
-  on('env.get', () => ({ value: '/home/test' }))
+  on('env.get', () => {
+    if (s.envThrow) throw new Error('env unavailable')
+    return { value: '/home/test' }
+  })
   on('clock.now', () => ({ value: s.now }))
   on('ui.log', (_$: unknown, e: any) => {
     s.logs.push(String(e.text))
@@ -554,4 +560,16 @@ test('a job whose supervisor is gone without an exit file is answered as interru
   const chunks = await step($, agentId, 1)
   expect(chunks.map((c: any) => c.kind)).toEqual(['tool', 'input', 'stop'])
   expect(answerOf(chunks)).toMatch(/^orq: task-\S+ was interrupted: its supervisor is gone and it left no exit file$/)
+})
+
+test('a step that throws before its answer is answered with an orq task failure, not left to the model', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  s.envThrow = true
+  const chunks = await step($, agentId)
+  expect(chunks.map((c: any) => c.kind)).toEqual(['text', 'stop'])
+  expect(answerOf(chunks).startsWith('orq: task failed: ')).toBe(true)
+  expect(s.startScripts.length).toBe(0)
 })
