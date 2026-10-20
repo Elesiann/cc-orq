@@ -1,0 +1,32 @@
+[
+ {
+  "id": "fixture-provider-1",
+  "name": "Fixture Provider One",
+  "connections": [
+   {
+    "type": "credential"
+   },
+   {
+    "type": "env"
+   }
+  ]
+ },
+ {
+  "id": "fixture-provider-2",
+  "name": "Fixture Provider Two",
+  "connections": [
+   {
+    "type": "credential"
+   }
+  ]
+ },
+ {
+  "id": "fixture-provider-3",
+  "name": "Fixture Provider Three",
+  "connections": [
+   {
+    "type": "env"
+   }
+  ]
+ }
+]

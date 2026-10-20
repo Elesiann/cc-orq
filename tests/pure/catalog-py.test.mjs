@@ -1,0 +1,74 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Runs scripts/catalog.py with fake provider executables first on PATH. Each fake prints one
+// fixture file, so the probe exercises the real script without starting any provider CLI.
+const here = dirname(fileURLToPath(import.meta.url))
+const root = join(here, '..', '..')
+const fixtures = join(root, 'tests', 'fixtures')
+
+function fakeBin(dir) {
+  const bin = join(dir, 'bin')
+  mkdirSync(bin)
+  const cat = (name) => `cat '${join(fixtures, name)}'`
+  const fakes = {
+    codex: `if [ "$1" = debug ] && [ "$2" = models ]; then ${cat('codex-models.json')}; exit 0; fi\nif [ "$1" = login ]; then exit 0; fi\nexit 1`,
+    opencode: `if [ "$1" = auth ]; then ${cat('opencode-auth.json')}; exit 0; fi\nif [ "$1" = models ]; then ${cat('opencode-models.txt')}; exit 0; fi\nexit 1`,
+    agy: `if [ "$1" = models ]; then ${cat('agy-models.txt')}; exit 0; fi\nexit 1`,
+    claude: 'exit 0',
+  }
+  for (const [name, body] of Object.entries(fakes)) {
+    const path = join(bin, name)
+    writeFileSync(path, `#!/bin/bash\n${body}\n`)
+    chmodSync(path, 0o755)
+  }
+  return bin
+}
+
+test('catalog.py probes each configured driver and reports models, auth and unknown drivers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orq-catalog-'))
+  try {
+    const bin = fakeBin(dir)
+    const config = [
+      { instanceId: 'codex', driver: 'codex', env: { CODEX_HOME: '/srv/example/sentinel-home' } },
+      { instanceId: 'opencode', driver: 'opencode' },
+      { instanceId: 'antigravity', driver: 'antigravity' },
+      { instanceId: 'claudeAgent', driver: 'claudeAgent' },
+      { instanceId: 'odd', driver: 'nonexistent' },
+    ]
+    const run = spawnSync('python3', [join(root, 'scripts', 'catalog.py')], {
+      input: JSON.stringify(config),
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    const instances = JSON.parse(run.stdout)
+    const byId = Object.fromEntries(instances.map((i) => [i.instanceId, i]))
+    assert.deepEqual(byId.codex.models.map((m) => m.id), ['fixture-model-1', 'fixture-model-2'])
+    assert.equal(byId.codex.authenticated, true)
+    assert.equal(byId.codex.installed, true)
+    assert.deepEqual(byId.opencode.models.map((m) => m.id), [
+      'fixture-provider-1/fixture-model-4',
+      'fixture-provider-1/fixture-model-5',
+      'fixture-provider-2/fixture-model-6',
+    ])
+    assert.deepEqual(byId.antigravity.models.map((m) => m.id), ['fixture-model-8-high', 'fixture-model-8-low', 'fixture-model-9'])
+    assert.deepEqual(byId.claudeAgent.models.map((m) => m.id), ['haiku', 'sonnet', 'opus'])
+    assert.equal(byId.odd.installed, false)
+    assert.equal(byId.odd.unavailableReason, "Unknown driver 'nonexistent'.")
+    assert.equal(run.stdout.includes('sentinel-home'), false, 'the configured env is never echoed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('catalog.py refuses input that is not a JSON list', () => {
+  const run = spawnSync('python3', [join(root, 'scripts', 'catalog.py')], { input: '{"not": "a list"}', encoding: 'utf8' })
+  assert.equal(run.status, 2)
+  assert.deepEqual(JSON.parse(run.stdout), { error: 'instances config must be a JSON list.' })
+})
