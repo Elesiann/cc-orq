@@ -6,7 +6,6 @@ import {
   branchFor,
   busyJob,
   isAncestorArgv,
-  isSafeTaskId,
   mergeAbortArgv,
   mergeArgv,
   revParseHeadArgv,
@@ -56,13 +55,6 @@ test('ff-only and merge differ only in their flags, and neither forces', () => {
   expect(mergeArgv(CHECKOUT, `orq/${TASK}`, 'merge')).toEqual(['git', '-C', CHECKOUT, 'merge', '--no-ff', '--no-edit', `orq/${TASK}`])
   for (const strategy of ['ff-only', 'merge'] as const) {
     expect(mergeArgv(CHECKOUT, `orq/${TASK}`, strategy).includes('--force')).toBe(false)
-  }
-})
-
-test('a task id is usable as a branch and a directory name, and nothing else', () => {
-  expect(isSafeTaskId(TASK)).toBe(true)
-  for (const bad of ['../x', '-x', 'a/b', 'a.lock', 'end.', '', 'a..b']) {
-    expect(isSafeTaskId(bad)).toBe(false)
   }
 })
 

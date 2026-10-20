@@ -1,5 +1,5 @@
 import type { IntegrateStrategy } from './contract.ts'
-import { isSafeJobId, redactSecrets } from './types.ts'
+import { redactSecrets } from './types.ts'
 
 /** Pure planning of the git argv orq runs. No I/O here: the engine and integrate run the argv. */
 
@@ -56,14 +56,6 @@ export function worktreePathFor(toplevel: string, taskId: string): string {
   const parent = cut <= 0 ? '' : toplevel.slice(0, cut)
   const name = toplevel.slice(cut + 1)
   return `${parent}/${name}-wt/${taskId}`
-}
-
-/**
- * A task id names a branch and a directory, so it must be a job id and must not end in a dot or
- * `.lock`, which git refuses in a ref name.
- */
-export function isSafeTaskId(id: string): boolean {
-  return isSafeJobId(id) && !/\.(lock)?$/.test(id)
 }
 
 /** One job's worktree facts as the busy check reads them from its directory. */
