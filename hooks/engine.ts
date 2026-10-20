@@ -249,10 +249,11 @@ async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
 }
 
 /**
- * The id of a job without an exit file whose cwd or worktree is `path`, or null. It reads the job
- * directory rather than memory, so it holds across sessions.
+ * The id of a live job that runs in `path` or is a worktree of the checkout `path`, or null. A job is live
+ * while its supervisor runs. Only the jobs that hold the path are asked, so a launch does not check every job
+ * in the directory. It reads the job directory rather than memory, so it holds across sessions.
  */
-export async function worktreeBusy($: Engine, jobsDir: string, path: string): Promise<string | null> {
+export async function checkoutBusy($: Engine, jobsDir: string, path: string): Promise<string | null> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
@@ -263,12 +264,12 @@ export async function worktreeBusy($: Engine, jobsDir: string, path: string): Pr
   for (const entry of entries) {
     if (entry.kind !== 'dir') continue
     const job = await readMeta($, jobsDir, entry.name)
-    if (job === null) continue
+    if (job === null || (job.cwd !== path && job.repo !== path)) continue
     places.push({
       id: job.id,
       cwd: job.cwd,
-      ...(job.worktree !== undefined ? { worktree: job.worktree } : {}),
-      exited: await exists($, `${job.dir}/exit`),
+      ...(job.repo !== undefined ? { repo: job.repo } : {}),
+      live: (await jobLiveness($, job)) === 'running',
     })
   }
   return busyJob(places, path)
@@ -277,9 +278,9 @@ export async function worktreeBusy($: Engine, jobsDir: string, path: string): Pr
 /**
  * Plan and create the worktree of task TASK_ID: REPO_PARENT/REPO_NAME-wt/TASK_ID on a new branch
  * orq/TASK_ID, cut from the checkout's HEAD. Refuses, and creates nothing, when cwd is not a git
- * checkout or a live job already uses that path.
+ * checkout. The path names the id the launch has just claimed, so no other job can hold it.
  */
-export async function prepareWorktree($: Engine, cwd: string, taskId: string, jobsDir: string): Promise<WorktreeResult> {
+export async function prepareWorktree($: Engine, cwd: string, taskId: string): Promise<WorktreeResult> {
   try {
     const top = await $.process.run(revParseToplevelArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
     if (top.exitCode !== 0) {
@@ -292,10 +293,6 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string, jo
       return { failure: { code: 'git_failed', message: `${cwd} has no HEAD commit to start a worktree from${gitDetail(head.stderr)}` } }
     }
     const worktree = worktreePathFor(toplevel, taskId)
-    const busy = await worktreeBusy($, jobsDir, worktree)
-    if (busy !== null) {
-      return { failure: { code: 'worktree_busy', message: `${worktree} is in use by job ${busy}` } }
-    }
     const branch = branchFor(taskId)
     const add = await $.process.run(worktreeAddArgv(cwd, worktree, branch, baseSha), { timeoutMs: GIT_TIMEOUT_MS })
     if (add.exitCode !== 0) {
@@ -330,13 +327,20 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
     let cwd = spec.cwd
     let plan: WorktreePlan | null = null
     if (spec.isolation === 'worktree') {
-      const prepared = await prepareWorktree($, spec.cwd, id, config.jobsDir)
+      const prepared = await prepareWorktree($, spec.cwd, id)
       if ('failure' in prepared) {
         await markLaunchFailed($, dir)
         return { refusal: `orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}` }
       }
       plan = prepared.plan
       cwd = plan.worktree
+    } else {
+      // A shared launch writes into its checkout, so a live job there, or in a worktree of it, refuses it.
+      const busy = await checkoutBusy($, config.jobsDir, spec.cwd)
+      if (busy !== null) {
+        await markLaunchFailed($, dir)
+        return { refusal: `orq: ${spec.kind} refused: worktree_busy: ${spec.cwd} is in use by job ${busy}` }
+      }
     }
     const worktreeFields = plan
       ? { repo: plan.repo, baseSha: plan.baseSha, branch: plan.branch, worktree: plan.worktree }

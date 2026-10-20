@@ -71,7 +71,7 @@ export const INTEGRATE_TOOL_NAME = 'mcp__orq__integrate'
 export const FAILURE_CODES = [
   // The directory is not inside a git checkout, or git cannot read the checkout.
   'not_a_repository',
-  // Another job without an exit file already uses the worktree path.
+  // A shared launch into a checkout where a live job runs, or is a worktree of it. Worktree launches are never refused for it.
   'worktree_busy',
   // No meta.json for the task id.
   'task_not_found',

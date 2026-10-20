@@ -89,7 +89,7 @@ async function integrate(taskId, strategy) {
 
 // A task as the launch writes it: the worktree from prepareWorktree, and the meta.json beside it.
 async function startTask(taskId) {
-  const r = await prepareWorktree(dollar, repo, taskId, jobsDir)
+  const r = await prepareWorktree(dollar, repo, taskId)
   if ('failure' in r) throw new Error(`prepareWorktree refused ${taskId}: ${r.failure.code}`)
   writeMeta(taskId, { repo, baseSha: r.plan.baseSha, branch: r.plan.branch, worktree: r.plan.worktree, cwd: r.plan.worktree })
   return r.plan

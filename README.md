@@ -234,9 +234,10 @@ In this version, worktree isolation is available through `/orq launch
 ```
 
 The launch starts nothing and says why when the directory is not inside a git
-checkout (`not_a_repository`), when a job without an exit file already uses the
-worktree path (`worktree_busy`), or when git cannot create the worktree
-(`git_failed`).
+checkout (`not_a_repository`), or when git cannot create the worktree
+(`git_failed`). A launch without `--worktree` writes into its directory, so it is
+refused with `worktree_busy` while a live job runs there or in a worktree of
+that checkout. A `--worktree` launch is never refused for that.
 
 A launch that fails after git created its worktree removes that worktree and
 its branch again, on a best-effort basis. When that removal fails, the debug log

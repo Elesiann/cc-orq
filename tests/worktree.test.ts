@@ -72,17 +72,18 @@ test('ff-only and merge differ only in their flags, and neither forces', () => {
   }
 })
 
-test('a job without an exit file that holds the path as cwd or worktree is busy, and only that one', () => {
-  const path = `${CHECKOUT}-wt/${TASK}`
+test('a live job is busy for the checkout it runs in or is a worktree of, and only that one', () => {
+  const worktree = `${CHECKOUT}-wt/${TASK}`
   const jobs: JobPlace[] = [
-    { id: 'job-finished', cwd: path, exited: true },
-    { id: 'job-elsewhere', cwd: SESSION, worktree: '/srv/example/other-wt/x', exited: false },
-    { id: 'job-cwd', cwd: path, exited: false },
-    { id: 'job-wt', cwd: SESSION, worktree: path, exited: false },
+    { id: 'job-dead', cwd: CHECKOUT, live: false },
+    { id: 'job-elsewhere', cwd: SESSION, repo: '/srv/example/other', live: true },
+    { id: 'job-cwd', cwd: CHECKOUT, live: true },
+    { id: 'job-wt', cwd: worktree, repo: CHECKOUT, live: true },
   ]
-  expect(busyJob(jobs, path)).toBe('job-cwd')
-  expect(busyJob(jobs.slice(0, 2), path)).toBe(null)
-  expect(busyJob([{ id: 'job-wt', cwd: SESSION, worktree: path, exited: false }], path)).toBe('job-wt')
+  expect(busyJob(jobs, CHECKOUT)).toBe('job-cwd')
+  expect(busyJob(jobs.slice(0, 2), CHECKOUT)).toBe(null)
+  expect(busyJob([{ id: 'job-wt', cwd: worktree, repo: CHECKOUT, live: true }], CHECKOUT)).toBe('job-wt')
+  expect(busyJob([{ id: 'job-wt', cwd: worktree, repo: CHECKOUT, live: true }], worktree)).toBe('job-wt')
 })
 
 test('the worktree meta fields are read when present and ignored when malformed', () => {
@@ -141,7 +142,7 @@ type State = {
   gitCalls: string[][]
   mkdirScripts: string[]
   startScripts: string[]
-  beforeList: (() => void) | null
+  live: Set<string>
   failWrite: ((path: string) => boolean) | null
   startExit: number
   logs: { text: string; to: string }[]
@@ -157,7 +158,7 @@ function fresh(o: Partial<State> = {}): State {
     gitCalls: [],
     mkdirScripts: [],
     startScripts: [],
-    beforeList: null,
+    live: new Set(),
     failWrite: null,
     startExit: 0,
     logs: [],
@@ -198,7 +199,6 @@ function stubs(on: any, s: State) {
     return { value: { kind: 'file', size: 0, mtimeMs: s.now, isLink: false } }
   })
   on('fs.list', (_$: unknown, e: any) => {
-    s.beforeList?.()
     if (e.path !== JOBS) throw new Error(`ENOENT: ${e.path}`)
     return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
@@ -215,6 +215,10 @@ function stubs(on: any, s: State) {
       }
     }
     const script = argv[2] ?? ''
+    if (script.includes('# orq:liveness')) {
+      const running = [...s.live].some((id) => script.includes(`${JOBS}/${id}/pgid`))
+      return { value: { exitCode: running ? 11 : 12, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (script.includes('# orq:mkdir')) {
       s.mkdirScripts.push(script)
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -302,33 +306,49 @@ test('launch --worktree reports a failed worktree add with its git message and s
   expect(s.startScripts.length).toBe(0)
 })
 
-for (const field of ['cwd', 'worktree'] as const) {
-  test(`launch --worktree is refused while a live job has the new worktree as its ${field}`, async ($, on) => {
-    const s = fresh()
-    checkout(s)
-    // The other job is seeded as the launch lists the job directory, once it has claimed its own id.
-    s.beforeList = () => {
-      if (s.files.has(`${JOBS}/job-other/meta.json`)) return
-      const path = `${CHECKOUT}-wt/${claimedId(s)}`
-      seedJob(s, 'job-other', field === 'cwd' ? { cwd: path } : { cwd: SESSION, worktree: path })
-    }
-    stubs(on, s)
-    await start($)
-    const reply = await orq($, 'launch --worktree codex fixture-model -- go')
-    const id = claimedId(s)
-    expect(reply).toBe(`orq: manual refused: worktree_busy: ${CHECKOUT}-wt/${id} is in use by job job-other`)
-    expect(s.gitCalls.some((argv) => argv[3] === 'worktree')).toBe(false)
-    expect(s.startScripts.length).toBe(0)
-  })
+// A live job is one whose supervisor runs: its id is in s.live, and it has no exit file.
+function liveJob(s: State, id: string, fields: Record<string, unknown>) {
+  seedJob(s, id, fields)
+  s.live.add(id)
 }
 
-test('launch --worktree goes ahead when the job holding the path has exited', async ($, on) => {
+test('a shared launch is refused worktree_busy while a live job runs in the session directory', async ($, on) => {
   const s = fresh()
   checkout(s)
-  s.beforeList = () => {
-    if (s.files.has(`${JOBS}/job-done/meta.json`)) return
-    seedJob(s, 'job-done', { cwd: SESSION, worktree: `${CHECKOUT}-wt/${claimedId(s)}` }, '0')
-  }
+  liveJob(s, 'job-other', { cwd: SESSION })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'launch codex fixture-model -- go')).toBe(`orq: manual refused: worktree_busy: ${SESSION} is in use by job job-other`)
+  expect(s.startScripts.length).toBe(0)
+  expect(s.gitCalls.length).toBe(0)
+})
+
+test('a shared launch is refused while a live worktree job has the session directory as its checkout', async ($, on) => {
+  const s = fresh()
+  checkout(s)
+  liveJob(s, 'job-wt', { cwd: `${CHECKOUT}-wt/job-wt`, repo: SESSION, worktree: `${CHECKOUT}-wt/job-wt`, baseSha: 'abc123', branch: 'orq/job-wt' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'launch codex fixture-model -- go')).toBe(`orq: manual refused: worktree_busy: ${SESSION} is in use by job job-wt`)
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a shared launch goes ahead when the jobs in the session directory have exited or lost their supervisor', async ($, on) => {
+  const s = fresh()
+  checkout(s)
+  seedJob(s, 'job-done', { cwd: SESSION }, '0')
+  seedJob(s, 'job-gone', { cwd: SESSION })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'launch codex fixture-model -- go')).toBe(`orq: launched ${claimedId(s)}`)
+  expect(s.startScripts.length).toBe(1)
+})
+
+test('a worktree launch is never refused for busy: live jobs in the session directory do not stop it', async ($, on) => {
+  const s = fresh()
+  checkout(s)
+  liveJob(s, 'job-other', { cwd: SESSION })
+  liveJob(s, 'job-wt', { cwd: `${CHECKOUT}-wt/job-wt`, repo: SESSION, worktree: `${CHECKOUT}-wt/job-wt`, baseSha: 'abc123', branch: 'orq/job-wt' })
   stubs(on, s)
   await start($)
   expect(await orq($, 'launch --worktree codex fixture-model -- go')).toBe(`orq: launched ${claimedId(s)}`)

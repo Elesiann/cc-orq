@@ -73,12 +73,12 @@ export function worktreePathFor(toplevel: string, taskId: string): string {
   return `${parent}/${name}-wt/${taskId}`
 }
 
-/** One job's worktree facts as the busy check reads them from its directory. */
-export type JobPlace = { id: string; cwd: string; worktree?: string; exited: boolean }
+/** One job's place as the busy check reads it: where it runs, the checkout it is a worktree of, and whether it is live. */
+export type JobPlace = { id: string; cwd: string; repo?: string; live: boolean }
 
-/** The id of the first job without an exit file whose cwd or worktree is `path`, or null. */
+/** The id of the first live job that runs in `path` or is a worktree of the checkout `path`, or null. */
 export function busyJob(jobs: readonly JobPlace[], path: string): string | null {
-  const holder = jobs.find((job) => !job.exited && (job.cwd === path || job.worktree === path))
+  const holder = jobs.find((job) => job.live && (job.cwd === path || job.repo === path))
   return holder?.id ?? null
 }
 
