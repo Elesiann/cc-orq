@@ -205,9 +205,6 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (isFailure(policy)) return { refusal: refusalText(policy) }
   const scoped = await scopedCwd($, config, header.cwd)
   if ('refusal' in scoped) return scoped
-  if (header.isolation === 'worktree') {
-    await $.ui.log(`orq: isolation worktree is not implemented yet; the task for ${agentId} runs in ${scoped.cwd}`, { to: 'debug' })
-  }
   const launched = await launchTaskJob($, config, {
     agentId,
     instance: resolved.instance,
@@ -217,6 +214,7 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
     flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
     runtimeMode: resolved.runtimeMode,
     interactionMode: resolved.interactionMode,
+    isolation: header.isolation,
   })
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }

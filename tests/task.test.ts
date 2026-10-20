@@ -47,6 +47,10 @@ type State = {
   waitExit: number
   waitThrow: boolean
   summary: { tid: string; in: number; out: number; error: boolean }
+  /** Every git argv the mod ran, in order. */
+  gitCalls: string[][]
+  /** When set, git says the task cwd is not inside a checkout. */
+  notRepo: boolean
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -76,6 +80,8 @@ function fresh(o: Partial<State> = {}): State {
     waitExit: 11,
     waitThrow: false,
     summary: { tid: '', in: 0, out: 0, error: false },
+    gitCalls: [],
+    notRepo: false,
     ...o,
   }
   s.files.set(CONFIG_PATH, configText(s))
@@ -151,6 +157,14 @@ function stubs(on: any, s: State) {
       return run(0, `${s.realpaths[path] ?? path}\n`)
     }
     if (argv[0] === 'python3') return run(0, JSON.stringify(s.summary) + '\n')
+    if (argv[0] === 'git') {
+      s.gitCalls.push(argv)
+      const sub = argv.slice(3).join(' ')
+      if (sub === 'rev-parse --show-toplevel') return s.notRepo ? run(128, '') : run(0, `${argv[2]}\n`)
+      if (sub === 'rev-parse HEAD') return run(0, 'abc1234\n')
+      if (sub.startsWith('worktree add ')) return run(0)
+      throw new Error(`unexpected git: ${sub}`)
+    }
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) return run(0)
     if (script.includes('# orq:start')) {
@@ -208,7 +222,7 @@ test('session start registers the wait tool and the orq:task agent, which runs i
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect(s.tools.map((t) => t.name)).toEqual(['wait'])
+  expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate'])
   expect(s.agents.map((a) => a.name)).toEqual(['task'])
   expect(s.agents[0].tools).toEqual(['mcp__orq__wait'])
   expect(s.agents[0].background).toBe(true)
@@ -219,7 +233,7 @@ test('a header launches one task job on the named instance and the step waits th
   const s = fresh()
   stubs(on, s)
   await start($)
-  const agentId = await spawnTask($, s, `target: codex fixture-model effort=high\ncwd: ${REPO}\nSay OK.`, 'auto')
+  const agentId = await spawnTask($, s, `target: codex fixture-model effort=high\ncwd: ${REPO}\nisolation: shared\nSay OK.`, 'auto')
   const chunks = await step($, agentId)
   expect(chunks.map((c: any) => c.kind)).toEqual(['tool', 'input', 'stop'])
   expect(chunks[0].name).toBe('mcp__orq__wait')
@@ -239,6 +253,48 @@ test('a header launches one task job on the named instance and the step waits th
   })
   expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('--approve-for-me\n-c\nmodel_reasoning_effort=high\n')
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Say OK.')
+})
+
+test('a task without an isolation line runs in its own worktree on branch orq/JOB_ID, and meta.json records it', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  const chunks = await step($, agentId)
+  expect(chunks[0].name).toBe('mcp__orq__wait')
+  const id = JSON.parse(chunks[1].json).job as string
+  const worktree = `${REPO}-wt/${id}`
+  expect(s.gitCalls.map((argv) => argv.slice(3).join(' '))).toEqual([
+    'rev-parse --show-toplevel',
+    'rev-parse HEAD',
+    `worktree add ${worktree} -b orq/${id} abc1234`,
+  ])
+  expect(s.startScripts[0]).toContain(` codex ${worktree} fixture-model`)
+  const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+  expect(meta).toMatchObject({ cwd: worktree, repo: REPO, baseSha: 'abc1234', branch: `orq/${id}`, worktree })
+})
+
+test('isolation: shared runs the task in cwd itself and runs no git', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nisolation: shared\nGo.`, 'auto')
+  await step($, agentId)
+  expect(s.gitCalls).toEqual([])
+  expect(s.startScripts[0]).toContain(` codex ${REPO} fixture-model`)
+  const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+  expect(meta.worktree).toBeUndefined()
+})
+
+test('a worktree task whose cwd is not a git checkout is refused not_a_repository, names isolation: shared, and nothing starts', async ($, on) => {
+  const s = fresh({ notRepo: true })
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  const answer = answerOf(await step($, agentId))
+  expect(answer).toContain('orq: task refused (taskId none): not_a_repository')
+  expect(answer).toContain('isolation: shared')
+  expect(s.startScripts).toEqual([])
 })
 
 test('the flags file is written before the start script runs, so the supervisor reads it at startup', async ($, on) => {
@@ -459,7 +515,7 @@ test('a cwd inside the session directory is accepted, and the job runs there', a
   const s = fresh()
   stubs(on, s)
   await start($)
-  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/nested/repo\nGo.`, 'auto')
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/nested/repo\nisolation: shared\nGo.`, 'auto')
   const chunks = await step($, agentId)
   expect(chunks[0].name).toBe('mcp__orq__wait')
   expect(s.startScripts[0]).toContain(` codex ${SESSION}/nested/repo fixture-model`)
@@ -481,7 +537,7 @@ test('a cwd under an allowedRoots entry is accepted', async ($, on) => {
   const s = fresh({ allowedRoots: ['/srv/shared'] })
   stubs(on, s)
   await start($)
-  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/shared/tool\nGo.', 'auto')
+  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/shared/tool\nisolation: shared\nGo.', 'auto')
   const chunks = await step($, agentId)
   expect(chunks[0].name).toBe('mcp__orq__wait')
   expect(s.startScripts[0]).toContain(' codex /srv/shared/tool fixture-model')

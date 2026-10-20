@@ -8,7 +8,7 @@ import {
   INTEGRATE_STRATEGIES,
   INTEGRATE_TOOL,
   INTEGRATE_TOOL_NAME,
-  type Failure,
+  type GitFailure,
   type IntegrateInput,
   type IntegrateStrategy,
   type Integrated,
@@ -27,9 +27,9 @@ import {
   unmergedFilesArgv,
 } from './worktree.ts'
 
-export type IntegrateOutcome = { integrated: Integrated } | { failure: Failure }
+export type IntegrateOutcome = { integrated: Integrated } | { failure: GitFailure }
 
-function fail(code: Failure['code'], message: string, files?: string[]): { failure: Failure } {
+function fail(code: GitFailure['code'], message: string, files?: string[]): { failure: GitFailure } {
   return { failure: files === undefined ? { code, message } : { code, message, files } }
 }
 
@@ -38,12 +38,12 @@ function isStrategy(value: unknown): value is IntegrateStrategy {
 }
 
 /** The tool input as the model sent it: a job id, and a strategy that defaults to ff-only. */
-export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | { failure: Failure } {
+export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | { failure: GitFailure } {
   if (!isRecord(raw) || typeof raw.taskId !== 'string' || raw.taskId === '') {
-    return fail('invalid_input', 'taskId must be the job id of the finished task')
+    return fail('invalid_request', 'taskId must be the job id of the finished task')
   }
   const strategy = raw.strategy ?? 'ff-only'
-  if (!isStrategy(strategy)) return fail('invalid_input', `strategy must be one of ${INTEGRATE_STRATEGIES.join(', ')}`)
+  if (!isStrategy(strategy)) return fail('invalid_request', `strategy must be one of ${INTEGRATE_STRATEGIES.join(', ')}`)
   return { input: { taskId: raw.taskId, strategy } }
 }
 

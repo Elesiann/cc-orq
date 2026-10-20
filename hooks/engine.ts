@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import type { IntegrateFailure as Failure, InteractionMode, RuntimeMode } from './contract.ts'
+import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation } from './contract.ts'
 import { hasControlCharacters, plainArgument } from './target.ts'
 import {
   DRIVER_RUNNER,
@@ -63,13 +63,14 @@ export type TaskLaunchSpec = {
   flags: string[]
   runtimeMode: RuntimeMode
   interactionMode: InteractionMode
+  isolation: TaskIsolation
 }
 
 export type LaunchResult = { job: JobRecord } | { refusal: string }
 
 export type WorktreePlan = { repo: string; toplevel: string; baseSha: string; branch: string; worktree: string }
 
-export type WorktreeResult = { plan: WorktreePlan } | { failure: Failure }
+export type WorktreeResult = { plan: WorktreePlan } | { failure: GitFailure }
 
 async function readText($: Engine, path: string): Promise<string | null> {
   try {
@@ -447,9 +448,15 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     flags: spec.flags,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
+    ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const } : {}),
   })
+  if (!('refusal' in launched)) return launched
   // launchJob words its refusals for any kind; a task's are answered as task refusals.
-  return 'refusal' in launched ? { refusal: launched.refusal.replace(/^orq: task /, `${TASK_REFUSAL}: `) } : launched
+  const refusal = launched.refusal.replace(/^orq: task (refused: )?/, `${TASK_REFUSAL}: `)
+  const hint = spec.isolation === 'worktree' && refusal.includes('not_a_repository')
+    ? '. Pass `isolation: shared` to run the task in this directory as it is.'
+    : ''
+  return { refusal: refusal + hint }
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. */

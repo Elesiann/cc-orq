@@ -130,8 +130,10 @@ Review the diff on this branch and list the risks.
   they never widen it. Any other `key=value` is refused.
 - `cwd: /absolute/path` (required): an existing directory, inside the session's
   working directory or an `allowedRoots` entry (see "Working directory").
-- `isolation: worktree | shared` (default `worktree`). `worktree` is accepted
-  but does not isolate yet: the job runs in `cwd`, as `shared` does.
+- `isolation: worktree | shared` (default `worktree`). `worktree` runs the task
+  in its own git worktree on a new branch; see "Worktrees and integrate". `cwd`
+  must then be inside a git checkout, or the task is refused with
+  `not_a_repository`. `shared` runs the task in `cwd` as it is.
 - `role: implementation | research | review | design | test | general`
   (optional). Any role except `general` prefixes the task with
   `Act as the ROLE sub-agent for this task.`
@@ -226,8 +228,8 @@ the files you are editing. Its worktree is `REPO_PARENT/REPO_NAME-wt/JOB_ID`,
 beside the checkout it came from, on a new branch `orq/JOB_ID` cut from that
 checkout's HEAD when the job started.
 
-In this version, worktree isolation is available through `/orq launch
---worktree`; `orq:task` gains it next.
+An `orq:task` runs in a worktree unless its header says `isolation: shared`.
+A manual launch asks for one with `--worktree`:
 
 ```
 /orq launch --worktree codex my-model -- Add the retry to the uploader
@@ -235,9 +237,10 @@ In this version, worktree isolation is available through `/orq launch
 
 The launch starts nothing and says why when the directory is not inside a git
 checkout (`not_a_repository`), or when git cannot create the worktree
-(`git_failed`). A launch without `--worktree` writes into its directory, so it is
-refused with `worktree_busy` while a live job runs there or in a worktree of
-that checkout. A `--worktree` launch is never refused for that.
+(`git_failed`). A shared launch, a task with `isolation: shared` or a `/orq launch`
+without `--worktree`, writes into its directory, so it is refused with
+`worktree_busy` while a live job runs there or in a worktree of that checkout.
+A worktree launch is never refused for that.
 
 A launch that fails after git created its worktree removes that worktree and
 its branch again, on a best-effort basis. When that removal fails, the debug log
@@ -278,7 +281,7 @@ A refusal names one of these codes:
 | `already_integrated` | The task branch is already in the checkout's HEAD, so there is nothing to merge. |
 | `not_fast_forward` | `ff-only` cannot move HEAD, because the checkout has commits the task lacks. Integrate with `merge`, or rebase the task first. |
 | `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort`, and the answer lists the conflicted files. |
-| `invalid_input` | The input does not match the schema. |
+| `invalid_request` | The input does not match the schema. |
 | `git_failed` | git failed in a way no other code names. The answer carries its message. |
 
 When a merge conflicts, redelegate a rebase of the task branch to the same
