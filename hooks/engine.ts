@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import type { InteractionMode, RuntimeMode } from './contract.ts'
+import type { IntegrateFailure as Failure, InteractionMode, RuntimeMode } from './contract.ts'
 import { hasControlCharacters, plainArgument } from './target.ts'
 import {
   DRIVER_RUNNER,
@@ -13,10 +13,22 @@ import {
   parseRolloutModelEffort,
   TASK_REFUSAL,
   rand36,
+  redactSecrets,
   shellWord,
   type JobRecord,
   type Runner,
 } from './types.ts'
+import {
+  GIT_TIMEOUT_MS,
+  branchFor,
+  busyJob,
+  outputLines,
+  type JobPlace,
+  revParseHeadArgv,
+  revParseToplevelArgv,
+  worktreeAddArgv,
+  worktreePathFor,
+} from './worktree.ts'
 
 export type Engine = Pick<EngineInterface, 'clock' | 'env' | 'fs' | 'plugin' | 'process' | 'session'>
 
@@ -37,6 +49,8 @@ export type LaunchSpec = {
   flags?: string[]
   runtimeMode?: RuntimeMode
   interactionMode?: InteractionMode
+  /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
+  isolation?: 'worktree'
 }
 
 export type TaskLaunchSpec = {
@@ -51,6 +65,10 @@ export type TaskLaunchSpec = {
 }
 
 export type LaunchResult = { job: JobRecord } | { refusal: string }
+
+export type WorktreePlan = { repo: string; toplevel: string; baseSha: string; branch: string; worktree: string }
+
+export type WorktreeResult = { plan: WorktreePlan } | { failure: Failure }
 
 async function readText($: Engine, path: string): Promise<string | null> {
   try {
@@ -202,6 +220,71 @@ async function markLaunchFailed($: Engine, dir: string): Promise<void> {
   }
 }
 
+/** The first line of a git error, redacted and cut, so it can sit in a refusal. */
+function gitDetail(stderr: string): string {
+  const line = outputLines(stderr)[0] ?? ''
+  return line === '' ? '' : `: ${redactSecrets(line).slice(0, 200)}`
+}
+
+/**
+ * The id of a job without an exit file whose cwd or worktree is `path`, or null. It reads the job
+ * directory rather than memory, so it holds across sessions.
+ */
+export async function worktreeBusy($: Engine, jobsDir: string, path: string): Promise<string | null> {
+  let entries: { name: string; kind: string }[]
+  try {
+    entries = await $.fs.list(jobsDir)
+  } catch {
+    return null
+  }
+  const places: JobPlace[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'dir') continue
+    const job = await readMeta($, jobsDir, entry.name)
+    if (job === null) continue
+    places.push({
+      id: job.id,
+      cwd: job.cwd,
+      ...(job.worktree !== undefined ? { worktree: job.worktree } : {}),
+      exited: await exists($, `${job.dir}/exit`),
+    })
+  }
+  return busyJob(places, path)
+}
+
+/**
+ * Plan and create the worktree of task TASK_ID: REPO_PARENT/REPO_NAME-wt/TASK_ID on a new branch
+ * orq/TASK_ID, cut from the checkout's HEAD. Refuses, and creates nothing, when cwd is not a git
+ * checkout or a live job already uses that path.
+ */
+export async function prepareWorktree($: Engine, cwd: string, taskId: string, jobsDir: string): Promise<WorktreeResult> {
+  try {
+    const top = await $.process.run(revParseToplevelArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
+    if (top.exitCode !== 0) {
+      return { failure: { code: 'not_a_repository', message: `${cwd} is not inside a git checkout${gitDetail(top.stderr)}` } }
+    }
+    const toplevel = top.stdout.trim()
+    const head = await $.process.run(revParseHeadArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
+    const baseSha = head.stdout.trim()
+    if (head.exitCode !== 0 || baseSha === '') {
+      return { failure: { code: 'git_failed', message: `${cwd} has no HEAD commit to start a worktree from${gitDetail(head.stderr)}` } }
+    }
+    const worktree = worktreePathFor(toplevel, taskId)
+    const busy = await worktreeBusy($, jobsDir, worktree)
+    if (busy !== null) {
+      return { failure: { code: 'worktree_busy', message: `${worktree} is in use by job ${busy}` } }
+    }
+    const branch = branchFor(taskId)
+    const add = await $.process.run(worktreeAddArgv(cwd, worktree, branch, baseSha), { timeoutMs: GIT_TIMEOUT_MS })
+    if (add.exitCode !== 0) {
+      return { failure: { code: 'git_failed', message: `git worktree add ${worktree} failed${gitDetail(add.stderr)}` } }
+    }
+    return { plan: { repo: cwd, toplevel, baseSha, branch, worktree } }
+  } catch (err) {
+    return { failure: { code: 'git_failed', message: `git could not run: ${String(err)}` } }
+  }
+}
+
 /** Create a job directory, write meta.json and prompt.txt, and start the supervisor detached. */
 export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
   const now = await $.clock.now()
@@ -221,12 +304,27 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
     if (mkdirCode !== 0) {
       return { refusal: `orq: ${spec.kind} could not create its job directory (exit ${mkdirCode})` }
     }
+    // The id is claimed by the mkdir, so the worktree path can name it. Nothing is created before the claim.
+    let cwd = spec.cwd
+    let plan: WorktreePlan | null = null
+    if (spec.isolation === 'worktree') {
+      const prepared = await prepareWorktree($, spec.cwd, id, config.jobsDir)
+      if ('failure' in prepared) {
+        await markLaunchFailed($, dir)
+        return { refusal: `orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}` }
+      }
+      plan = prepared.plan
+      cwd = plan.worktree
+    }
+    const worktreeFields = plan
+      ? { repo: plan.repo, baseSha: plan.baseSha, branch: plan.branch, worktree: plan.worktree }
+      : {}
     const startedAtIso = new Date(now).toISOString()
     const meta = {
       id,
       kind: spec.kind,
       agentId: spec.agentId,
-      cwd: spec.cwd,
+      cwd,
       startedAt: now,
       startedAtIso,
       runner: spec.runner,
@@ -236,6 +334,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
       ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
+      ...worktreeFields,
     }
     try {
       await $.fs.write(`${dir}/meta.json`, JSON.stringify(meta))
@@ -252,7 +351,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       dir,
       supervise,
       runner: spec.runner,
-      cwd: spec.cwd,
+      cwd,
       model: spec.model,
       env: spec.env,
     })
@@ -279,7 +378,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       kind: spec.kind,
       agentId: spec.agentId,
       dir,
-      cwd: spec.cwd,
+      cwd,
       startedAt: now,
       startedAtIso,
       runner: spec.runner,
@@ -287,6 +386,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       instanceId: spec.instanceId,
       driver: spec.driver,
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
+      ...worktreeFields,
     }
     if (pgid) job.pgid = pgid
     return { job }
@@ -447,14 +547,21 @@ export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord
   return `${view.lastText}\n\n${footer}`
 }
 
-/** Parse `launch INSTANCE MODEL -- PROMPT`; the prompt is everything after the first ` -- `. */
-export function parseLaunch(rest: string): { instance: string; model: string; prompt: string } | { error: string } {
-  const m = /^(\S+)\s+(\S+)\s+--(?:\s+([\s\S]*))?$/.exec(rest.trim())
+/**
+ * Parse `[--worktree] INSTANCE MODEL -- PROMPT`; the prompt is everything after the first ` -- `.
+ * The flag sits before the instance and is reported as `worktree: true` only when given.
+ */
+export function parseLaunch(
+  rest: string,
+): { instance: string; model: string; prompt: string; worktree?: true } | { error: string } {
+  const trimmed = rest.trim()
+  const flag = /^--worktree(?:\s+|$)/.exec(trimmed)
+  const m = /^(\S+)\s+(\S+)\s+--(?:\s+([\s\S]*))?$/.exec(flag ? trimmed.slice(flag[0].length) : trimmed)
   if (!m) return { error: 'usage: /orq launch INSTANCE MODEL -- PROMPT' }
   const instance = m[1] ?? ''
   const model = m[2] ?? ''
   const prompt = (m[3] ?? '').trim()
   if (model.startsWith('-')) return { error: 'the model must not start with "-"' }
   if (prompt === '') return { error: 'the prompt after -- is empty' }
-  return { instance, model, prompt }
+  return flag ? { instance, model, prompt, worktree: true } : { instance, model, prompt }
 }

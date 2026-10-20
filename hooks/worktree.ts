@@ -66,6 +66,15 @@ export function isSafeTaskId(id: string): boolean {
   return isSafeJobId(id) && !/\.(lock)?$/.test(id)
 }
 
+/** One job's worktree facts as the busy check reads them from its directory. */
+export type JobPlace = { id: string; cwd: string; worktree?: string; exited: boolean }
+
+/** The id of the first job without an exit file whose cwd or worktree is `path`, or null. */
+export function busyJob(jobs: readonly JobPlace[], path: string): string | null {
+  const holder = jobs.find((job) => !job.exited && (job.cwd === path || job.worktree === path))
+  return holder?.id ?? null
+}
+
 /** The non-empty lines of a git list output, kept as git wrote them. */
 export function outputLines(text: string): string[] {
   return text.split('\n').filter((line) => line !== '')
