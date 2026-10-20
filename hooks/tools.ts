@@ -50,7 +50,7 @@ const TOOL_SPECS = [
     name: 'status',
     description:
       "Read one orq task's state from its job directory: status (queued, running, waiting, completed, failed, cancelled or interrupted), " +
-      'workState (working, waiting_for_children or result_available), and once it has ended its result or error. ' +
+      'workState (working or result_available), and once it has ended its result or error; a task blocked on a question has the BLOCKED text as its result. ' +
       'Input: {"taskId": "<id>"}. Works for tasks of earlier sessions. An unknown id answers task_not_found.',
     inputSchema: TASK_ID_INPUT,
   },

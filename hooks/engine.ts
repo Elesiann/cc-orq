@@ -682,13 +682,16 @@ export function taskStatusOf(view: JobView): TaskStatus {
       return 'cancelled'
     case 'interrupted':
       return 'interrupted'
+    case 'waiting':
+      return 'waiting'
   }
 }
 
 /** A task that has ended has a final result or error for its parent to read: result_available. */
 function workStateOf(status: TaskStatus): WorkState {
   if (status === 'running' || status === 'queued') return 'working'
-  if (status === 'waiting') return 'waiting_for_children'
+  // A waiting task waits on its parent's answer, not on children of its own.
+  if (status === 'waiting') return 'working'
   return 'result_available'
 }
 
@@ -710,7 +713,7 @@ export async function readJobStatus($: Engine, config: OrqConfig, jobId: string)
     ...(job.model ? { model: job.model } : {}),
     ...(view.endedAt !== null ? { finishedAtIso: new Date(view.endedAt).toISOString() } : {}),
   }
-  if (view.status === 'done') return { ...answer, result: view.lastText }
+  if (view.status === 'done') return { ...answer, result: view.question !== null ? blockedText(job.id, view.question) : view.lastText }
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return { ...answer, error: `failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '') }

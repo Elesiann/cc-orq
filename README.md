@@ -392,14 +392,15 @@ recorded them.
 | --- | --- |
 | `queued` | Reserved; orq does not produce it yet. |
 | `running` | The supervisor is alive. A task with a cancel request stays `running` until the supervisor stops it. |
-| `waiting` | Reserved; orq does not produce it yet. |
-| `completed` | Exit 0, a non-empty final message, and no error in the event stream. |
+| `waiting` | The task wrote a question to `question.txt` and its supervisor is still alive. See [Child questions](#child-questions). |
+| `completed` | Exit 0, a non-empty final message, and no error in the event stream. A task that exited 0 after writing a question is `completed`, and its `result` is the `BLOCKED on a question (taskId ID): ...` text. |
 | `failed` | Any other end: a non-zero exit, an empty final message, or an error in the event stream. |
 | `cancelled` | Exit 124, after a cancel request. |
 | `interrupted` | The supervisor is gone and the job left no exit file. |
 
-`workState` is `working` while the task runs, `waiting_for_children` when
-`waiting` is produced, and `result_available` once the task has ended.
+`workState` is `working` while the task runs or waits on its question, and
+`result_available` once the task has ended. orq does not produce
+`waiting_for_children`, since a task has no children of its own.
 
 ### `mcp__orq__cancel`
 

@@ -208,6 +208,28 @@ test('status answers a completed job with its final answer and end time', async 
   })
 })
 
+test('status answers a job that wrote a question and still runs as waiting', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-ask', 8000000)
+  s.files.set(`${JOBS}/job-ask/question.txt`, 'Which branch?\n')
+  stubs(on, s)
+  await start($)
+  expect(await call($, 'mcp__orq__status', { taskId: 'job-ask' })).toMatchObject({ taskId: 'job-ask', status: 'waiting', workState: 'working' })
+})
+
+test('status answers a job that exited 0 after a question as completed, with the BLOCKED text as its result', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-blk', 1000000)
+  s.files.set(`${JOBS}/job-blk/question.txt`, 'Which branch?\n')
+  s.files.set(`${JOBS}/job-blk/exit`, '0')
+  s.files.set(`${JOBS}/job-blk/last.txt`, 'BLOCKED: Which branch?')
+  stubs(on, s)
+  await start($)
+  const answer = await call($, 'mcp__orq__status', { taskId: 'job-blk' })
+  expect(answer).toMatchObject({ status: 'completed', workState: 'result_available' })
+  expect(answer.result).toBe('BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it in a new orq:task with the original brief plus the answer.')
+})
+
 test('status answers a failed job with the exit code and the redacted stderr tail', async ($, on) => {
   const s = fresh()
   seedJob(s, 'job-bad', 1000000)
@@ -519,7 +541,7 @@ test('a failed catalog probe answers no providers, logs why and is probed again 
   expect(s.catalogCalls.length).toBe(2)
 })
 
-test('session.start declares the three tools and logs one unfinished job with its age', async ($, on) => {
+test('session.start declares the orq tools and logs one unfinished job with its age', async ($, on) => {
   const s = fresh()
   s.dirEntries = [
     { name: 'job-done', kind: 'dir' },
@@ -531,7 +553,7 @@ test('session.start declares the three tools and logs one unfinished job with it
   seedJob(s, 'job-open', 8000000)
   stubs(on, s)
   await start($)
-  expect(s.tools).toEqual(['capabilities', 'status', 'cancel'])
+  expect(s.tools).toEqual(['wait', 'integrate', 'capabilities', 'status', 'cancel'])
   expect(s.logs.filter((line) => line.startsWith('orq: unfinished'))).toEqual([
     'orq: unfinished job job-open (manual), started 16m40s ago',
   ])

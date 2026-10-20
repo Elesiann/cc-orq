@@ -18,6 +18,8 @@ test('the orchestration instructions state the header lines, the taskId and the 
     'mcp__orq__cancel',
     'mcp__orq__integrate',
     'orq:task',
+    'BLOCKED on a question',
+    'merge_conflict',
   ]
   for (const term of terms) {
     expect(ORCHESTRATION_INSTRUCTIONS.includes(term)).toBe(true)
