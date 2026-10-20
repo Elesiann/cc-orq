@@ -150,3 +150,18 @@ test('loadConfig treats an unset or empty HOME as unset', async () => {
     assert.equal($.calls.filter((c) => c[0] !== 'env.get').length, 0, String(home))
   }
 })
+
+test('allowedRoots keeps absolute entries after ~ expansion and drops the rest with a warning', () => {
+  const r = parseConfig(j({ allowedRoots: ['~/shared', '/srv/tools', 'relative/x', '', 7, '~'] }), HOME)
+  assert.deepEqual(r.config.allowedRoots, ['/home/u/shared', '/srv/tools', '/home/u'])
+  assert.match(r.warning, /allowedRoots\[2\] must be an absolute path or start with ~\//)
+  assert.match(r.warning, /allowedRoots\[3\] must be an absolute path/)
+  assert.match(r.warning, /allowedRoots\[4\] must be an absolute path/)
+})
+
+test('allowedRoots defaults to none, and a non-array keeps none with a warning', () => {
+  assert.deepEqual(parseConfig(null, HOME).config.allowedRoots, [])
+  const r = parseConfig(j({ allowedRoots: '/srv' }), HOME)
+  assert.deepEqual(r.config.allowedRoots, [])
+  assert.match(r.warning, /allowedRoots must be an array of absolute paths, keeping none/)
+})
