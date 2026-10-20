@@ -79,7 +79,13 @@ export function formatDuration(ms: number): string {
   return `${m}m${String(rest).padStart(2, '0')}s`
 }
 
-/** The one footer line of every answer. Null token counts, when the extractor found none, render as `tokens n/a`. */
+/** Starts every refusal a task step answers. "taskId none" tells the parent there is no job to query. */
+export const TASK_REFUSAL = 'orq: task refused (taskId none)'
+
+/**
+ * The one footer line of every answer. The taskId is the job id a parent passes to the job tools. Null token
+ * counts, when the extractor found none, render as `tokens n/a`.
+ */
 export function buildFooter(args: {
   kind: string
   model: string
@@ -87,10 +93,11 @@ export function buildFooter(args: {
   durationMs: number
   inTokens: number | null
   outTokens: number | null
+  taskId: string
   session: string
 }): string {
   const tokens = args.inTokens === null || args.outTokens === null ? 'tokens n/a' : `${args.inTokens}/${args.outTokens} tokens`
-  return `— orq · ${args.kind} · ${args.model} · effort ${args.effort} · ${formatDuration(args.durationMs)} · ${tokens} · session ${args.session}`
+  return `— orq · ${args.kind} · ${args.model} · effort ${args.effort} · ${formatDuration(args.durationMs)} · ${tokens} · taskId ${args.taskId} · session ${args.session}`
 }
 
 /** Read model and effort from the last turn_context of a Codex rollout file. */

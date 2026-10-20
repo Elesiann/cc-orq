@@ -63,7 +63,7 @@ finished job keeps the elapsed time it had when its `exit` file was written.
 ### `/orq result JOB_ID`
 
 Prints the final message of a finished job, followed by a footer with its kind,
-model, effort, duration, token counts and session id. The footer shows `tokens
+model, effort, duration, token counts, job id (`taskId`) and session id. The footer shows `tokens
 n/a` when the CLI's event stream reports no counts. A failed job prints its exit code and
 the last 20 stderr lines, with secrets redacted. A job that has not ended gets
 one line that says it is running, cancelling or interrupted.
@@ -132,8 +132,9 @@ Review the diff on this branch and list the risks.
   (optional). Any role except `general` prefixes the task with
   `Act as the ROLE sub-agent for this task.`
 - A refused header answers the subagent with the refusal text, and nothing runs.
-  A refusal from the ceiling or the driver names its code, such as
-  `runtime_mode_unsupported`.
+  Every refusal starts with `orq: task refused (taskId none):`, so no job id is
+  given for a refused task. A refusal from the ceiling or the driver names its
+  code, such as `runtime_mode_unsupported`.
 
 ### Permission ceiling
 
@@ -205,6 +206,11 @@ When the job ends, the answer goes back to the parent:
 
 When the mode cannot be read, the answer is text and the debug log says
 `orq: handback skipped for AGENT_ID: no permission mode`.
+
+The answer of a finished job ends with a footer that names the job: `taskId JOB_ID`
+is the id to pass to the job tools, and `session` is the provider's session id. orq has no
+environment-variable opt-out for the handback, because environment variables do
+not reach the mod.
 
 Stopping the subagent with `TaskStop` writes the job's `cancel` file, so the
 supervisor stops the job.

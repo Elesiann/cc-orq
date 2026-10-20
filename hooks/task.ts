@@ -15,7 +15,7 @@ import {
   runnerPolicy,
   taskPrompt,
 } from './target.ts'
-import { formatDuration, isRecord, shellWord } from './types.ts'
+import { formatDuration, isRecord, shellWord, TASK_REFUSAL } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -140,7 +140,7 @@ async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
  */
 async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): Promise<{ cwd: string } | { refusal: string }> {
   const cwd = await resolvePath($, requested, '-e')
-  if (cwd === null) return { refusal: `orq: task refused: directory does not exist: ${requested}` }
+  if (cwd === null) return { refusal: `${TASK_REFUSAL}: directory does not exist: ${requested}` }
   const roots = await scopeRoots($, config)
   if (!roots.some((root) => isWithin(cwd, root))) {
     const named = roots.length > 0 ? roots.join(', ') : 'none'
@@ -153,7 +153,7 @@ async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): P
   } catch {
     /* reported below as not a directory */
   }
-  return { refusal: `orq: task refused: not a directory: ${cwd}` }
+  return { refusal: `${TASK_REFUSAL}: not a directory: ${cwd}` }
 }
 
 function firstUserText(messages: { role: string; text: string }[]): string | undefined {
@@ -166,7 +166,7 @@ async function isTaskAgent($: TaskEngine, agentId: string): Promise<boolean> {
 }
 
 function refusalText(failure: Failure): string {
-  return `orq: task refused (${failure.error.code}): ${failure.error.message}`
+  return `${TASK_REFUSAL}: ${failure.error.code}: ${failure.error.message}`
 }
 
 async function readMessages($: TaskEngine, agentId: string): Promise<{ role: string; text: string }[]> {
@@ -181,9 +181,9 @@ async function readMessages($: TaskEngine, agentId: string): Promise<{ role: str
 /** Resolve the header against the ceiling and the configured instances, then launch. Every refusal is text. */
 async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string): Promise<TaskRun> {
   const text = firstUserText(await readMessages($, agentId))
-  if (text === undefined) return { refusal: 'orq: task refused: its prompt could not be read.' }
+  if (text === undefined) return { refusal: `${TASK_REFUSAL}: its prompt could not be read.` }
   const header = parseTaskHeader(text)
-  if (isFailure(header)) return { refusal: `orq: task refused: ${header.error.message}` }
+  if (isFailure(header)) return { refusal: `${TASK_REFUSAL}: ${header.error.message}` }
   const spawnMode = await spawnPermissionMode($, agentId)
   if (spawnMode === undefined) {
     await $.ui.log(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`, { to: 'debug' })

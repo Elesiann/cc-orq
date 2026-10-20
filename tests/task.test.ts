@@ -284,7 +284,7 @@ test('a parent in acceptEdits that delegates to opencode gets runtime_mode_unsup
   const chunks = await step($, agentId)
   expect(chunks.map((c: any) => c.kind)).toEqual(['text', 'stop'])
   expect(answerOf(chunks)).toContain(
-    'orq: task refused (runtime_mode_unsupported): Driver opencode cannot enforce runtime mode auto-accept-edits; it supports approval-required, auto.',
+    'orq: task refused (taskId none): runtime_mode_unsupported: Driver opencode cannot enforce runtime mode auto-accept-edits; it supports approval-required, auto.',
   )
   expect(s.startScripts.length).toBe(0)
 })
@@ -295,7 +295,7 @@ test('a working directory that does not exist is refused in the step answer', as
   await start($)
   const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
   const chunks = await step($, agentId)
-  expect(answerOf(chunks)).toContain(`orq: task refused: directory does not exist: ${REPO}`)
+  expect(answerOf(chunks)).toContain(`orq: task refused (taskId none): directory does not exist: ${REPO}`)
   expect(s.startScripts.length).toBe(0)
 })
 
@@ -312,6 +312,7 @@ test('a finished task answers through SubagentHandback under auto mode, with its
   const answer = answerOf(chunks)
   expect(answer.startsWith('OK')).toBe(true)
   expect(answer).toContain('— orq · task · fixture-model')
+  expect(answer).toContain(`· taskId ${jobDir(s).split('/').pop()} · session `)
 })
 
 test('a second step after the handback answers with text, not a second handback', async ($, on) => {
@@ -400,7 +401,7 @@ test('a spawn without a permission mode whose header asks runtime=auto is refuse
   const agentId = await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`)
   const chunks = await step($, agentId)
   expect(chunks.map((c: any) => c.kind)).toEqual(['text', 'stop'])
-  expect(answerOf(chunks)).toContain('orq: task refused (runtime_mode_escalation_denied)')
+  expect(answerOf(chunks)).toContain('orq: task refused (taskId none): runtime_mode_escalation_denied')
   expect(s.startScripts.length).toBe(0)
   expect(s.logs).toContain(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`)
 })
@@ -453,7 +454,7 @@ test('a cwd outside the session directory and the allowed roots is refused with 
   const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/elsewhere/repo\nGo.', 'auto')
   const chunks = await step($, agentId)
   expect(answerOf(chunks)).toBe(
-    'orq: task refused (cwd_out_of_scope): cwd /srv/elsewhere/repo is outside the session directory and the allowed roots (/srv/example).',
+    'orq: task refused (taskId none): cwd_out_of_scope: cwd /srv/elsewhere/repo is outside the session directory and the allowed roots (/srv/example).',
   )
   expect(s.startScripts.length).toBe(0)
 })
@@ -473,7 +474,7 @@ test('a sibling directory that shares a name prefix with the session directory i
   stubs(on, s)
   await start($)
   const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/example-other/repo\nGo.', 'auto')
-  expect(answerOf(await step($, agentId))).toContain('orq: task refused (cwd_out_of_scope)')
+  expect(answerOf(await step($, agentId))).toContain('orq: task refused (taskId none): cwd_out_of_scope')
   expect(s.startScripts.length).toBe(0)
 })
 
@@ -483,7 +484,7 @@ test('a symlink inside the session directory that resolves outside it is refused
   await start($)
   const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/link\nGo.`, 'auto')
   expect(answerOf(await step($, agentId))).toBe(
-    'orq: task refused (cwd_out_of_scope): cwd /srv/elsewhere/real is outside the session directory and the allowed roots (/srv/example).',
+    'orq: task refused (taskId none): cwd_out_of_scope: cwd /srv/elsewhere/real is outside the session directory and the allowed roots (/srv/example).',
   )
   expect(s.startScripts.length).toBe(0)
 })
@@ -541,7 +542,7 @@ test('a step after a refusal repeats it, without reading the header again or lau
   await start($)
   const agentId = await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, 'plan')
   const first = await step($, agentId)
-  expect(answerOf(first)).toContain('orq: task refused (runtime_mode_escalation_denied)')
+  expect(answerOf(first)).toContain('orq: task refused (taskId none): runtime_mode_escalation_denied')
   const reads = s.messageReads
   s.messages = [{ role: 'user', text: `target: codex fixture-model\ncwd: ${REPO}\nEdit it.`, toolUses: [] }]
   const second = await step($, agentId, 1)

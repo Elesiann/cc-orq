@@ -10,6 +10,7 @@ import {
   isSafeJobId,
   parseJobMeta,
   parseRolloutModelEffort,
+  TASK_REFUSAL,
   rand36,
   shellWord,
   type JobRecord,
@@ -292,12 +293,12 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
  */
 export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
   if (!plainArgument(spec.model)) {
-    return { refusal: 'orq: task refused: the model must be one word that does not start with "-" and has no control characters.' }
+    return { refusal: `${TASK_REFUSAL}: the model must be one word that does not start with "-" and has no control characters.` }
   }
   if (spec.flags.some((flag) => flag === '' || hasControlCharacters(flag))) {
-    return { refusal: 'orq: task refused: a runner flag is empty or contains a control character.' }
+    return { refusal: `${TASK_REFUSAL}: a runner flag is empty or contains a control character.` }
   }
-  return launchJob($, config, {
+  const launched = await launchJob($, config, {
     kind: 'task',
     agentId: spec.agentId,
     runner: DRIVER_RUNNER[spec.instance.driver],
@@ -309,6 +310,8 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     driver: spec.instance.driver,
     flags: spec.flags,
   })
+  // launchJob words its refusals for any kind; a task's are answered as task refusals.
+  return 'refusal' in launched ? { refusal: launched.refusal.replace(/^orq: task /, `${TASK_REFUSAL}: `) } : launched
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. */
@@ -429,6 +432,7 @@ export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord
     durationMs,
     inTokens: summary?.in ?? null,
     outTokens: summary?.out ?? null,
+    taskId: job.id,
     session: summary?.tid || job.id,
   })
   return `${view.lastText}\n\n${footer}`
