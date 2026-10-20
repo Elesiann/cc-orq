@@ -15,8 +15,9 @@ instance and model in every task.
 Early. This version loads and reads its configuration, runs detached jobs, and
 lets you list, show, cancel and launch them with `/orq`. The `orq:task` agent
 runs a task as a job for the parent session, under the parent's permission
-ceiling; see "Delegating with orq:task". The other MCP tools land in later
-releases; see the changelog when it exists.
+ceiling; see "Delegating with orq:task". A task can run in its own git
+worktree, and the `integrate` tool merges that work back. The other MCP tools
+land in later releases; see the changelog when it exists.
 
 ## Requirements
 
@@ -95,6 +96,9 @@ with a model your provider CLI accepts.
 ```
 /orq launch codex my-model -- Run the test suite and list the failing tests
 ```
+
+With `--worktree` before the instance, the job runs in its own git worktree.
+See [Worktrees and integrate](#worktrees-and-integrate).
 
 Until the `orq:task` agent brings the permission policy, a manual launch uses
 each provider CLI's own defaults for sandbox, permissions and reasoning effort.
@@ -215,6 +219,56 @@ not reach the mod.
 Stopping the subagent with `TaskStop` writes the job's `cancel` file, so the
 supervisor stops the job.
 
+## Worktrees and integrate
+
+A task that runs in a worktree works in its own checkout, so it cannot change
+the files you are editing. Its worktree is `REPO_PARENT/REPO_NAME-wt/JOB_ID`,
+beside the checkout it came from, on a new branch `orq/JOB_ID` cut from that
+checkout's HEAD when the job started.
+
+In this version, worktree isolation is available through `/orq launch
+--worktree`; `orq:task` gains it next.
+
+```
+/orq launch --worktree codex my-model -- Add the retry to the uploader
+```
+
+The launch starts nothing and says why when the directory is not inside a git
+checkout (`not_a_repository`), when a job without an exit file already uses the
+worktree path (`worktree_busy`), or when git cannot create the worktree
+(`git_failed`).
+
+### `mcp__orq__integrate`
+
+Merges a finished task's branch into the checkout the task was launched from.
+The input is `taskId`, the job id, and an optional `strategy`:
+
+- `ff-only` (the default) moves the checkout forward without a merge commit.
+- `merge` makes a merge commit with `--no-ff --no-edit`, so the history records
+  the task.
+
+On success the answer gives the merged commit, the branch and the worktree. The
+worktree and the branch stay. Remove them with `git worktree remove` and
+`git branch -d` when you no longer need them.
+
+A refusal names one of these codes:
+
+| Code | Meaning |
+| --- | --- |
+| `task_not_found` | No job has that id. |
+| `no_worktree` | The job ran without a worktree, so it has no branch to merge. |
+| `not_a_repository` | The checkout the job was launched from is not a git checkout. |
+| `dirty_worktree` | The checkout has uncommitted or untracked files. Commit or stash them, then integrate again. |
+| `already_integrated` | The task branch is already in the checkout's HEAD, so there is nothing to merge. |
+| `not_fast_forward` | `ff-only` cannot move HEAD, because the checkout has commits the task lacks. Integrate with `merge`, or rebase the task first. |
+| `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort`, and the answer lists the conflicted files. |
+| `invalid_input` | The input does not match the schema. |
+| `git_failed` | git failed in a way no other code names. The answer carries its message. |
+
+When a merge conflicts, redelegate a rebase of the task branch to the same
+worker, then integrate again. orq never forces a merge, and it never resolves a
+conflict for you.
+
 ## Configuration
 
 orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
@@ -263,7 +317,7 @@ for both the kind and the agent suffix, for example
 
 | File | Written by | Contents |
 | --- | --- | --- |
-| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver and, for a Codex instance with a `CODEX_HOME`, that path. Other `env` values are never written to disk. |
+| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver and, for a Codex instance with a `CODEX_HOME`, that path. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
 | `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
 | `child.log` | start script | The supervisor's own stdout and stderr. |
