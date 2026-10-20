@@ -26,6 +26,8 @@ type State = {
   messageReads: number
   /** When set, env.get throws, as a failing engine call would. */
   envThrow: boolean
+  /** When set, storing an agent's run record throws. */
+  runStoreFails: boolean
   settingsMode: string | undefined
   /** realpath results for paths that are not their own resolution (symlinks). */
   realpaths: Record<string, string>
@@ -56,6 +58,7 @@ function fresh(o: Partial<State> = {}): State {
     messages: [],
     messageReads: 0,
     envThrow: false,
+    runStoreFails: false,
     settingsMode: undefined,
     realpaths: {},
     allowedRoots: [],
@@ -114,6 +117,7 @@ function stubs(on: any, s: State) {
   })
   on('store.get', (_$: unknown, e: any) => ({ value: s.store.get(e.key) }))
   on('store.set', (_$: unknown, e: any) => {
+    if (s.runStoreFails && String(e.key).startsWith('agent:')) throw new Error('store unavailable')
     s.store.set(e.key, e.value)
     return { value: undefined }
   })
@@ -124,6 +128,12 @@ function stubs(on: any, s: State) {
     throw new Error(`ENOENT: ${e.path}`)
   })
   on('fs.exists', (_$: unknown, e: any) => ({ value: s.files.has(e.path) }))
+  on('fs.list', (_$: unknown, e: any) => {
+    const names = [...s.files.keys()]
+      .map((path) => path.match(new RegExp(`^${e.path}/([^/]+)/meta\\.json$`))?.[1])
+      .filter((name): name is string => name !== undefined)
+    return { value: names.map((name) => ({ name, kind: 'dir', size: 0, mtimeMs: s.now, isLink: false })) }
+  })
   on('fs.write', (_$: unknown, e: any) => {
     s.writes.push({ path: e.path, text: e.text })
     s.files.set(e.path, e.text)
@@ -573,4 +583,26 @@ test('a step that throws before its answer is answered with an orq task failure,
   expect(chunks.map((c: any) => c.kind)).toEqual(['text', 'stop'])
   expect(answerOf(chunks).startsWith('orq: task failed: ')).toBe(true)
   expect(s.startScripts.length).toBe(0)
+})
+
+test('a run record that cannot be stored is found again by its agent id, so the next step reuses the job', async ($, on) => {
+  const s = fresh({ runStoreFails: true })
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  const first = await step($, agentId)
+  const second = await step($, agentId, 1)
+  expect(JSON.parse(second[1].json).job).toBe(JSON.parse(first[1].json).job)
+  expect(s.startScripts.length).toBe(1)
+})
+
+test('a refusal longer than 2,000 characters is stored and answered at 2,000 characters', async ($, on) => {
+  const s = fresh({ statMissing: true })
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}/${'x'.repeat(2500)}\nGo.`, 'auto')
+  const answer = answerOf(await step($, agentId))
+  expect(answer.length).toBe(2000)
+  expect(answer.startsWith('orq: task refused (taskId none): directory does not exist: ')).toBe(true)
+  expect(s.store.get(`agent:${agentId}`)).toEqual({ refusal: answer })
 })

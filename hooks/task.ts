@@ -6,7 +6,7 @@ import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult 
 
 import { loadConfig, MAX_WAIT_SECONDS, type OrqConfig } from './config.ts'
 import { fail, isFailure, type Failure } from './contract.ts'
-import { composeAnswer, jobLiveness, launchTaskJob, readMeta, writeCancel, type Engine } from './engine.ts'
+import { composeAnswer, jobLiveness, launchTaskJob, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
 import {
   effortFlag,
@@ -15,7 +15,7 @@ import {
   runnerPolicy,
   taskPrompt,
 } from './target.ts'
-import { formatDuration, isRecord, shellWord, TASK_REFUSAL } from './types.ts'
+import { formatDuration, isRecord, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -42,6 +42,9 @@ const ONE_LINE_PROMPT =
 
 /** A launched job's id, or the refusal a step answers with. Stored per agent so a repeated step reuses it. */
 type TaskRun = { jobId: string } | { refusal: string }
+
+/** The longest refusal kept and answered: a refusal can echo a long path from the header. */
+const MAX_REFUSAL_CHARS = 2000
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
@@ -216,12 +219,20 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }
 
+/** The task job this agent launched, found in the jobs directory when its run record was never stored. */
+async function jobForAgent($: TaskEngine, config: OrqConfig, agentId: string): Promise<JobRecord | null> {
+  const jobs = await listJobs($, config.jobsDir)
+  return jobs.find((job) => job.kind === 'task' && job.agentId === agentId) ?? null
+}
+
 /** The run recorded for this agent, or a new one. A repeated step finds the record and does not relaunch. */
 async function runFor($: TaskEngine, config: OrqConfig, agentId: string): Promise<TaskRun> {
   const key = `agent:${agentId}`
   const stored = parseTaskRun(await storeRead($, key))
   if (stored !== null) return stored
-  const run = await launchForAgent($, config, agentId)
+  const existing = await jobForAgent($, config, agentId)
+  const launched = existing === null ? await launchForAgent($, config, agentId) : { jobId: existing.id }
+  const run = 'refusal' in launched ? { refusal: launched.refusal.slice(0, MAX_REFUSAL_CHARS) } : launched
   try {
     await $.store.set(key, run)
   } catch (err) {
