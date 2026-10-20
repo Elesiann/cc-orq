@@ -373,17 +373,32 @@ test('a wait on an unknown or unsafe job id answers unknown job and runs nothing
   expect((await $.tool.call({ tool: 'mcp__orq__wait' })).result).toBe('unknown job (missing)')
 })
 
-test('a task whose spawn was never seen runs under approval-required, even when the session and settings say auto', async ($, on) => {
-  const s = fresh({ settingsMode: 'auto' })
+test('a spawn without a permission mode whose header asks runtime=auto is refused as an escalation, and nothing launches', async ($, on) => {
+  const s = fresh()
   stubs(on, s)
   await start($)
-  await spawnTask($, s, 'Another task.', 'auto')
-  s.messages = [{ role: 'user', text: `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, toolUses: [] }]
-  const chunks = await step($, 'a-unseen')
+  const agentId = await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`)
+  const chunks = await step($, agentId)
+  expect(chunks.map((c: any) => c.kind)).toEqual(['text', 'stop'])
   expect(answerOf(chunks)).toContain('orq: task refused (runtime_mode_escalation_denied)')
   expect(s.startScripts.length).toBe(0)
-  expect(s.logs).toContain('orq: task agent a-unseen was not seen at spawn; serving it by its header')
-  expect(s.logs).toContain('orq: ceiling for a-unseen: no permission mode captured at spawn, using approval-required')
+  expect(s.logs).toContain(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`)
+})
+
+test('a turn step for an agent not spawned as orq:task yields what the chain beneath yields, even when its first line is a target header', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  on('turn.step', async function* (_$: unknown, e: any) {
+    yield { kind: 'text', index: 0, text: 'from beneath' }
+    yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+    return { turnId: e.turnId, index: e.index, answer: 'from beneath', toolUses: [], stopReason: 'end_turn', usage: null }
+  })
+  await start($)
+  s.messages = [{ role: 'user', text: `target: codex fixture-model\ncwd: ${REPO}\nGo.`, toolUses: [] }]
+  const chunks = await step($, 'a-plain')
+  expect(chunks.map((c: any) => c.kind)).toEqual(['text', 'stop'])
+  expect(answerOf(chunks)).toBe('from beneath')
+  expect(s.startScripts.length).toBe(0)
 })
 
 test('a finished task hands back under the session mode when its spawn captured none, and its ceiling stays approval-required', async ($, on) => {

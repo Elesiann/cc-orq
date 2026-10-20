@@ -160,17 +160,9 @@ function firstUserText(messages: { role: string; text: string }[]): string | und
   return messages.find((message) => message.role === 'user')?.text
 }
 
-/**
- * A task agent is one whose spawn the mod saw as orq:task. When the spawn was not seen, a first message whose
- * first line is a target header still serves the agent, under the restrictive ceiling, and the step logs it.
- */
+/** A task agent is one whose spawn the mod saw as orq:task. Every other agent passes through untouched. */
 async function isTaskAgent($: TaskEngine, agentId: string): Promise<boolean> {
-  if ((await storeRead($, `task:${agentId}`)) === TASK_SUBAGENT) return true
-  const first = firstUserText(await readMessages($, agentId)) ?? ''
-  const firstLine = first.split('\n').find((line) => line.trim() !== '') ?? ''
-  if (!/^\s*target\s*:/i.test(firstLine)) return false
-  await $.ui.log(`orq: task agent ${agentId} was not seen at spawn; serving it by its header`, { to: 'debug' })
-  return true
+  return (await storeRead($, `task:${agentId}`)) === TASK_SUBAGENT
 }
 
 function refusalText(failure: Failure): string {
