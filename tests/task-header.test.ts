@@ -50,7 +50,7 @@ test('the first line that is not a header starts the task text, even when it loo
 test('a missing target line is refused with the expected format', () => {
   const error = refusal(`cwd: ${REPO}\nJust do it.`)
   expect(error.code).toBe('invalid_request')
-  expect(error.message).toContain('The first line must be `target: <instance> <model>')
+  expect(error.message).toContain('Header lines may come in any order; `target:` and `cwd:` are required.')
 })
 
 test('an unknown isolation is refused and names the choices', () => {

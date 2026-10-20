@@ -249,7 +249,7 @@ test('a prompt without a target line is refused with the expected format', async
   await start($)
   const agentId = await spawnTask($, s, 'Just do it.', 'plan')
   const chunks = await step($, agentId)
-  expect(answerOf(chunks)).toContain('The first line must be `target: <instance> <model>')
+  expect(answerOf(chunks)).toContain('Header lines may come in any order; `target:` and `cwd:` are required.')
   expect(s.startScripts.length).toBe(0)
 })
 

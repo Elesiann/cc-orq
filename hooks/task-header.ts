@@ -32,7 +32,7 @@ const ROLES: readonly TaskRole[] = ['implementation', 'research', 'review', 'des
 const ISOLATIONS: readonly TaskIsolation[] = ['worktree', 'shared']
 const EFFORT_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const TARGET_FORMAT =
-  'The first line must be `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]`.'
+  'Header lines may come in any order; `target:` and `cwd:` are required. A target reads `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]`.'
 
 function oneOf<T extends string>(choices: readonly T[], text: string): T | undefined {
   return choices.find((choice) => choice === text)
