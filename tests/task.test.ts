@@ -5,15 +5,15 @@ const REPO = '/srv/example/repo'
 const CONFIG_PATH = '/home/test/.config/orq/config.json'
 // The session runs in SESSION; REPO lies inside it, so a task there is in scope.
 const SESSION = '/srv/example'
-const configText = (allowedRoots: string[]) =>
+const configText = (s: State) =>
   JSON.stringify({
-    jobsDir: JOBS,
+    jobsDir: s.jobsDir,
     instances: [
       { id: 'codex', driver: 'codex' },
       { id: 'opencode', driver: 'opencode' },
     ],
-    waitSeconds: 120,
-    allowedRoots,
+    waitSeconds: s.waitSeconds,
+    allowedRoots: s.allowedRoots,
   })
 
 type State = {
@@ -26,6 +26,10 @@ type State = {
   /** realpath results for paths that are not their own resolution (symlinks). */
   realpaths: Record<string, string>
   allowedRoots: string[]
+  jobsDir: string
+  waitSeconds: number
+  /** The scripts and timeouts of each wait call, in order. */
+  waitCalls: { script: string; timeoutMs?: number }[]
   statMissing: boolean
   tools: any[]
   agents: any[]
@@ -49,6 +53,9 @@ function fresh(o: Partial<State> = {}): State {
     settingsMode: undefined,
     realpaths: {},
     allowedRoots: [],
+    jobsDir: JOBS,
+    waitSeconds: 120,
+    waitCalls: [],
     statMissing: false,
     tools: [],
     agents: [],
@@ -62,7 +69,7 @@ function fresh(o: Partial<State> = {}): State {
     summary: { tid: '', in: 0, out: 0, error: false },
     ...o,
   }
-  s.files.set(CONFIG_PATH, configText(s.allowedRoots))
+  s.files.set(CONFIG_PATH, configText(s))
   return s
 }
 
@@ -131,6 +138,7 @@ function stubs(on: any, s: State) {
     }
     if (script.includes('# orq:liveness')) return run(s.liveExit)
     if (script.includes('# orq:wait')) {
+      s.waitCalls.push({ script, timeoutMs: e.init?.timeoutMs })
       if (s.waitThrow) throw new Error('aborted')
       return run(s.waitExit)
     }
@@ -466,4 +474,33 @@ test('a symlink inside the session directory that resolves outside it is refused
     'orq: task refused (cwd_out_of_scope): cwd /srv/elsewhere/real is outside the session directory and the allowed roots (/srv/example).',
   )
   expect(s.startScripts.length).toBe(0)
+})
+
+const JOB = 'task-1000000-a-1-abc'
+function seedJob(s: State): void {
+  s.files.set(
+    `${s.jobsDir}/${JOB}/meta.json`,
+    JSON.stringify({ id: JOB, kind: 'task', agentId: 'a-1', cwd: REPO, startedAt: 1000000, startedAtIso: new Date(1000000).toISOString(), runner: 'codex', model: 'fixture-model', instanceId: 'codex', driver: 'codex' }),
+  )
+}
+
+test('a config that asks for a 600 s wait keeps the default, so one wait call blocks 120 s', async ($, on) => {
+  const s = fresh({ waitSeconds: 600 })
+  stubs(on, s)
+  seedJob(s)
+  await start($)
+  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toBe('still running, 16m40s')
+  expect(s.waitCalls.length).toBe(1)
+  expect(s.waitCalls[0]?.script).toContain('$(seq 1 60)')
+  expect(s.waitCalls[0]?.timeoutMs).toBe(125000)
+})
+
+test('a wait blocks 240 s at most, the largest waitSeconds the config allows', async ($, on) => {
+  const s = fresh({ waitSeconds: 240 })
+  stubs(on, s)
+  seedJob(s)
+  await start($)
+  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toBe('still running, 16m40s')
+  expect(s.waitCalls[0]?.script).toContain('$(seq 1 120)')
+  expect(s.waitCalls[0]?.timeoutMs).toBe(245000)
 })

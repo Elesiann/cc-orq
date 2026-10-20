@@ -229,8 +229,8 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
 
 - `jobsDir`: where each job keeps its files, as an absolute path or one that
   starts with `~/`. Default `~/.cache/orq/jobs`.
-- `waitSeconds`: how long one wait step blocks before the next one, between 10 and 600. Keep it
-  under 600, the engine's stall limit for a silent subagent. Default 120.
+- `waitSeconds`: how long one wait step blocks before the next one, between 10 and 240. The
+  engine aborts a subagent silent for 600 s, so orq keeps each wait under 240 s. Default 120.
 - `allowedRoots`: directories, as absolute paths or paths that start with `~/`,
   where an `orq:task` may run besides the session's own working directory. A
   `cwd` must resolve inside one of them. Default: none. Entries that are not

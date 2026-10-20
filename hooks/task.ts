@@ -4,7 +4,7 @@
 
 import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import { loadConfig, type OrqConfig } from './config.ts'
+import { loadConfig, MAX_WAIT_SECONDS, type OrqConfig } from './config.ts'
 import { fail, isFailure, type Failure } from './contract.ts'
 import { composeAnswer, jobLiveness, launchTaskJob, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
@@ -341,8 +341,9 @@ export function registerTask(on: On): void {
     if (job === null) return { result: `unknown job ${jobId || '(missing)'}` }
     next.signal.addEventListener('abort', () => void writeCancel($, job, 'wait-abort').catch(() => undefined), { once: true })
     try {
-      const w = await $.process.run(['bash', '-c', waitScript(job.dir, Math.floor(config.waitSeconds / 2))], {
-        timeoutMs: config.waitSeconds * 1000 + 5000,
+      const slice = Math.min(config.waitSeconds, MAX_WAIT_SECONDS)
+      const w = await $.process.run(['bash', '-c', waitScript(job.dir, Math.floor(slice / 2))], {
+        timeoutMs: slice * 1000 + 5000,
       })
       if (w.exitCode === 0) return { result: 'finished' }
       if (w.exitCode === 12) return { result: 'supervisor gone' }

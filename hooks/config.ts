@@ -8,6 +8,9 @@ export type InstanceConfig = {
   env?: Record<string, string>
 }
 
+/** The longest a wait call blocks: the engine aborts a subagent silent for 600 s, so each wait stays well under it. */
+export const MAX_WAIT_SECONDS = 240
+
 export type OrqConfig = {
   jobsDir: string
   instances: InstanceConfig[]
@@ -75,9 +78,9 @@ export function parseConfig(text: string | null, home: string): ParsedConfig {
     }
   }
   if (obj.waitSeconds !== undefined) {
-    const w = obj.waitSeconds
-    if (typeof w === 'number' && Number.isFinite(w) && w >= 10 && w <= 600) config.waitSeconds = Math.floor(w)
-    else warnings.push('waitSeconds must be a number between 10 and 600, keeping the default')
+    const w = typeof obj.waitSeconds === 'number' && Number.isFinite(obj.waitSeconds) ? Math.floor(obj.waitSeconds) : Number.NaN
+    if (w >= 10 && w <= MAX_WAIT_SECONDS) config.waitSeconds = w
+    else warnings.push(`waitSeconds must be a number between 10 and ${MAX_WAIT_SECONDS}, keeping the default`)
   }
   if (obj.instances !== undefined) {
     if (!Array.isArray(obj.instances)) {

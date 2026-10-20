@@ -61,13 +61,13 @@ test('bad jobsDir values keep the default and warn', () => {
 })
 
 test('bad waitSeconds values keep the default and warn', () => {
-  for (const text of ['{"waitSeconds":3}', '{"waitSeconds":"120"}', '{"waitSeconds":1e999}', '{"waitSeconds":601}', '{"waitSeconds":null}']) {
+  for (const text of ['{"waitSeconds":3}', '{"waitSeconds":"120"}', '{"waitSeconds":1e999}', '{"waitSeconds":241}', '{"waitSeconds":600}', '{"waitSeconds":null}']) {
     const r = parseConfig(text, HOME)
     assert.equal(r.config.waitSeconds, 120, text)
-    assert.match(r.warning, /waitSeconds must be a number between 10 and 600/, text)
+    assert.match(r.warning, /waitSeconds must be a number between 10 and 240/, text)
   }
   assert.equal(parseConfig(j({ waitSeconds: 10 }), HOME).config.waitSeconds, 10)
-  assert.equal(parseConfig(j({ waitSeconds: 600 }), HOME).config.waitSeconds, 600)
+  assert.equal(parseConfig(j({ waitSeconds: 240 }), HOME).config.waitSeconds, 240)
 })
 
 test('invalid instances are dropped one by one, each with a warning', () => {
