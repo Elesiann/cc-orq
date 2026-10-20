@@ -215,6 +215,8 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
     cwd: scoped.cwd,
     prompt: taskPrompt(header.prompt, header.role),
     flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
+    runtimeMode: resolved.runtimeMode,
+    interactionMode: resolved.interactionMode,
   })
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }

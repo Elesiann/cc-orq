@@ -1,4 +1,5 @@
 import type { DriverKind } from './config.ts'
+import { INTERACTION_MODES, RUNTIME_MODES, type InteractionMode, type RuntimeMode } from './contract.ts'
 
 /** The CLI that runs a job; each provider driver maps to exactly one. */
 export type Runner = 'codex' | 'opencode' | 'agy' | 'claude'
@@ -31,6 +32,9 @@ export type JobRecord = {
   driver?: DriverKind
   /** The CODEX_HOME the job launched with, when its instance set one; the only env value meta.json keeps. */
   codexHome?: string
+  /** The runtime and interaction modes an orq:task job was resolved to; absent on older and manual jobs. */
+  runtimeMode?: RuntimeMode
+  interactionMode?: InteractionMode
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,6 +64,10 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (runner) job.runner = runner
   else if (driver) job.runner = DRIVER_RUNNER[driver]
   if (typeof raw.codexHome === 'string' && raw.codexHome !== '') job.codexHome = raw.codexHome
+  const runtimeMode = RUNTIME_MODES.find((mode) => mode === raw.runtimeMode)
+  if (runtimeMode) job.runtimeMode = runtimeMode
+  const interactionMode = INTERACTION_MODES.find((mode) => mode === raw.interactionMode)
+  if (interactionMode) job.interactionMode = interactionMode
   return job
 }
 

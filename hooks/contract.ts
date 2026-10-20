@@ -10,6 +10,9 @@ export type InteractionMode = 'default' | 'plan'
 export type TaskRole = 'implementation' | 'research' | 'review' | 'design' | 'test' | 'general'
 export type TaskIsolation = 'worktree' | 'shared'
 
+export const RUNTIME_MODES: readonly RuntimeMode[] = ['approval-required', 'auto-accept-edits', 'auto', 'full-access']
+export const INTERACTION_MODES: readonly InteractionMode[] = ['default', 'plan']
+
 export type OptionValue = string | boolean
 export type OptionSelection = { id: string; value: OptionValue }
 

@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
+import type { InteractionMode, RuntimeMode } from './contract.ts'
 import { hasControlCharacters, plainArgument } from './target.ts'
 import {
   DRIVER_RUNNER,
@@ -34,6 +35,8 @@ export type LaunchSpec = {
   driver: DriverKind
   /** Extra runner arguments, one argv item each, written to the job's flags file. */
   flags?: string[]
+  runtimeMode?: RuntimeMode
+  interactionMode?: InteractionMode
 }
 
 export type TaskLaunchSpec = {
@@ -43,6 +46,8 @@ export type TaskLaunchSpec = {
   cwd: string
   prompt: string
   flags: string[]
+  runtimeMode: RuntimeMode
+  interactionMode: InteractionMode
 }
 
 export type LaunchResult = { job: JobRecord } | { refusal: string }
@@ -229,6 +234,8 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       instanceId: spec.instanceId,
       driver: spec.driver,
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
+      ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
+      ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
     }
     try {
       await $.fs.write(`${dir}/meta.json`, JSON.stringify(meta))
@@ -309,6 +316,8 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     instanceId: spec.instance.id,
     driver: spec.instance.driver,
     flags: spec.flags,
+    runtimeMode: spec.runtimeMode,
+    interactionMode: spec.interactionMode,
   })
   // launchJob words its refusals for any kind; a task's are answered as task refusals.
   return 'refusal' in launched ? { refusal: launched.refusal.replace(/^orq: task /, `${TASK_REFUSAL}: `) } : launched

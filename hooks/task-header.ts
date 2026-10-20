@@ -3,6 +3,8 @@
 
 import {
   EFFORT_OPTION,
+  INTERACTION_MODES,
+  RUNTIME_MODES,
   fail,
   isFailure,
   type Failure,
@@ -26,8 +28,6 @@ export type TaskHeader = {
 }
 
 const HEADER_LINE = /^\s*(target|cwd|isolation|role)\s*:\s*(.*?)\s*$/i
-const RUNTIME_MODES: readonly RuntimeMode[] = ['approval-required', 'auto-accept-edits', 'auto', 'full-access']
-const INTERACTION_MODES: readonly InteractionMode[] = ['default', 'plan']
 const ROLES: readonly TaskRole[] = ['implementation', 'research', 'review', 'design', 'test', 'general']
 const ISOLATIONS: readonly TaskIsolation[] = ['worktree', 'shared']
 const EFFORT_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/

@@ -228,7 +228,15 @@ test('a header launches one task job on the named instance and the step waits th
   expect(s.startScripts.length).toBe(1)
   expect(s.startScripts[0]).toContain(` codex ${REPO} fixture-model`)
   const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
-  expect(meta).toMatchObject({ kind: 'task', agentId, instanceId: 'codex', driver: 'codex', model: 'fixture-model' })
+  expect(meta).toMatchObject({
+    kind: 'task',
+    agentId,
+    instanceId: 'codex',
+    driver: 'codex',
+    model: 'fixture-model',
+    runtimeMode: 'auto',
+    interactionMode: 'default',
+  })
   expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('--approve-for-me\n-c\nmodel_reasoning_effort=high\n')
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Say OK.')
 })
