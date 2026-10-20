@@ -494,6 +494,21 @@ test('the catalog probe is cached for ten minutes', async ($, on) => {
   expect(s.catalogCalls.length).toBe(2)
 })
 
+test('a changed instances list probes again inside the ten minutes, and the answer lists the new instance', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  await call($, 'mcp__orq__capabilities', {})
+  expect(JSON.parse(s.catalogCalls[0] ?? '[]').map((i: any) => i.instanceId)).toEqual(['codex', 'opencode', 'claudeAgent'])
+  s.files.set(CONFIG_PATH, JSON.stringify({ jobsDir: JOBS, instances: [{ id: 'codex-work', driver: 'codex' }] }))
+  s.catalogJson = JSON.stringify([{ ...JSON.parse(CATALOG)[0], instanceId: 'codex-work' }])
+  s.now += 60 * 1000
+  const answer = await call($, 'mcp__orq__capabilities', {})
+  expect(s.catalogCalls.length).toBe(2)
+  expect(JSON.parse(s.catalogCalls[1] ?? '[]')).toEqual([{ instanceId: 'codex-work', driver: 'codex' }])
+  expect(answer.providers.map((p: any) => p.providerInstanceId)).toEqual(['codex-work'])
+})
+
 test('a failed catalog probe answers no providers, logs why and is probed again on the next call', async ($, on) => {
   const s = fresh({ catalogExit: 1, catalogJson: '' })
   stubs(on, s)
