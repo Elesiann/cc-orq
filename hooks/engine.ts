@@ -8,6 +8,7 @@ import {
   buildFooter,
   failureSnippet,
   isRecord,
+  isWithin,
   isSafeJobId,
   parseJobMeta,
   parseRolloutModelEffort,
@@ -52,6 +53,8 @@ export type LaunchSpec = {
   interactionMode?: InteractionMode
   /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
   isolation?: 'worktree'
+  /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
+  worktreeScope?: string[]
 }
 
 export type TaskLaunchSpec = {
@@ -64,11 +67,14 @@ export type TaskLaunchSpec = {
   runtimeMode: RuntimeMode
   interactionMode: InteractionMode
   isolation: TaskIsolation
+  /** The session directory and the allowed roots that scoped `cwd`. */
+  scopeRoots: string[]
 }
 
 export type LaunchResult = { job: JobRecord } | { refusal: string }
 
-export type WorktreePlan = { repo: string; toplevel: string; baseSha: string; branch: string; worktree: string }
+/** `workdir` is where the job runs: the worktree, or the same subdirectory of it that `repo` is of `toplevel`. */
+export type WorktreePlan = { repo: string; toplevel: string; baseSha: string; branch: string; worktree: string; workdir: string }
 
 export type WorktreeResult = { plan: WorktreePlan } | { failure: GitFailure }
 
@@ -281,13 +287,22 @@ export async function checkoutBusy($: Engine, jobsDir: string, path: string): Pr
  * orq/TASK_ID, cut from the checkout's HEAD. Refuses, and creates nothing, when cwd is not a git
  * checkout. The path names the id the launch has just claimed, so no other job can hold it.
  */
-export async function prepareWorktree($: Engine, cwd: string, taskId: string): Promise<WorktreeResult> {
+export async function prepareWorktree($: Engine, cwd: string, taskId: string, scope?: string[]): Promise<WorktreeResult> {
   try {
     const top = await $.process.run(revParseToplevelArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
     if (top.exitCode !== 0) {
       return { failure: { code: 'not_a_repository', message: `${cwd} is not inside a git checkout${gitDetail(top.stderr)}` } }
     }
     const toplevel = top.stdout.trim()
+    // The worktree copies the whole checkout, so a checkout that reaches above the scope is refused.
+    if (scope !== undefined && !scope.some((root) => isWithin(toplevel, root))) {
+      return {
+        failure: {
+          code: 'cwd_out_of_scope',
+          message: `the git checkout ${toplevel} that holds ${cwd} is outside the session directory and the allowed roots`,
+        },
+      }
+    }
     const head = await $.process.run(revParseHeadArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
     const baseSha = head.stdout.trim()
     if (head.exitCode !== 0 || baseSha === '') {
@@ -295,11 +310,19 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string): P
     }
     const worktree = worktreePathFor(toplevel, taskId)
     const branch = branchFor(taskId)
-    const add = await $.process.run(worktreeAddArgv(cwd, worktree, branch, baseSha), { timeoutMs: GIT_TIMEOUT_MS })
-    if (add.exitCode !== 0) {
-      return { failure: { code: 'git_failed', message: `git worktree add ${worktree} failed${gitDetail(add.stderr)}` } }
+    const subdir = cwd !== toplevel && isWithin(cwd, toplevel) ? cwd.slice(toplevel.length) : ''
+    const plan: WorktreePlan = { repo: cwd, toplevel, baseSha, branch, worktree, workdir: `${worktree}${subdir}` }
+    try {
+      const add = await $.process.run(worktreeAddArgv(cwd, worktree, branch, baseSha), { timeoutMs: GIT_TIMEOUT_MS })
+      if (add.exitCode !== 0) {
+        return { failure: { code: 'git_failed', message: `git worktree add ${worktree} failed${gitDetail(add.stderr)}` } }
+      }
+    } catch (err) {
+      // A timeout or a kill can leave a half-made worktree and its branch behind.
+      await unwindWorktree($, plan)
+      return { failure: { code: 'git_failed', message: `git worktree add ${worktree} did not finish: ${String(err)}` } }
     }
-    return { plan: { repo: cwd, toplevel, baseSha, branch, worktree } }
+    return { plan }
   } catch (err) {
     return { failure: { code: 'git_failed', message: `git could not run: ${String(err)}` } }
   }
@@ -328,13 +351,13 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
     let cwd = spec.cwd
     let plan: WorktreePlan | null = null
     if (spec.isolation === 'worktree') {
-      const prepared = await prepareWorktree($, spec.cwd, id)
+      const prepared = await prepareWorktree($, spec.cwd, id, spec.worktreeScope)
       if ('failure' in prepared) {
         await markLaunchFailed($, dir)
         return { refusal: `orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}` }
       }
       plan = prepared.plan
-      cwd = plan.worktree
+      cwd = plan.workdir
     } else {
       // A shared launch writes into its checkout, so a live job there, or in a worktree of it, refuses it.
       const busy = await checkoutBusy($, config.jobsDir, spec.cwd)
@@ -448,7 +471,7 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     flags: spec.flags,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
-    ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const } : {}),
+    ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const, worktreeScope: spec.scopeRoots } : {}),
   })
   if (!('refusal' in launched)) return launched
   // launchJob words its refusals for any kind; a task's are answered as task refusals.

@@ -18,8 +18,14 @@ export function revParseHeadArgv(cwd: string): string[] {
   return gitArgv(cwd, 'rev-parse', 'HEAD')
 }
 
+/**
+ * The checkout's hooks and fsmonitor are off for this call: orq runs it outside any worker sandbox, and a
+ * hook a worker wrote in a shared task must not run with orq's rights.
+ */
+export const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'] as const
+
 export function worktreeAddArgv(cwd: string, worktree: string, branch: string, baseSha: string): string[] {
-  return gitArgv(cwd, 'worktree', 'add', worktree, '-b', branch, baseSha)
+  return gitArgv(cwd, ...NO_HOOKS, 'worktree', 'add', worktree, '-b', branch, baseSha)
 }
 
 /** Undo of worktreeAddArgv, for a launch that failed after the worktree was created. */

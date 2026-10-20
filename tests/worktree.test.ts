@@ -40,6 +40,10 @@ test('the git argv of each step names the checkout with -C and passes no shell s
     'git',
     '-C',
     CHECKOUT,
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'core.fsmonitor=false',
     'worktree',
     'add',
     `${CHECKOUT}-wt/${TASK}`,
@@ -206,7 +210,9 @@ function stubs(on: any, s: State) {
     const argv: string[] = e.argv
     if (argv[0] === 'git') {
       s.gitCalls.push(argv)
-      const sub = argv.slice(3).join(' ')
+      const rest = argv.slice(3)
+      while (rest[0] === '-c') rest.splice(0, 2)
+      const sub = rest.join(' ')
       const key = [...s.replies.keys()].find((k) => sub.startsWith(k))
       if (key === undefined) throw new Error(`unexpected git: ${sub}`)
       const reply = s.replies.get(key) ?? { exitCode: 0 }
@@ -261,10 +267,14 @@ test('launch --worktree creates the worktree beside the checkout on its own bran
   const id = claimedId(s)
   const worktree = `${CHECKOUT}-wt/${id}`
   expect(reply).toBe(`orq: launched ${id}`)
-  expect(s.gitCalls.find((argv) => argv[3] === 'worktree')).toEqual([
+  expect(s.gitCalls.find((argv) => argv.includes('worktree'))).toEqual([
     'git',
     '-C',
     SESSION,
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'core.fsmonitor=false',
     'worktree',
     'add',
     worktree,
@@ -290,7 +300,7 @@ test('launch --worktree refuses a directory that is not a checkout, starts nothi
     `orq: manual refused: not_a_repository: ${SESSION} is not inside a git checkout: fatal: not a git repository (or any of the parent directories): .git`,
   )
   expect(s.startScripts.length).toBe(0)
-  expect(s.gitCalls.some((argv) => argv[3] === 'worktree')).toBe(false)
+  expect(s.gitCalls.some((argv) => argv.includes('worktree'))).toBe(false)
   expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
 })
 
@@ -352,7 +362,7 @@ test('a worktree launch is never refused for busy: live jobs in the session dire
   stubs(on, s)
   await start($)
   expect(await orq($, 'launch --worktree codex fixture-model -- go')).toBe(`orq: launched ${claimedId(s)}`)
-  expect(s.gitCalls.some((argv) => argv[3] === 'worktree')).toBe(true)
+  expect(s.gitCalls.some((argv) => argv.includes('worktree'))).toBe(true)
 })
 
 // A launch that fails after git made its worktree undoes it: the worktree first, then the branch it made.

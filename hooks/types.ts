@@ -41,8 +41,13 @@ export type JobRecord = {
   baseSha?: string
   /** The task branch, orq/TASK_ID. */
   branch?: string
-  /** The task's worktree path, the same as cwd. */
+  /** The task's worktree path: cwd, or the directory above cwd when the task ran in a subdirectory. */
   worktree?: string
+}
+
+/** True when path is root or lies under it. Both are resolved paths. */
+export function isWithin(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

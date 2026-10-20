@@ -228,6 +228,13 @@ the files you are editing. Its worktree is `REPO_PARENT/REPO_NAME-wt/JOB_ID`,
 beside the checkout it came from, on a new branch `orq/JOB_ID` cut from that
 checkout's HEAD when the job started.
 
+A task whose `cwd` is a subdirectory of its checkout runs in the same
+subdirectory of the worktree. For an `orq:task`, the whole checkout must lie
+inside the session directory or an `allowedRoots` entry, since the worktree
+copies all of it; otherwise the task is refused with `cwd_out_of_scope`. orq
+creates the worktree with the checkout's git hooks and fsmonitor turned off, so
+a hook left in the checkout does not run with orq's rights.
+
 An `orq:task` runs in a worktree unless its header says `isolation: shared`.
 A manual launch asks for one with `--worktree`:
 
