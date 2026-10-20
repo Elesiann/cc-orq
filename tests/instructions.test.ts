@@ -25,13 +25,25 @@ test('the composed system prompt ends with the orchestration section, in the ses
   expect(prompt.sections[1].scope).toBe('session')
 })
 
-test('the orchestration section is under 4,000 bytes and names the orq tools and orq:task', async ($, on) => {
+test('the orchestration section is under 4,000 bytes and states the header lines, the taskId and the orq tools', async ($, on) => {
   stubs(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   const prompt: any = await $.prompt.compose(FACTS as any)
   const text: string = prompt.sections[1].text
   expect(new TextEncoder().encode(text).length < 4000).toBe(true)
-  for (const name of ['mcp__orq__capabilities', 'mcp__orq__status', 'mcp__orq__cancel', 'orq:task']) {
-    expect(text.includes(name)).toBe(true)
+  const terms = [
+    'target:',
+    'cwd:',
+    'isolation:',
+    'role:',
+    'taskId',
+    'mcp__orq__capabilities',
+    'mcp__orq__status',
+    'mcp__orq__cancel',
+    'mcp__orq__integrate',
+    'orq:task',
+  ]
+  for (const term of terms) {
+    expect(text.includes(term)).toBe(true)
   }
 })
