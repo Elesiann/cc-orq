@@ -397,10 +397,14 @@ recorded them.
 
 ### `mcp__orq__cancel`
 
-Takes `{"taskId": "<id>"}`. A running task answers
-`{"taskId": "...", "status": "cancel_requested"}` and gets the cancel request
-that the supervisor acts on; it then reads `cancelled`. A task that has ended, or
-is `interrupted`, answers `task_not_cancellable` and nothing is written.
+Takes `{"taskId": "<id>", "reason": "<optional text>"}`. The reason is up to 200
+characters; a longer one, or one that is not text, answers `invalid_request` and
+nothing is written. orq writes it into the cancel marker as `why="..."`. A running
+task answers `{"taskId": "...", "status": "cancel_requested"}` and gets the cancel
+request that the supervisor acts on; it then reads `cancelled`. A task whose cancel
+was already requested still reads `running`, and a repeated cancel answers
+`cancel_requested` again and rewrites the marker with its own reason. A task that
+has ended, or is `interrupted`, answers `task_not_cancellable` and nothing is written.
 
 At session start orq logs one debug line for each job in the jobs directory
 that has no exit file, with its id, kind and age.

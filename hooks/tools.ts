@@ -29,6 +29,13 @@ const TASK_ID_INPUT = {
   required: ['taskId'],
   additionalProperties: false,
 }
+const CANCEL_INPUT = {
+  type: 'object',
+  properties: { taskId: { type: 'string' }, reason: { type: 'string', maxLength: 200 } },
+  required: ['taskId'],
+  additionalProperties: false,
+}
+const CANCEL_REASON_MAX = 200
 
 const TOOL_SPECS = [
   {
@@ -50,9 +57,9 @@ const TOOL_SPECS = [
   {
     name: 'cancel',
     description:
-      'Cancel a running orq task. Input: {"taskId": "<id>"}. A running task answers cancel_requested and ends as cancelled once its supervisor stops it. ' +
+      'Cancel a running orq task. Input: {"taskId": "<id>", "reason": "<optional, up to 200 characters>"}. A running task answers cancel_requested and ends as cancelled once its supervisor stops it. ' +
       'A task that has already ended answers task_not_cancellable, and nothing is written.',
-    inputSchema: TASK_ID_INPUT,
+    inputSchema: CANCEL_INPUT,
   },
 ]
 
@@ -184,12 +191,16 @@ async function statusAnswer($: EngineInterface, input: unknown): Promise<{ resul
 async function cancelAnswer($: EngineInterface, input: unknown): Promise<{ result: string }> {
   const taskId = taskIdOf(input)
   if (taskId === null) return fail('invalid_request', `${CANCEL_TOOL} needs {"taskId": "<id>"}`)
+  const reason = isRecord(input) ? input.reason : undefined
+  if (reason !== undefined && (typeof reason !== 'string' || [...reason].length > CANCEL_REASON_MAX)) {
+    return fail('invalid_request', `reason must be text of at most ${CANCEL_REASON_MAX} characters`)
+  }
   const config = await configOf($)
   const job = await readMeta($, config.jobsDir, taskId)
   if (!job) return fail('task_not_found', `no task ${taskId}`)
   const status = taskStatusOf(await jobView($, job))
   if (status !== 'running') return fail('task_not_cancellable', `task ${taskId} is ${status}, not running`)
-  await writeCancel($, job)
+  await writeCancel($, job, reason)
   const answer: TaskCancelResult = { taskId: job.id, status: 'cancel_requested' }
   return { result: JSON.stringify(answer) }
 }

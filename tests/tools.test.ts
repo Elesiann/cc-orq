@@ -313,6 +313,47 @@ test('cancel of a finished or interrupted job is task_not_cancellable and writes
   expect((await call($, 'mcp__orq__cancel', { taskId: 'nope' })).error.code).toBe('task_not_found')
 })
 
+test('cancel writes its reason into the cancel marker', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-why', 8000000)
+  stubs(on, s)
+  await start($)
+  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-why', reason: 'the user stopped it' })).toEqual({
+    taskId: 'job-why',
+    status: 'cancel_requested',
+  })
+  const marker = s.writes.find((w) => w.path === `${JOBS}/job-why/cancel`)
+  expect(marker?.text.includes('why="the user stopped it"')).toBe(true)
+})
+
+test('cancel refuses a reason that is not a string or is longer than 200 characters, and writes nothing', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-long', 8000000)
+  stubs(on, s)
+  await start($)
+  const tooLong = await call($, 'mcp__orq__cancel', { taskId: 'job-long', reason: 'x'.repeat(201) })
+  expect(tooLong.error.code).toBe('invalid_request')
+  const notText = await call($, 'mcp__orq__cancel', { taskId: 'job-long', reason: 5 })
+  expect(notText.error.code).toBe('invalid_request')
+  expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
+  const atLimit = await call($, 'mcp__orq__cancel', { taskId: 'job-long', reason: 'x'.repeat(200) })
+  expect(atLimit).toEqual({ taskId: 'job-long', status: 'cancel_requested' })
+})
+
+test('a job with a cancel request still reads as running, and cancelling it again answers cancel_requested', async ($, on) => {
+  const s = fresh()
+  seedJob(s, 'job-again', 8000000)
+  s.files.set(`${JOBS}/job-again/cancel`, 'cancelled at 1970-01-01T00:00:00.000Z\n')
+  stubs(on, s)
+  await start($)
+  expect((await call($, 'mcp__orq__status', { taskId: 'job-again' })).status).toBe('running')
+  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-again', reason: 'second request' })).toEqual({
+    taskId: 'job-again',
+    status: 'cancel_requested',
+  })
+  expect(s.writes.some((w) => w.path === `${JOBS}/job-again/cancel` && w.text.includes('why="second request"'))).toBe(true)
+})
+
 test('capabilities lists the probed providers with the modes of the settings and the probe sees the configured instances', async ($, on) => {
   const s = fresh({ settings: { permissions: { defaultMode: 'plan' } } })
   stubs(on, s)
