@@ -201,11 +201,10 @@ export type JobView =
 export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
   const exit = await readText($, `${job.dir}/exit`)
   if (exit !== null) return finishedOutcome($, job, exit)
-  // A question comes before liveness: the CLI may still be alive for a moment after it asks, and that is a wait.
-  if ((await readQuestion($, job)) !== null) return { status: 'waiting', endedAt: null }
   const liveness = await jobLiveness($, job)
   if (liveness === 'gone') return { status: 'interrupted', endedAt: null }
   if (liveness === 'running') {
+    if ((await readQuestion($, job)) !== null) return { status: 'waiting', endedAt: null }
     return { status: (await exists($, `${job.dir}/cancel`)) ? 'cancelling' : 'running', endedAt: null }
   }
   return finishedOutcome($, job, await readText($, `${job.dir}/exit`))

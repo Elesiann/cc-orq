@@ -24,6 +24,7 @@ type State = {
   startScripts: string[]
   commands: { name: string }[]
   mtimes: Map<string, number>
+  goneJobs: Set<string>
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -35,6 +36,7 @@ function fresh(o: Partial<State> = {}): State {
     startScripts: [],
     commands: [],
     mtimes: new Map(),
+    goneJobs: new Set(),
     ...o,
   }
 }
@@ -81,7 +83,10 @@ function stubs(on: any, s: State) {
       s.startScripts.push(script)
       return result(0)
     }
-    if (script.includes('# orq:liveness')) return result(11)
+    if (script.includes('# orq:liveness')) {
+      const gone = [...s.goneJobs].some((id) => script.includes(`${JOBS}/${id}/pgid`))
+      return result(gone ? 12 : 11)
+    }
     throw new Error(`unexpected process.run: ${script.slice(0, 80)}`)
   })
 }
@@ -160,6 +165,22 @@ test('a job that wrote question.txt and has no exit is waiting, and a blank ques
   expect(rowOf('job-blank')?.[2]).toBe('running')
   expect(await orq($, 'result job-asked')).toBe('orq: job-asked is waiting for an answer to its question')
   expect(await orq($, 'cancel job-asked')).toBe('orq: cancel requested for job-asked')
+})
+
+test('a job that asked a question and whose supervisor is gone is interrupted, and cancel writes nothing', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [{ name: 'job-asked-gone', kind: 'dir' }]
+  seedJob(s, 'job-asked-gone', 4000000)
+  s.files.set(`${JOBS}/job-asked-gone/question.txt`, 'Which database should the migration target?\n')
+  s.goneJobs.add('job-asked-gone')
+  stubs(on, s)
+  await start($)
+  expect(rowStatus(await orq($, 'list'), 'job-asked-gone')).toBe('interrupted')
+  expect(await orq($, 'result job-asked-gone')).toBe(
+    'orq: job-asked-gone was interrupted: its supervisor is gone and it left no exit file',
+  )
+  expect(await orq($, 'cancel job-asked-gone')).toBe('orq: job-asked-gone has no live supervisor; nothing to cancel')
+  expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
 })
 
 function rowStatus(listText: string, id: string): string | undefined {
