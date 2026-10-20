@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { parseLaunch } from '../hooks/engine.ts'
 import { parseJobMeta } from '../hooks/types.ts'
 import {
+  branchDeleteArgv,
   branchFor,
   busyJob,
   isAncestorArgv,
@@ -15,6 +16,7 @@ import {
   unmergedFilesArgv,
   worktreeAddArgv,
   worktreePathFor,
+  worktreeRemoveArgv,
   type JobPlace,
 } from '../hooks/worktree.ts'
 
@@ -50,6 +52,16 @@ test('the git argv of each step names the checkout with -C and passes no shell s
   expect(unmergedFilesArgv(CHECKOUT)).toEqual(['git', '-C', CHECKOUT, 'diff', '--name-only', '--diff-filter=U'])
   expect(mergeAbortArgv(CHECKOUT)).toEqual(['git', '-C', CHECKOUT, 'merge', '--abort'])
   expect(mergeHeadArgv(CHECKOUT)).toEqual(['git', '-C', CHECKOUT, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'])
+  expect(worktreeRemoveArgv(CHECKOUT, `${CHECKOUT}-wt/${TASK}`)).toEqual([
+    'git',
+    '-C',
+    CHECKOUT,
+    'worktree',
+    'remove',
+    '--force',
+    `${CHECKOUT}-wt/${TASK}`,
+  ])
+  expect(branchDeleteArgv(CHECKOUT, `orq/${TASK}`)).toEqual(['git', '-C', CHECKOUT, 'branch', '-D', `orq/${TASK}`])
 })
 
 test('ff-only and merge differ only in their flags, and neither forces', () => {
@@ -130,6 +142,9 @@ type State = {
   mkdirScripts: string[]
   startScripts: string[]
   beforeList: (() => void) | null
+  failWrite: ((path: string) => boolean) | null
+  startExit: number
+  logs: { text: string; to: string }[]
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -143,6 +158,9 @@ function fresh(o: Partial<State> = {}): State {
     mkdirScripts: [],
     startScripts: [],
     beforeList: null,
+    failWrite: null,
+    startExit: 0,
+    logs: [],
     ...o,
   }
 }
@@ -156,7 +174,10 @@ const checkout = (s: State) => {
 function stubs(on: any, s: State) {
   on('session.start', () => ({ cwd: SESSION }))
   on('command.register', (_$: unknown, e: any) => ({ value: { command: e.name } }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_$: unknown, e: any) => {
+    s.logs.push({ text: e.text, to: e.to })
+    return { value: undefined }
+  })
   on('env.get', () => ({ value: '/home/test' }))
   on('session.cwd', () => ({ value: SESSION }))
   on('clock.now', () => ({ value: s.now }))
@@ -167,6 +188,7 @@ function stubs(on: any, s: State) {
     throw new Error(`ENOENT: ${e.path}`)
   })
   on('fs.write', (_$: unknown, e: any) => {
+    if (s.failWrite?.(e.path)) throw new Error(`EACCES: ${e.path}`)
     s.writes.push({ path: e.path, text: e.text })
     s.files.set(e.path, e.text)
     return { value: undefined }
@@ -199,7 +221,7 @@ function stubs(on: any, s: State) {
     }
     if (script.includes('# orq:start')) {
       s.startScripts.push(script)
-      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      return { value: { exitCode: s.startExit, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     throw new Error(`unexpected process.run: ${script.slice(0, 80)}`)
   })
@@ -311,6 +333,43 @@ test('launch --worktree goes ahead when the job holding the path has exited', as
   await start($)
   expect(await orq($, 'launch --worktree codex fixture-model -- go')).toBe(`orq: launched ${claimedId(s)}`)
   expect(s.gitCalls.some((argv) => argv[3] === 'worktree')).toBe(true)
+})
+
+// A launch that fails after git made its worktree undoes it: the worktree first, then the branch it made.
+const unwound: [string, (s: State) => void, string][] = [
+  ['meta.json write', (s) => { s.failWrite = (path) => path.endsWith('/meta.json') }, 'could not write its job directory'],
+  ['start', (s) => { s.startExit = 1 }, 'failed to start (exit 1)'],
+]
+for (const [failure, breakLaunch, reason] of unwound) {
+  test(`launch --worktree undoes its worktree and branch when the ${failure} fails`, async ($, on) => {
+    const s = fresh()
+    checkout(s)
+    s.replies.set('worktree remove', { exitCode: 0 })
+    s.replies.set('branch -D', { exitCode: 0 })
+    breakLaunch(s)
+    stubs(on, s)
+    await start($)
+    const reply = await orq($, 'launch --worktree codex fixture-model -- go')
+    const id = claimedId(s)
+    expect(reply).toContain(reason)
+    expect(s.gitCalls.slice(-2)).toEqual([
+      ['git', '-C', SESSION, 'worktree', 'remove', '--force', `${CHECKOUT}-wt/${id}`],
+      ['git', '-C', SESSION, 'branch', '-D', `orq/${id}`],
+    ])
+  })
+}
+
+test('a failed undo goes to the debug log, and the refusal still names the launch failure', async ($, on) => {
+  const s = fresh()
+  checkout(s)
+  s.failWrite = (path) => path.endsWith('/meta.json')
+  s.replies.set('worktree remove', { exitCode: 128, stderr: 'fatal: contains modified or untracked files\n' })
+  s.replies.set('branch -D', { exitCode: 1, stderr: 'error: cannot delete branch\n' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'launch --worktree codex fixture-model -- go')).toContain('could not write its job directory')
+  const undo = s.logs.filter((line) => line.text.includes('after a failed launch'))
+  expect(undo.map((line) => line.to)).toEqual(['debug', 'debug'])
 })
 
 test('list reads a job whose worktree fields are malformed and shows it under its cwd', async ($, on) => {

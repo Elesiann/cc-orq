@@ -238,6 +238,12 @@ checkout (`not_a_repository`), when a job without an exit file already uses the
 worktree path (`worktree_busy`), or when git cannot create the worktree
 (`git_failed`).
 
+A launch that fails after git created its worktree removes that worktree and
+its branch again, on a best-effort basis. When that removal fails, the debug log
+records it, and the refusal still names the launch's own failure. Remove the
+leftovers by hand with `git worktree remove --force PATH` and
+`git branch -D orq/JOB_ID`.
+
 ### `mcp__orq__integrate`
 
 Merges a finished task's branch into the checkout the task was launched from.

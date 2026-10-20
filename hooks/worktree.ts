@@ -22,6 +22,16 @@ export function worktreeAddArgv(cwd: string, worktree: string, branch: string, b
   return gitArgv(cwd, 'worktree', 'add', worktree, '-b', branch, baseSha)
 }
 
+/** Undo of worktreeAddArgv, for a launch that failed after the worktree was created. */
+export function worktreeRemoveArgv(cwd: string, worktree: string): string[] {
+  return gitArgv(cwd, 'worktree', 'remove', '--force', worktree)
+}
+
+/** Undo of the branch worktreeAddArgv created. The branch is new and only the launch wrote to it. */
+export function branchDeleteArgv(cwd: string, branch: string): string[] {
+  return gitArgv(cwd, 'branch', '-D', branch)
+}
+
 export function statusArgv(cwd: string): string[] {
   return gitArgv(cwd, 'status', '--porcelain')
 }

@@ -19,6 +19,7 @@ import {
 } from './types.ts'
 import {
   GIT_TIMEOUT_MS,
+  branchDeleteArgv,
   branchFor,
   busyJob,
   gitDetail,
@@ -27,9 +28,10 @@ import {
   revParseToplevelArgv,
   worktreeAddArgv,
   worktreePathFor,
+  worktreeRemoveArgv,
 } from './worktree.ts'
 
-export type Engine = Pick<EngineInterface, 'clock' | 'env' | 'fs' | 'plugin' | 'process' | 'session'>
+export type Engine = Pick<EngineInterface, 'clock' | 'env' | 'fs' | 'plugin' | 'process' | 'session' | 'ui'>
 
 export const LIST_LIMIT = 50
 const PROCESS_TIMEOUT_MS = 30000
@@ -219,6 +221,33 @@ async function markLaunchFailed($: Engine, dir: string): Promise<void> {
   }
 }
 
+async function debugLog($: Engine, text: string): Promise<void> {
+  try {
+    await $.ui.log(text, { to: 'debug' })
+  } catch {
+    /* the refusal the caller returns is the signal */
+  }
+}
+
+/**
+ * Best effort after a launch failed once its worktree existed: remove the worktree, then its branch.
+ * A failed undo goes to the debug log, and the refusal still names the launch's own failure.
+ */
+async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
+  const undo: [string, string[]][] = [
+    ['remove the worktree', worktreeRemoveArgv(plan.repo, plan.worktree)],
+    ['delete the branch', branchDeleteArgv(plan.repo, plan.branch)],
+  ]
+  for (const [what, argv] of undo) {
+    try {
+      const r = await $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
+      if (r.exitCode !== 0) await debugLog($, `orq: could not ${what} after a failed launch${gitDetail(r.stderr)}`)
+    } catch (err) {
+      await debugLog($, `orq: could not ${what} after a failed launch: ${String(err)}`)
+    }
+  }
+}
+
 /**
  * The id of a job without an exit file whose cwd or worktree is `path`, or null. It reads the job
  * directory rather than memory, so it holds across sessions.
@@ -337,6 +366,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       }
     } catch (err) {
       await markLaunchFailed($, dir)
+      if (plan) await unwindWorktree($, plan)
       return { refusal: `orq: ${spec.kind} could not write its job directory: ${String(err)}` }
     }
     const script = startScript({
@@ -354,10 +384,12 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       startCode = r.exitCode
     } catch (err) {
       await markLaunchFailed($, dir)
+      if (plan) await unwindWorktree($, plan)
       return { refusal: `orq: ${spec.kind} could not start its job: ${String(err)}` }
     }
     if (startCode !== 0) {
       await markLaunchFailed($, dir)
+      if (plan) await unwindWorktree($, plan)
       return {
         refusal:
           startCode === 11
