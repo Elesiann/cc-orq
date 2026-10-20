@@ -35,6 +35,82 @@ export type ResolvedTarget = {
   interactionMode: InteractionMode
 }
 
+// What the capabilities, status and cancel tools answer, in the shapes T3 Code publishes
+// (packages/contracts/src/orchestratorMcp.ts, MIT).
+export type OptionChoice = { id: string; label: string; description?: string; isDefault?: boolean }
+export type OptionDescriptor = {
+  id: string
+  label: string
+  type: 'select'
+  options: OptionChoice[]
+  currentValue?: string
+}
+
+export type CatalogModel = { id: string; label: string | null; options?: OptionDescriptor[] }
+
+/** One configured provider instance as the catalog probe reports it. */
+export type ProviderInstance = {
+  instanceId: string
+  driver: DriverKind
+  displayName: string | null
+  enabled: boolean
+  installed: boolean
+  authenticated: boolean | null
+  /** Why the driver cannot run now; null when it can. */
+  unavailableReason: string | null
+  models: CatalogModel[]
+}
+
+export type ProviderCapability = {
+  providerInstanceId: string
+  driverKind: DriverKind
+  displayName: string | null
+  models: CatalogModel[]
+  canRunChildTask: boolean
+  canRunCrossProviderChildTask: boolean
+  constraints: string[]
+}
+
+export type CapabilitiesResult = {
+  parentThreadId: null
+  inheritedProviderInstanceId: null
+  inheritedModel: null
+  runtimeMode: RuntimeMode
+  interactionMode: InteractionMode
+  providers: ProviderCapability[]
+  features: {
+    appOwnedSubagents: true
+    asyncPolling: true
+    cancellation: true
+    batchThreadCreation: false
+    threadManagement: false
+    incrementalThreadRead: false
+    scheduledTasks: false
+    maxBatchThreads: 0
+  }
+}
+
+export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+export type WorkState = 'working' | 'waiting_for_children' | 'result_available'
+
+/** What `mcp__orq__status` answers for one task, read from its job directory. */
+export type TaskStatusResult = {
+  taskId: string
+  status: TaskStatus
+  workState: WorkState
+  kind: string
+  startedAtIso: string
+  finishedAtIso?: string
+  instanceId?: string
+  model?: string
+  /** The final answer of a completed task. */
+  result?: string
+  /** Why a failed or interrupted task ended. */
+  error?: string
+}
+
+export type TaskCancelResult = { taskId: string; status: 'cancel_requested' }
+
 /**
  * Every failure code an orq answer can name, refusals of orq:task and tool answers alike. A code is
  * part of the contract, so a rename is a breaking change for the instructions that name it.
@@ -57,6 +133,10 @@ export const FAILURE_CODES = [
   'worktree_busy',
   // No meta.json for the task id.
   'task_not_found',
+  // mcp__orq__cancel on a task that is not running.
+  'task_not_cancellable',
+  // The capability probe found the provider unable to run a child task.
+  'capability_denied',
   // The task ran without a worktree, so it has no branch to merge.
   'no_worktree',
   // The destination checkout has uncommitted or untracked changes.
