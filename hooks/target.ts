@@ -165,7 +165,7 @@ export function runnerPolicy(driver: DriverKind, runtimeMode: RuntimeMode, inter
       if (interactionMode === 'plan') return { flags: ['--permission-mode', 'plan'] }
       switch (runtimeMode) {
         case 'approval-required':
-          return { flags: [] }
+          return { flags: ['--permission-mode', 'manual'] }
         case 'auto-accept-edits':
           return { flags: ['--permission-mode', 'acceptEdits'] }
         case 'auto':

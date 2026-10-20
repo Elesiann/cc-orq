@@ -205,7 +205,7 @@ const RUNNER_CASES: {
   { driver: 'antigravity', runtime: 'auto-accept-edits', interaction: 'default', flags: ['--mode', 'accept-edits'] },
   { driver: 'antigravity', runtime: 'approval-required', interaction: 'plan', flags: ['--sandbox', '--mode', 'plan'] },
   { driver: 'antigravity', runtime: 'full-access', interaction: 'default', flags: ['--dangerously-skip-permissions'] },
-  { driver: 'claudeAgent', runtime: 'approval-required', interaction: 'default', flags: [] },
+  { driver: 'claudeAgent', runtime: 'approval-required', interaction: 'default', flags: ['--permission-mode', 'manual'] },
   { driver: 'claudeAgent', runtime: 'auto-accept-edits', interaction: 'default', flags: ['--permission-mode', 'acceptEdits'] },
   { driver: 'claudeAgent', runtime: 'auto', interaction: 'default', flags: ['--permission-mode', 'auto'] },
   { driver: 'claudeAgent', runtime: 'full-access', interaction: 'default', flags: ['--permission-mode', 'bypassPermissions'] },
@@ -273,8 +273,8 @@ for (const driver of DRIVERS) {
   }
 }
 
-test('claudeAgent approval-required sends no flag, because the CLI default permission mode already prompts', () => {
-  expect(runnerPolicy('claudeAgent', 'approval-required', 'default')).toEqual({ flags: [] })
+test('claudeAgent approval-required pins manual, so the settings default mode cannot widen the child', () => {
+  expect(runnerPolicy('claudeAgent', 'approval-required', 'default')).toEqual({ flags: ['--permission-mode', 'manual'] })
 })
 
 test('runnerPolicy runs antigravity auto as the narrower accept-edits, since agy has no auto-review mode', () => {

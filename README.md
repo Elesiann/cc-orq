@@ -177,12 +177,14 @@ CLI default broader than the ceiling.
 | `codex` | `-s read-only` | `-s workspace-write` | `--approve-for-me` | `-s danger-full-access --dangerously-bypass-approvals-and-sandbox` | refused |
 | `opencode` | `--agent plan` | refused | `--auto` | refused | `--agent plan` |
 | `antigravity` | `--sandbox` | `--mode accept-edits` | `--mode accept-edits` (narrower) | `--dangerously-skip-permissions` | adds `--mode plan` |
-| `claudeAgent` | no flag: the CLI default prompts | `--permission-mode acceptEdits` | `--permission-mode auto` | `--permission-mode bypassPermissions` | `--permission-mode plan` |
+| `claudeAgent` | `--permission-mode manual` | `--permission-mode acceptEdits` | `--permission-mode auto` | `--permission-mode bypassPermissions` | `--permission-mode plan` |
 
 Supported runtime modes per driver: `codex`, `antigravity` and `claudeAgent`
 support all four; `opencode` supports `approval-required` and `auto`. The
-`claudeAgent` `approval-required` row sends no flag because the CLI's default
-permission mode already prompts for dangerous operations.
+`claudeAgent` `approval-required` row pins `--permission-mode manual`, so the
+`permissions.defaultMode` in the user's settings cannot widen the child. The
+`codex` `auto` row sends `--approve-for-me` without `-s`, because the CLI refuses
+the pair; its sandbox follows the Codex config.
 
 ### Handback
 
