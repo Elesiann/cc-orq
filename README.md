@@ -311,6 +311,12 @@ codes orq answers with are `task_not_found`, `task_not_cancellable` and
 `invalid_request`. A task is one job: its `taskId` is the job id that
 `/orq list` shows.
 
+The parent session gets the orchestration instructions through the session-start
+context: a `SessionStart` hook runs `scripts/session-start.sh`, which prints
+`instructions.md` as `additionalContext` on startup, resume, clear and compact.
+A test keeps `instructions.md` equal to the `ORCHESTRATION_INSTRUCTIONS` constant
+in `hooks/instructions.ts`, so change the constant and the file together.
+
 ### `mcp__orq__capabilities`
 
 Takes no input. Answers the provider instances of the configured `instances`
