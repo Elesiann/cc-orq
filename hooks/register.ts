@@ -3,6 +3,7 @@ import { registerEngine, registerOrqCommand } from './commands.ts'
 import { loadConfig } from './config.ts'
 import { registerTask, registerTaskSurface } from './task.ts'
 import { declareIntegrateTool, registerIntegrate } from './integrate.ts'
+import { registerInstructions } from './instructions.ts'
 import { registerTools, startTools } from './tools.ts'
 
 export const register: Register = (on) => {
@@ -10,6 +11,7 @@ export const register: Register = (on) => {
   registerTask(on)
   registerIntegrate(on)
   registerTools(on)
+  registerInstructions(on)
   on('session.start', async ($, e, next) => {
     try {
       const { config, source, warning } = await loadConfig($)
