@@ -16,8 +16,8 @@ Early. This version loads and reads its configuration, runs detached jobs, and
 lets you list, show, cancel and launch them with `/orq`. The `orq:task` agent
 runs a task as a job for the parent session, under the parent's permission
 ceiling; see "Delegating with orq:task". A task can run in its own git
-worktree, and the `integrate` tool merges that work back. The other MCP tools
-land in later releases; see the changelog when it exists.
+worktree, and the `integrate` tool merges that work back. The `capabilities`,
+`status` and `cancel` tools are described under Tools.
 
 ## Requirements
 
@@ -301,6 +301,109 @@ A refusal names one of these codes:
 When a merge conflicts, redelegate a rebase of the task branch to the same
 worker, then integrate again. orq never forces a merge, and it never resolves a
 conflict for you.
+
+## Tools
+
+The mod serves three MCP tools, named `mcp__orq__capabilities`,
+`mcp__orq__status` and `mcp__orq__cancel`. Each answers with a JSON text. A
+refusal has the shape `{"error": {"code": "...", "message": "..."}}`, and the
+codes orq answers with are `task_not_found`, `task_not_cancellable` and
+`invalid_request`. A task is one job: its `taskId` is the job id that
+`/orq list` shows.
+
+### `mcp__orq__capabilities`
+
+Takes no input. Answers the provider instances of the configured `instances`
+and the permission mode the parent session runs under. Each provider has its
+`providerInstanceId`, its `driverKind`, its `models` (each with the `options`
+the CLI reports, such as `reasoningEffort` and its allowed values),
+`canRunChildTask` and `constraints`, the reasons it cannot run now.
+
+```json
+{
+  "parentThreadId": null,
+  "inheritedProviderInstanceId": null,
+  "inheritedModel": null,
+  "runtimeMode": "approval-required",
+  "interactionMode": "default",
+  "providers": [
+    {
+      "providerInstanceId": "codex",
+      "driverKind": "codex",
+      "displayName": null,
+      "models": [{ "id": "<model-id>", "label": "<label>", "options": [] }],
+      "canRunChildTask": true,
+      "canRunCrossProviderChildTask": true,
+      "constraints": []
+    }
+  ],
+  "features": {
+    "appOwnedSubagents": true,
+    "asyncPolling": true,
+    "cancellation": true,
+    "batchThreadCreation": false,
+    "threadManagement": false,
+    "incrementalThreadRead": false,
+    "scheduledTasks": false,
+    "maxBatchThreads": 0
+  }
+}
+```
+
+The probe runs `scripts/catalog.py` over the configured instances and is cached
+for ten minutes. A probe that fails answers no providers, logs the reason, and
+is run again on the next call. The permission mode is the one the session
+records, else the `defaultMode` of the settings. `plan` gives `approval-required`
+with `plan`; `acceptEdits` gives `auto-accept-edits`; `auto` gives `auto`;
+`bypassPermissions` gives `full-access`; `default`, `dontAsk` and any other value
+give `approval-required`.
+
+### `mcp__orq__status`
+
+Takes `{"taskId": "<id>"}` and reads that job's directory, so it also answers for
+jobs of earlier sessions. An unknown or unsafe id answers `task_not_found`.
+
+```json
+{
+  "taskId": "manual-1760000000000-manual-k3j9x2",
+  "status": "completed",
+  "workState": "result_available",
+  "kind": "manual",
+  "startedAtIso": "2026-10-19T12:00:00.000Z",
+  "finishedAtIso": "2026-10-19T12:02:05.000Z",
+  "instanceId": "codex",
+  "model": "<model-id>",
+  "result": "The answer."
+}
+```
+
+`result` is set for a completed task. `error` is set for a failed task (its exit
+code and the redacted stderr tail) and for an interrupted one. `finishedAtIso`
+is set once the job has ended. `instanceId` and `model` are set when the job
+recorded them.
+
+| `status` | Meaning |
+| --- | --- |
+| `queued` | Reserved; orq does not produce it yet. |
+| `running` | The supervisor is alive. A task with a cancel request stays `running` until the supervisor stops it. |
+| `waiting` | Reserved; orq does not produce it yet. |
+| `completed` | Exit 0, a non-empty final message, and no error in the event stream. |
+| `failed` | Any other end: a non-zero exit, an empty final message, or an error in the event stream. |
+| `cancelled` | Exit 124, after a cancel request. |
+| `interrupted` | The supervisor is gone and the job left no exit file. |
+
+`workState` is `working` while the task runs, `waiting_for_children` when
+`waiting` is produced, and `result_available` once the task has ended.
+
+### `mcp__orq__cancel`
+
+Takes `{"taskId": "<id>"}`. A running task answers
+`{"taskId": "...", "status": "cancel_requested"}` and gets the cancel request
+that the supervisor acts on; it then reads `cancelled`. A task that has ended, or
+is `interrupted`, answers `task_not_cancellable` and nothing is written.
+
+At session start orq logs one debug line for each job in the jobs directory
+that has no exit file, with its id, kind and age.
 
 ## Configuration
 
