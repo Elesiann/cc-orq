@@ -133,7 +133,7 @@ export const FAILURE_CODES = [
   'worktree_busy',
   // No meta.json for the task id.
   'task_not_found',
-  // mcp__orq__cancel on a task that is not running.
+  // mcp__orq__cancel on a task that has ended or is interrupted.
   'task_not_cancellable',
   // The capability probe found the provider unable to run a child task.
   'capability_denied',
