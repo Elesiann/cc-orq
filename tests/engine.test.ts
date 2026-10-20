@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { parseLaunch } from '../hooks/engine.ts'
+import { QUESTION_PROTOCOL } from '../hooks/question.ts'
 import {
   buildFooter,
   failureSnippet,
@@ -197,7 +198,7 @@ test('launch prints the job id, writes meta.json and prompt.txt, and creates the
     instanceId: 'codex',
     driver: 'codex',
   })
-  expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Do the thing')
+  expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe(`Do the thing\n\n${QUESTION_PROTOCOL}`)
   expect(s.startScripts.length).toBe(1)
 })
 

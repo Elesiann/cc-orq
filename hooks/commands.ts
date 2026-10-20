@@ -13,6 +13,7 @@ import {
   type Engine,
   type JobView,
 } from './engine.ts'
+import { QUESTION_PROTOCOL } from './question.ts'
 import { DRIVER_RUNNER, formatDuration, renderTable, type JobRecord, type TableRow } from './types.ts'
 
 const USAGE = 'orq: usage: /orq list | /orq result JOB_ID | /orq cancel JOB_ID | /orq launch [--worktree] INSTANCE MODEL -- PROMPT'
@@ -79,7 +80,7 @@ async function launchText($: Engine, config: OrqConfig, rest: string): Promise<s
     runner: DRIVER_RUNNER[instance.driver],
     model: parsed.model,
     cwd: await $.session.cwd(),
-    prompt: parsed.prompt,
+    prompt: `${parsed.prompt}\n\n${QUESTION_PROTOCOL}`,
     env: instance.env ?? {},
     instanceId: instance.id,
     driver: instance.driver,

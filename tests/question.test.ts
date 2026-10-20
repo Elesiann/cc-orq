@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
+import { QUESTION_FILE, QUESTION_PROTOCOL } from '../hooks/question.ts'
+
 // The child-question paths need only launch, list and result, so this file carries a trimmed copy of
 // the engine.test.ts harness. Shared helpers wait until the O3 and O4 tests settle.
 
@@ -189,4 +191,20 @@ test('a question left by a job that failed or was cancelled is not answered as B
   expect(rowStatus(list, 'job-cancelled')).toBe('cancelled')
   expect(await orq($, 'result job-failed')).toBe('orq: job-failed failed (exit 1)')
   expect(await orq($, 'result job-cancelled')).toBe('orq: job-cancelled was cancelled (exit 124)')
+})
+
+test('a manual launch ends its prompt with the question protocol after the user text', async ($, on) => {
+  const s = fresh({ now: 2000000 })
+  stubs(on, s)
+  await start($)
+  const id = launchedId(await orq($, 'launch codex fixture-model -- Do the thing'))
+  const prompt = s.writes.find((w) => w.path === `${JOBS}/${id}/prompt.txt`)?.text ?? ''
+  expect(prompt.startsWith('Do the thing\n\n')).toBe(true)
+  expect(prompt.endsWith(QUESTION_PROTOCOL)).toBe(true)
+})
+
+test('the question protocol fits in 300 bytes and points at the file the engine reads', () => {
+  expect(new TextEncoder().encode(QUESTION_PROTOCOL).length).toBeLessThanOrEqual(300)
+  expect(QUESTION_PROTOCOL).toContain(`$ORQ_JOB_DIR/${QUESTION_FILE}`)
+  expect(QUESTION_PROTOCOL).toContain('BLOCKED:')
 })
