@@ -34,7 +34,7 @@ const TOOL_SPECS = [
   {
     name: 'capabilities',
     description:
-      'List the orq provider instances (as configured: codex, opencode, antigravity, claudeAgent) with their live models from the catalog probe, ' +
+      'List the orq provider instances (as configured in the instances list) with their live models from the catalog probe, ' +
       `each model's options and allowed values (such as reasoningEffort), each instance's constraints, and the parent session's runtimeMode and interactionMode. ` +
       'Read it before you name a target in an orq:task brief, and do not guess model ids. Takes no input.',
     inputSchema: NO_INPUT,
