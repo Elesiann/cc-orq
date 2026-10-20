@@ -15,7 +15,7 @@ import {
   runnerPolicy,
   taskPrompt,
 } from './target.ts'
-import { formatDuration, isRecord, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
+import { formatDuration, isRecord, isWithin, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -35,7 +35,7 @@ const WAIT_SCHEMA = {
 const TASK_AGENT_DESCRIPTION =
   'Runs one self-contained task on a configured orq instance (Codex, OpenCode, Antigravity or Claude) in the background. ' +
   'The prompt starts with two required header lines, `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]` and ' +
-  '`cwd: /absolute/path`, then optionally `isolation: worktree | shared` and `role: implementation | research | review | design | test | general`, ' +
+  '`cwd: /absolute/path`, then optionally `isolation: worktree | shared` (default worktree: a new branch in its own git worktree, so cwd must be in a git checkout) and `role: implementation | research | review | design | test | general`, ' +
   'then the task. runtime and interaction can narrow the session, never widen it. The answer arrives when the job ends.'
 const ONE_LINE_PROMPT =
   'An orq runner: the orq plugin serves your steps and runs your task on the external CLI its target line names. Call mcp__orq__wait with the job id until the job finishes.'
@@ -116,10 +116,6 @@ async function resolvePath($: TaskEngine, path: string, mode: '-e' | '-m'): Prom
 }
 
 /** True when `path` is `root` or lies beneath it, on whole path segments: "/a/bc" is not inside "/a/b". */
-export function isWithin(path: string, root: string): boolean {
-  return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
-}
-
 /** The session's directory and each allowedRoots entry, resolved through symlinks. An entry that cannot be resolved is left out. */
 async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
   let session = ''
@@ -141,7 +137,7 @@ async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
  * The directory a task runs in, resolved through symlinks. It must lie inside the session's directory or an
  * allowedRoots entry; a path that does not exist, or is not a directory, is refused too.
  */
-async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): Promise<{ cwd: string } | { refusal: string }> {
+async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): Promise<{ cwd: string; roots: string[] } | { refusal: string }> {
   const cwd = await resolvePath($, requested, '-e')
   if (cwd === null) return { refusal: `${TASK_REFUSAL}: directory does not exist: ${requested}` }
   const roots = await scopeRoots($, config)
@@ -152,7 +148,7 @@ async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): P
     }
   }
   try {
-    if ((await $.fs.stat(cwd)).kind === 'dir') return { cwd }
+    if ((await $.fs.stat(cwd)).kind === 'dir') return { cwd, roots }
   } catch {
     /* reported below as not a directory */
   }
@@ -205,9 +201,6 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (isFailure(policy)) return { refusal: refusalText(policy) }
   const scoped = await scopedCwd($, config, header.cwd)
   if ('refusal' in scoped) return scoped
-  if (header.isolation === 'worktree') {
-    await $.ui.log(`orq: isolation worktree is not implemented yet; the task for ${agentId} runs in ${scoped.cwd}`, { to: 'debug' })
-  }
   const launched = await launchTaskJob($, config, {
     agentId,
     instance: resolved.instance,
@@ -217,6 +210,8 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
     flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
     runtimeMode: resolved.runtimeMode,
     interactionMode: resolved.interactionMode,
+    isolation: header.isolation,
+    scopeRoots: scoped.roots,
   })
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }

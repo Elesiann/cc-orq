@@ -47,6 +47,16 @@ type State = {
   waitExit: number
   waitThrow: boolean
   summary: { tid: string; in: number; out: number; error: boolean }
+  /** Every git argv the mod ran, in order. */
+  gitCalls: string[][]
+  /** When set, git says the task cwd is not inside a checkout. */
+  notRepo: boolean
+  /** The checkout git reports for the task cwd; the cwd itself when unset. */
+  toplevel?: string
+  /** When set, git worktree add throws, as a timeout would. */
+  addThrows: boolean
+  /** When set, the task cwd is missing from HEAD, so the worktree has no such directory. */
+  missingInHead: boolean
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -76,6 +86,10 @@ function fresh(o: Partial<State> = {}): State {
     waitExit: 11,
     waitThrow: false,
     summary: { tid: '', in: 0, out: 0, error: false },
+    gitCalls: [],
+    notRepo: false,
+    addThrows: false,
+    missingInHead: false,
     ...o,
   }
   s.files.set(CONFIG_PATH, configText(s))
@@ -141,6 +155,7 @@ function stubs(on: any, s: State) {
   })
   on('fs.stat', (_$: unknown, e: any) => {
     if (s.statMissing) throw new Error(`ENOENT: ${e.path}`)
+    if (s.missingInHead && String(e.path).includes('-wt/')) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: false } }
   })
   on('process.run', (_$: unknown, e: any) => {
@@ -151,6 +166,20 @@ function stubs(on: any, s: State) {
       return run(0, `${s.realpaths[path] ?? path}\n`)
     }
     if (argv[0] === 'python3') return run(0, JSON.stringify(s.summary) + '\n')
+    if (argv[0] === 'git') {
+      s.gitCalls.push(argv)
+      const rest = argv.slice(3)
+      while (rest[0] === '-c') rest.splice(0, 2)
+      const sub = rest.join(' ')
+      if (sub === 'rev-parse --show-toplevel') return s.notRepo ? run(128, '') : run(0, `${s.toplevel ?? argv[2]}\n`)
+      if (sub === 'rev-parse HEAD') return run(0, 'abc1234\n')
+      if (sub.startsWith('worktree add ')) {
+        if (s.addThrows) throw new Error('timed out')
+        return run(0)
+      }
+      if (sub.startsWith('worktree remove ') || sub.startsWith('branch -D ')) return run(0)
+      throw new Error(`unexpected git: ${sub}`)
+    }
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) return run(0)
     if (script.includes('# orq:start')) {
@@ -208,7 +237,7 @@ test('session start registers the wait tool and the orq:task agent, which runs i
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect(s.tools.map((t) => t.name)).toEqual(['wait'])
+  expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate'])
   expect(s.agents.map((a) => a.name)).toEqual(['task'])
   expect(s.agents[0].tools).toEqual(['mcp__orq__wait'])
   expect(s.agents[0].background).toBe(true)
@@ -219,7 +248,7 @@ test('a header launches one task job on the named instance and the step waits th
   const s = fresh()
   stubs(on, s)
   await start($)
-  const agentId = await spawnTask($, s, `target: codex fixture-model effort=high\ncwd: ${REPO}\nSay OK.`, 'auto')
+  const agentId = await spawnTask($, s, `target: codex fixture-model effort=high\ncwd: ${REPO}\nisolation: shared\nSay OK.`, 'auto')
   const chunks = await step($, agentId)
   expect(chunks.map((c: any) => c.kind)).toEqual(['tool', 'input', 'stop'])
   expect(chunks[0].name).toBe('mcp__orq__wait')
@@ -239,6 +268,102 @@ test('a header launches one task job on the named instance and the step waits th
   })
   expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('--approve-for-me\n-c\nmodel_reasoning_effort=high\n')
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe('Say OK.')
+})
+
+test('a task without an isolation line runs in its own worktree on branch orq/JOB_ID, and meta.json records it', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  const chunks = await step($, agentId)
+  expect(chunks[0].name).toBe('mcp__orq__wait')
+  const id = JSON.parse(chunks[1].json).job as string
+  const worktree = `${REPO}-wt/${id}`
+  expect(s.gitCalls.map((argv) => argv.filter((a) => !a.startsWith('core.') && a !== '-c').slice(3).join(' '))).toEqual([
+    'rev-parse --show-toplevel',
+    'rev-parse HEAD',
+    `worktree add ${worktree} -b orq/${id} abc1234`,
+  ])
+  expect(s.startScripts[0]).toContain(` codex ${worktree} fixture-model`)
+  const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+  expect(meta).toMatchObject({ cwd: worktree, repo: REPO, baseSha: 'abc1234', branch: `orq/${id}`, worktree })
+})
+
+test('worktree add runs with the checkout hooks and fsmonitor off', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto'))
+  const add = s.gitCalls.find((argv) => argv.includes('worktree')) ?? []
+  expect(add.slice(0, 7)).toEqual(['git', '-C', REPO, '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'])
+})
+
+test('a task in a subdirectory of its checkout runs in the same subdirectory of the worktree', async ($, on) => {
+  const s = fresh({ toplevel: REPO })
+  stubs(on, s)
+  await start($)
+  const chunks = await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}/pkg/a\nGo.`, 'auto'))
+  const id = JSON.parse(chunks[1].json).job as string
+  expect(s.startScripts[0]).toContain(` codex ${REPO}-wt/${id}/pkg/a fixture-model`)
+  const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+  expect(meta).toMatchObject({ cwd: `${REPO}-wt/${id}/pkg/a`, worktree: `${REPO}-wt/${id}`, repo: `${REPO}/pkg/a` })
+})
+
+test('a worktree task whose checkout reaches above the session directory is refused cwd_out_of_scope, and git adds nothing', async ($, on) => {
+  const s = fresh({ toplevel: '/srv' })
+  stubs(on, s)
+  await start($)
+  const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')))
+  expect(answer).toContain('orq: task refused (taskId none): cwd_out_of_scope: the git checkout /srv that holds')
+  expect(s.gitCalls.some((argv) => argv.includes('worktree'))).toBe(false)
+  expect(s.startScripts).toEqual([])
+})
+
+test('a task whose cwd is not in HEAD is refused, the worktree and branch are removed, and nothing starts', async ($, on) => {
+  const s = fresh({ toplevel: REPO, missingInHead: true })
+  stubs(on, s)
+  await start($)
+  const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}/scratch\nGo.`, 'auto')))
+  expect(answer).toContain(`invalid_request: ${REPO}/scratch is not in HEAD of its checkout`)
+  const subs = s.gitCalls.map((argv) => argv.filter((a) => !a.startsWith('core.') && a !== '-c').slice(3).join(' '))
+  expect(subs.some((sub) => sub.startsWith('worktree remove --force'))).toBe(true)
+  expect(subs.some((sub) => sub.startsWith('branch -D orq/'))).toBe(true)
+  expect(s.startScripts).toEqual([])
+})
+
+test('a worktree add that throws removes the worktree and the branch, and nothing starts', async ($, on) => {
+  const s = fresh({ addThrows: true })
+  stubs(on, s)
+  await start($)
+  const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')))
+  expect(answer).toContain('git_failed: git worktree add')
+  const subs = s.gitCalls.map((argv) => argv.filter((a) => !a.startsWith('core.') && a !== '-c').slice(3).join(' '))
+  expect(subs.some((sub) => sub.startsWith('worktree remove --force'))).toBe(true)
+  expect(subs.some((sub) => sub.startsWith('branch -D orq/'))).toBe(true)
+  expect(s.startScripts).toEqual([])
+})
+
+test('isolation: shared runs the task in cwd itself and runs no git', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nisolation: shared\nGo.`, 'auto')
+  await step($, agentId)
+  expect(s.gitCalls).toEqual([])
+  expect(s.startScripts[0]).toContain(` codex ${REPO} fixture-model`)
+  const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+  expect(meta.worktree).toBeUndefined()
+})
+
+test('a worktree task whose cwd is not a git checkout is refused not_a_repository, names isolation: shared, and nothing starts', async ($, on) => {
+  const s = fresh({ notRepo: true })
+  stubs(on, s)
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  const answer = answerOf(await step($, agentId))
+  expect(answer).toContain('orq: task refused (taskId none): not_a_repository')
+  expect(answer).toContain('isolation: shared')
+  expect(s.startScripts).toEqual([])
 })
 
 test('the flags file is written before the start script runs, so the supervisor reads it at startup', async ($, on) => {
@@ -459,7 +584,7 @@ test('a cwd inside the session directory is accepted, and the job runs there', a
   const s = fresh()
   stubs(on, s)
   await start($)
-  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/nested/repo\nGo.`, 'auto')
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/nested/repo\nisolation: shared\nGo.`, 'auto')
   const chunks = await step($, agentId)
   expect(chunks[0].name).toBe('mcp__orq__wait')
   expect(s.startScripts[0]).toContain(` codex ${SESSION}/nested/repo fixture-model`)
@@ -481,7 +606,7 @@ test('a cwd under an allowedRoots entry is accepted', async ($, on) => {
   const s = fresh({ allowedRoots: ['/srv/shared'] })
   stubs(on, s)
   await start($)
-  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/shared/tool\nGo.', 'auto')
+  const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/shared/tool\nisolation: shared\nGo.', 'auto')
   const chunks = await step($, agentId)
   expect(chunks[0].name).toBe('mcp__orq__wait')
   expect(s.startScripts[0]).toContain(' codex /srv/shared/tool fixture-model')

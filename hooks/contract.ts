@@ -35,18 +35,45 @@ export type ResolvedTarget = {
   interactionMode: InteractionMode
 }
 
-export type FailureCode =
-  | 'provider_unavailable'
-  | 'runtime_mode_escalation_denied'
-  | 'interaction_mode_escalation_denied'
-  | 'invalid_request'
-  | 'runtime_mode_unsupported'
-  | 'cwd_out_of_scope'
-  | 'merge_conflict'
-  | 'dirty_worktree'
-  | 'already_integrated'
-  | 'worktree_busy'
+/**
+ * Every failure code an orq answer can name, refusals of orq:task and tool answers alike. A code is
+ * part of the contract, so a rename is a breaking change for the instructions that name it.
+ */
+export const FAILURE_CODES = [
+  // The named provider instance is not configured.
+  'provider_unavailable',
+  // The task asked for a broader runtime or interaction mode than the parent's ceiling.
+  'runtime_mode_escalation_denied',
+  'interaction_mode_escalation_denied',
+  // The driver has no flag that enforces the resolved runtime or interaction mode.
+  'runtime_mode_unsupported',
+  // The input does not match the schema, or a header line is malformed.
+  'invalid_request',
+  // cwd resolves outside the session directory and the allowed roots.
+  'cwd_out_of_scope',
+  // The directory is not inside a git checkout, or git cannot read the checkout.
+  'not_a_repository',
+  // A shared launch into a checkout where a live job runs, or is a worktree of it. Worktree launches are never refused for it.
+  'worktree_busy',
+  // No meta.json for the task id.
+  'task_not_found',
+  // The task ran without a worktree, so it has no branch to merge.
+  'no_worktree',
+  // The destination checkout has uncommitted or untracked changes.
+  'dirty_worktree',
+  // The task branch is already reachable from HEAD.
+  'already_integrated',
+  // ff-only cannot move HEAD: the destination has commits the task does not have.
+  'not_fast_forward',
+  // The merge stopped on conflicts. It was aborted; the answer lists the files.
+  'merge_conflict',
+  // git failed in a way no other code names.
+  'git_failed',
+] as const
 
+export type FailureCode = (typeof FAILURE_CODES)[number]
+
+/** A typed failure in T3's shape, so the model can branch on the code. */
 export type Failure = { error: { code: FailureCode; message: string } }
 
 export function fail(code: FailureCode, message: string): Failure {
@@ -57,4 +84,38 @@ export function isFailure(value: unknown): value is Failure {
   if (typeof value !== 'object' || value === null || !('error' in value)) return false
   const error = value.error
   return typeof error === 'object' && error !== null && 'code' in error && 'message' in error
+}
+
+/** The failure of a worktree or integrate step; integrate answers it as `{ ok: false, error }`. */
+export type GitFailure = { code: FailureCode; message: string; files?: string[] }
+
+/** The tool names and the input of `integrate`. */
+export const INTEGRATE_TOOL = 'integrate'
+export const INTEGRATE_TOOL_NAME = 'mcp__orq__integrate'
+
+export const INTEGRATE_STRATEGIES = ['ff-only', 'merge'] as const
+export type IntegrateStrategy = (typeof INTEGRATE_STRATEGIES)[number]
+
+export type IntegrateInput = { taskId: string; strategy: IntegrateStrategy }
+
+export type Integrated = { taskId: string; mergedSha: string; branch: string; worktree: string }
+
+export const INTEGRATE_DESCRIPTION =
+  "Merges a finished task's branch into the checkout the task was launched from. Call it once the task has " +
+  'finished: only its commits are merged, and uncommitted work in the task worktree is not. The default strategy ' +
+  'ff-only moves HEAD without a merge commit; merge makes one. A conflict is aborted and its files are ' +
+  'listed: redelegate a rebase to the same worker, then integrate again. The task worktree stays in place, ' +
+  'and orq never forces a merge.'
+
+export const INTEGRATE_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    taskId: { type: 'string', description: 'The job id of the finished task.' },
+    strategy: {
+      type: 'string',
+      enum: [...INTEGRATE_STRATEGIES],
+      description: 'ff-only (the default) or merge.',
+    },
+  },
+  required: ['taskId'],
 }

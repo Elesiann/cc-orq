@@ -10,6 +10,7 @@
     "test": "node --test tests/pure/*.test.mjs",
     "test:plugin": "claude plugin test .",
     "test:shell": "bash tests/runners-shell.sh",
+    "test:integrate": "bash tests/integrate-shell.sh",
     "validate": "claude plugin validate . --strict"
   },
   "devDependencies": {
