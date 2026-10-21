@@ -1,60 +1,130 @@
 # cc-orq
 
-cc-orq brings a T3 Code style orchestration surface into Claude Code. The main
-session delegates self-contained tasks to external coding agents (Codex,
-OpenCode, Claude headless) through one agent type, `cc-orq:task`, and follows,
-cancels and integrates their work through MCP tools. Workers run as detached
-jobs that survive the session, keep their state on disk, and report back as
-text.
+[![CI](https://github.com/Elesiann/cc-orq/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-orq/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Claude Code 2.1.306](https://img.shields.io/badge/Claude%20Code-2.1.306-d97757)
+![Linux](https://img.shields.io/badge/platform-Linux-555)
 
-cc-orq does not pick models or providers. The parent session names the provider
-instance and model in every task. Its slash commands keep the short name, `/orq`
-and `/orq-panel`, and so do its directories, `~/.config/orq` and `~/.cache/orq`.
+**Hand tasks from Claude Code to Codex, OpenCode or another Claude, and watch
+them run above your prompt.**
 
-## Status
+cc-orq is a [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview)
+that brings the orchestrator of [T3 Code](https://github.com/pingdotgg/t3code)
+into Claude Code. Your session delegates self-contained tasks through one agent
+type, `cc-orq:task`, to the coding agent CLIs you already use. Each task runs as
+a detached job in its own git worktree, under your session's permission
+ceiling, and its answer comes back to the conversation when it ends.
 
-Version 0.1.0, the first public release. The parent session delegates through
-the `cc-orq:task` agent (see "Delegating with cc-orq:task"), follows its jobs
-on the task card and in `/orq-panel`, and reads, cancels and integrates them
-through the tools under "Tools" and "Worktrees and integrate". `/orq` lists,
-shows, cancels and launches jobs by hand. See `CHANGELOG.md` for the release
-notes and "Known limitations" for what does not work yet.
+<p align="center">
+  <img src="docs/images/card.gif" width="900" alt="The task card above the prompt: a Claude, an OpenCode and a Codex task, each with its model, status, last action and a running timer; the OpenCode task finishes and shows its token counts">
+</p>
+
+<sub>The screenshots use demo jobs.</sub>
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Delegating with cc-orq:task](#delegating-with-cc-orqtask)
+- [Worktrees and integrate](#worktrees-and-integrate)
+- [Tools](#tools)
+- [Task card](#task-card)
+- [Configuration](#configuration)
+- [Child questions](#child-questions)
+- [How it works](#how-it-works)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
+- [Contributing](#contributing)
+- [Credits](#credits)
+
+## Features
+
+- **One agent type for every worker.** `cc-orq:task` runs a task on Codex,
+  OpenCode, Antigravity or the Claude CLI. The task's header names the
+  provider instance and the model, so the parent session picks the right model
+  for each job.
+- **A permission ceiling.** A task never runs with a broader mode than the
+  session that spawned it, and a driver refuses a mode it cannot enforce with a
+  CLI flag.
+- **Jobs that outlive the session.** Workers run detached, keep their prompt,
+  events and answer on disk, and can be read, cancelled or integrated from a
+  later session.
+- **Worktree isolation.** A task works on its own branch in its own checkout,
+  and `integrate` merges it back with a fast-forward or a merge commit.
+- **A live view.** A card above the prompt shows each job's model, status, last
+  action and timer, and `/orq-panel` lists the jobs, tails one, and cancels it.
+- **T3 Code's tool surface.** `capabilities`, `status` and `cancel` answer in
+  the shapes of T3 Code's orchestrator contract.
+- **Questions instead of guesses.** A blocked worker writes a question and
+  stops, and the parent answers it in a new task.
+
+<p align="center">
+  <img src="docs/images/panel.png" width="560" alt="The /orq-panel pane: four jobs with their status, elapsed time and model, cancel buttons on the running ones, and the last events of the selected Codex job">
+</p>
 
 ## Requirements
 
-- Claude Code with function hooks enabled: add
-  `"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"` to the `env` block of
-  `~/.claude/settings.json`. Tested on Claude Code 2.1.306.
-- Linux only, with `bash`, `python3` and `git`. macOS is not supported yet: the job start script
-  needs `systemd-run` or `setsid` to give each job its own session, and macOS has neither by
-  default.
-- The CLI of each provider you want to delegate to: `codex`, `opencode`,
-  `claude`.
+| | Version | Why |
+| --- | --- | --- |
+| [Claude Code](https://code.claude.com) | 2.1.306 (tested) | Function hooks and session state, with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` |
+| Linux | | Jobs run under `systemd-run` or `setsid` |
+| `bash`, `python3`, `git` | | The supervisor, the event extractor and worktrees |
+| A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
+
+Turn function hooks on in the `env` block of `~/.claude/settings.json`:
+
+```json
+{
+  "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }
+}
+```
+
+macOS is not supported yet: the job start script needs `systemd-run` or
+`setsid` to give each job its own session, and macOS has neither by default.
 
 ## Install
-
-From GitHub:
 
 ```bash
 claude plugin marketplace add Elesiann/cc-orq
 claude plugin install cc-orq@cc-orq
 ```
 
-From a local clone:
-
-```bash
-claude plugin marketplace add /path/to/cc-orq
-claude plugin install cc-orq@cc-orq
-```
-
+Then run `/reload-plugins` in a running session, or start a new one.
 `claude plugin install` reports that the `cardDisplay` option is not set yet.
-Until you set it, the task card uses `band`; see "Setting `cardDisplay`".
+Until you set it, the task card uses `band`; see [Task card](#task-card).
 
-For one session only, without installing:
+To try a checkout without installing it:
 
 ```bash
-claude --plugin-dir /path/to/cc-orq
+git clone https://github.com/Elesiann/cc-orq
+claude --plugin-dir ./cc-orq
 ```
+
+## Quick start
+
+Ask the session to delegate, or call the agent yourself:
+
+```
+Agent({ subagent_type: "cc-orq:task", run_in_background: true, prompt: "..." })
+```
+
+The prompt starts with a header, then the task:
+
+```
+target: codex my-model effort=high
+cwd: /path/to/repo
+
+Add a retry with exponential backoff to the S3 uploader and cover it with tests.
+```
+
+The session gets the orchestration instructions at start, so it reads
+`mcp__cc-orq__capabilities` for the live model ids before it names a target.
+The job appears on the card. When it ends, the answer comes back with a footer
+that carries its `taskId`, and `mcp__cc-orq__integrate` merges the task's
+branch into your checkout.
 
 ## Commands
 
@@ -337,6 +407,9 @@ and the permission mode the parent session runs under. Each provider has its
 the CLI reports, such as `reasoningEffort` and its allowed values),
 `canRunChildTask` and `constraints`, the reasons it cannot run now.
 
+<details>
+<summary>Example answer</summary>
+
 ```json
 {
   "parentThreadId": null,
@@ -368,6 +441,8 @@ the CLI reports, such as `reasoningEffort` and its allowed values),
 }
 ```
 
+</details>
+
 The probe runs `scripts/catalog.py` over the configured instances and is cached
 for ten minutes. A probe that fails answers no providers, logs the reason, and
 is run again on the next call. The permission mode is the one the session
@@ -380,6 +455,9 @@ give `approval-required`.
 
 Takes `{"taskId": "<id>"}` and reads that job's directory, so it also answers for
 jobs of earlier sessions. An unknown or unsafe id answers `task_not_found`.
+
+<details>
+<summary>Example answer</summary>
 
 ```json
 {
@@ -394,6 +472,8 @@ jobs of earlier sessions. An unknown or unsafe id answers `task_not_found`.
   "result": "The answer."
 }
 ```
+
+</details>
 
 `result` is set for a completed task. `error` is set for a failed task (its exit
 code and the redacted stderr tail) and for an interrupted one. `finishedAtIso`
@@ -537,6 +617,9 @@ by one. Both cases log a warning naming the field in the debug log
 
 ## Job directory layout
 
+<details>
+<summary>Files in a job directory, and what the exit code means</summary>
+
 Each job gets its own directory, `<jobsDir>/<id>`. The job id has the form
 `<kind>-<start in ms>-<agent suffix>-<random>`. A manual launch uses `manual`
 for both the kind and the agent suffix, for example
@@ -573,6 +656,8 @@ A job without an `exit` file is `waiting` while its process group, named in `pgi
 still exists and its `question.txt` is non-blank. Otherwise it is `running` while
 that group exists. When the group is gone, `/orq list` shows the job as `interrupted`
 and leaves its elapsed time as `—`, whether or not it wrote a question.
+
+</details>
 
 ## Child questions
 
@@ -623,6 +708,18 @@ the `cc-orq:task` agent type and the MCP tools, and starts the task card; on
 
 A delegated task takes this path:
 
+```mermaid
+flowchart LR
+  parent["Claude Code session"] -- "Agent(cc-orq:task)" --> task["cc-orq:task<br/>(answered by the mod)"]
+  task -- "starts" --> job["Job directory<br/>supervise.sh"]
+  job -- "runs" --> cli["codex · opencode<br/>claude · agy"]
+  task -- "mcp__cc-orq__wait" --> job
+  job -- "final message" --> task
+  task -- "handback" --> parent
+  parent -- "status · cancel · integrate" --> job
+  job -. "rows" .-> card["Task card<br/>/orq-panel"]
+```
+
 1. The parent calls `Agent` with `subagent_type: "cc-orq:task"`. On
    `agent.spawn`, `hooks/task.ts` records the permission mode of that call,
    which sets the task's ceiling.
@@ -647,6 +744,18 @@ task's branch, `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane
 from the job directories, and `scripts/session-start.sh` gives the parent
 `instructions.md`.
 
+## Troubleshooting
+
+| You see | Do this |
+| --- | --- |
+| `/orq` and the `mcp__cc-orq__*` tools are missing | Check that `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is `1`, that `cc-orq` is enabled in `/plugin`, then run `/reload-plugins` |
+| `capabilities` lists no providers, or misses one | Run the provider CLI once in a shell and log in. The debug log (`claude --debug-file`) gives the probe's reason |
+| `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
+| A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
+| `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
+| `integrate` answers `merge_conflict` | Delegate a rebase of the task branch to the same worker, then integrate again |
+| The card does not show | The surface must be the terminal or the desktop app, and `cardDisplay` must not be `off` |
+
 ## Known limitations
 
 - Linux only. macOS has neither `systemd-run` nor `setsid` by default.
@@ -666,22 +775,22 @@ from the job directories, and `scripts/session-start.sh` gives the parent
   result stays readable through `/orq result` and `status`.
 - The task card and `/orq-panel` draw only in the terminal and the desktop app.
 
-## Development
+## Contributing
 
-Node 22.18 or newer (the tests import TypeScript directly).
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the setup, the checks to run and the rules, and
+[SECURITY.md](SECURITY.md) to report a vulnerability. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
 
-```bash
-npm install
-npm test              # pure modules, node --test
-npm run typecheck     # tsc against the types Claude Code generates on load
-npm run validate      # claude plugin validate . --strict
-npm run test:plugin   # claude plugin test . (needs the Claude Code CLI)
-```
+## Credits
 
-Claude Code writes `.claude-plugin/types/` the first time it loads the plugin
-from this folder in an interactive session; `npm run typecheck` needs that
-folder.
+- [T3 Code](https://github.com/pingdotgg/t3code) for the orchestrator design,
+  the tool shapes and the orchestration instructions that cc-orq adapts (MIT).
+- [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/sst/opencode)
+  and [Claude Code](https://code.claude.com), the workers it drives.
+
+Notices for adapted code are in [NOTICE](NOTICE).
 
 ## License
 
-MIT. See `LICENSE` and `NOTICE`.
+[MIT](LICENSE)
