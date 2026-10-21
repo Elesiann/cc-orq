@@ -25,6 +25,9 @@ type State = {
   runs: number
   hangLists: number
   invalidates: number
+  card: unknown
+  cardVersion: number
+  stateWrites: number
   statuses: (string | undefined)[]
   extractSummary: { tid: string; in: number; out: number; error: boolean }
 }
@@ -42,6 +45,9 @@ function fresh(): State {
     runs: 0,
     hangLists: 0,
     invalidates: 0,
+    card: undefined,
+    cardVersion: 0,
+    stateWrites: 0,
     statuses: [],
     extractSummary: { tid: 'thread-1', in: 1, out: 1, error: false },
   }
@@ -69,6 +75,13 @@ function stubs(on: On, s: State): void {
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('state.get', () => ({ value: { value: s.card, version: s.cardVersion } }))
+  on('state.set', (_$, e) => {
+    s.stateWrites += 1
+    s.card = e.value
+    s.cardVersion += 1
+    return { value: { isSet: true, version: s.cardVersion } }
+  })
   // The kit fails a mount that no hook beneath the plugins answers ("no implementation for ui.render").
   // What the lower plugin draws stays under the card, so a test can check both survive.
   on('ui.render', ($, e) => {
@@ -243,6 +256,33 @@ test('five running jobs with maxRows 3 draw two card rows and a +3 more row', as
   expect(text.includes('+3 more')).toBe(true)
 })
 
+test('five running jobs with maxRows 2 draw one card row and a +4 more row', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  for (let i = 0; i < 5; i++) seedJob(s, `job-${i}`, T0 + i)
+  await start($)
+  await clock.advance(2000)
+  const text = await band($, 'terminal', { maxRows: 2 })
+  expect(count(text, ' · running · ')).toBe(1)
+  expect(text.includes('"+4 more"')).toBe(true)
+})
+
+test('five running jobs with maxRows 1 draw the newest job on one row, the count first', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  for (let i = 0; i < 5; i++) seedJob(s, `job-${i}`, T0 + i)
+  await start($)
+  await clock.advance(2000)
+  const text = await band($, 'terminal', { maxRows: 1 })
+  expect(count(text, ' · running · ')).toBe(1)
+  expect(count(text, '(+4 more) codex · fixture-model · running · ')).toBe(1)
+  expect(text.includes('"+4 more"')).toBe(false)
+})
+
 test('a job whose exit file is 60 s old is dropped and one that ended 10 s ago is shown', async ($, on) => {
   clearCardState()
   const s = fresh()
@@ -325,7 +365,7 @@ test('a refresh stuck for over 60 s no longer blocks the next tick', async ($, o
   expect(count(await band($, 'terminal'), ' · running · ')).toBe(1)
 })
 
-test('an empty band does not invalidate on each tick', async ($, on) => {
+test('an empty band writes no state and does not invalidate on each tick', async ($, on) => {
   clearCardState()
   const s = fresh()
   stubs(on, s)
@@ -333,7 +373,38 @@ test('an empty band does not invalidate on each tick', async ($, on) => {
   await start($)
   await clock.advance(6000)
   expect(s.lists).toBe(3)
+  expect(s.stateWrites).toBe(0)
   expect(s.invalidates).toBe(0)
+})
+
+test('the band draws from session state, so a reloaded module draws the card before its first tick', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(s.stateWrites).toBe(1)
+  clearCardState()
+  const before = io(s)
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(1)
+  expect(io(s)).toEqual(before)
+})
+
+test('a session end for any reason but /clear or a resume empties the card', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(1)
+  await $.session.end({ reason: 'other', sessionId: 'session-1', resume: { id: 'session-1' } })
+  expect(s.card).toEqual([])
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(0)
 })
 
 test('a session end in status mode clears the status line', { options: { cardDisplay: 'status' } }, async ($, on) => {

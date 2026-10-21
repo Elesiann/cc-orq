@@ -5,6 +5,7 @@
   "author": { "name": "Elesiann" },
   "license": "MIT",
   "keywords": ["claude-code", "plugin", "orchestration", "codex", "opencode", "subagents"],
+  "types": "./types/index.d.ts",
   "userConfig": {
     "cardDisplay": {
       "type": "string",

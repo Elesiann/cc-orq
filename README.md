@@ -445,7 +445,12 @@ starts a new refresh.
 The card draws nothing when a survey holds the band, when the band gives it no
 rows, when the surface is neither the terminal nor the desktop, and when no job
 is listed. When the rows do not fit the band, the card draws the newest rows and
-a last row, `+N more`, that counts the rest.
+a last row, `+N more`, that counts the rest. A band of one row shows the newest
+job with the count in front, `(+N more) codex · …`, so a long line keeps it.
+
+Each refresh writes the rows to the session state `orq.card`, and the band draws
+from there without reading a file. The state outlives a reload of the plugin, so
+the card stays on screen until the next refresh.
 
 `/clear` and a resume keep the card running. Any other end of the session, such
 as `/exit`, a logout, or a `-p` run that finishes, stops it.

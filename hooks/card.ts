@@ -1,9 +1,10 @@
-import type { On, PluginOptions, RenderElement, RenderInput, SessionEndInput, Timer } from 'claude-code'
+import type { EngineInterface, On, PluginOptions, RenderElement, RenderInput, SessionEndInput, Timer } from 'claude-code'
 
 import { loadConfig } from './config.ts'
 import { listJobs, type Engine } from './engine.ts'
 import { cachedJobView, renderTail, tailEvents } from './panel.ts'
-import { formatDuration, type JobRecord, type JobStatus } from './types.ts'
+import type { OrqCardRow } from '../types/index'
+import { formatDuration, type JobRecord } from './types.ts'
 
 export const REFRESH_MS = 2000
 const ENDED_SHOWN_MS = 60000
@@ -11,10 +12,15 @@ const STUCK_REFRESH_MS = 60000
 
 export type CardMode = 'band' | 'status' | 'off'
 
-export type CardRow = { id: string; instance: string; model: string; status: JobStatus; lastAction: string; durationMs: number }
+export type CardRow = OrqCardRow
+
+type CardEngine = Engine & Pick<EngineInterface, 'state'>
+
+/** The rows, newest first. Session state survives a hot reload, and a render that reads it is drawn again when it changes. */
+const CARD = { plugin: 'orq', key: 'card' } as const
 
 let mode: CardMode = 'band'
-let rowsNewestFirst: CardRow[] = []
+/** Rows of jobs that ended, kept so an ended job is read once rather than on every tick. */
 let endedRowsById = new Map<string, CardRow>()
 let timer: Timer | null = null
 /** The refresh now running, and the clock time it began; null when none runs. */
@@ -58,7 +64,7 @@ async function rowOf($: Engine, job: JobRecord, fallbackEndAt: number): Promise<
   }
 }
 
-async function refresh($: Engine): Promise<void> {
+async function refresh($: CardEngine): Promise<void> {
   let run: { startedAt: number } | null = null
   try {
     const now = await $.clock.now()
@@ -79,10 +85,8 @@ async function refresh($: Engine): Promise<void> {
         nextRows.push(row)
       }
     }
-    const hadRows = rowsNewestFirst.length > 0
-    rowsNewestFirst = nextRows
     endedRowsById = nextEnded
-    show($, hadRows)
+    await show($, nextRows)
   } catch (err) {
     await debugLog($, 'refresh failed', err)
   } finally {
@@ -100,17 +104,18 @@ function clearStatus($: Engine): void {
   }
 }
 
-function show($: Engine, hadRows: boolean): void {
+async function show($: CardEngine, rows: CardRow[]): Promise<void> {
   try {
     if (mode === 'band') {
-      // An empty band before and after has nothing to redraw.
-      if (hadRows || rowsNewestFirst.length > 0) $.ui.invalidate('ui.render')
+      // An empty band before and after has nothing to write.
+      if (rows.length === 0 && ((await $.state.get(CARD)).value ?? []).length === 0) return
+      await $.state.set(CARD, rows)
       return
     }
     if (mode !== 'status') return
-    const [newest] = rowsNewestFirst
+    const [newest] = rows
     if (newest) {
-      const more = rowsNewestFirst.length > 1 ? ` (+${rowsNewestFirst.length - 1} more)` : ''
+      const more = rows.length > 1 ? ` (+${rows.length - 1} more)` : ''
       $.ui.status(`${cardLine(newest)}${more}`)
       statusShown = true
       staleStatus = false
@@ -125,27 +130,32 @@ function show($: Engine, hadRows: boolean): void {
 }
 
 function shouldDraw(e: RenderInput<'AbovePrompt'>): boolean {
-  if (mode !== 'band' || rowsNewestFirst.length === 0) return false
+  if (mode !== 'band') return false
   if (e.props.hasSurvey || e.props.maxRows < 1) return false
   return e.surface === 'terminal' || e.surface === 'desktop'
 }
 
-function drawBand($: Engine, e: RenderInput<'AbovePrompt'>, rest: RenderElement): RenderElement {
+/** The band's lines for `max` rows. With one row the count leads, since truncate-end cuts a long line at its end. */
+function bandLines(rows: CardRow[], max: number): { key: string; text: string; dim?: boolean }[] {
+  if (rows.length <= max) return rows.map((row) => ({ key: row.id, text: cardLine(row) }))
+  const [newest] = rows
+  if (max === 1 && newest) return [{ key: newest.id, text: `(+${rows.length - 1} more) ${cardLine(newest)}` }]
+  const shown = rows.slice(0, max - 1)
+  return [
+    ...shown.map((row) => ({ key: row.id, text: cardLine(row) })),
+    { key: 'card:more', text: `+${rows.length - shown.length} more`, dim: true },
+  ]
+}
+
+function drawBand($: Engine, e: RenderInput<'AbovePrompt'>, rows: CardRow[], rest: RenderElement): RenderElement {
   const { Box, Text } = $.ui.resolve(e)
-  const max = e.props.maxRows
-  const shown = rowsNewestFirst.length <= max ? rowsNewestFirst : rowsNewestFirst.slice(0, max - 1)
-  const children: RenderElement[] = shown.map((row) =>
-    Box({ key: row.id, children: [Text({ children: cardLine(row), wrap: 'truncate-end' })] }),
+  const children: RenderElement[] = bandLines(rows, e.props.maxRows).map((line) =>
+    Box({ key: line.key, children: [Text({ children: line.text, wrap: 'truncate-end', dimColor: line.dim })] }),
   )
-  if (shown.length < rowsNewestFirst.length) {
-    children.push(
-      Box({ key: 'card:more', children: [Text({ dimColor: true, children: `+${rowsNewestFirst.length - shown.length} more` })] }),
-    )
-  }
   return Box({ flexDirection: 'column', children: [...children, rest] })
 }
 
-export function startCard($: Engine): void {
+export function startCard($: CardEngine): void {
   if (mode === 'off' || timer) return
   timer = $.clock.every(REFRESH_MS, () => {
     void refresh($)
@@ -153,12 +163,12 @@ export function startCard($: Engine): void {
 }
 
 /** A /clear or a resume keeps the card: the engine sends no session.start after either. */
-export function stopCard($: Engine, e: Pick<SessionEndInput, 'reason'>): void {
+export function stopCard($: CardEngine, e: Pick<SessionEndInput, 'reason'>): void {
   if (e.reason === 'clear' || e.reason === 'resume') return
   timer?.cancel()
   timer = null
-  rowsNewestFirst = []
   endedRowsById = new Map()
+  if (mode === 'band') $.state.set(CARD, []).catch((err: unknown) => debugLog($, 'clearing the card failed', err))
   if (statusShown) clearStatus($)
   statusShown = false
 }
@@ -167,14 +177,20 @@ export function registerCard(on: On, options: PluginOptions): void {
   mode = displayMode(options.cardDisplay)
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!shouldDraw(e)) return next(e)
-    return drawBand($, e, await next(e))
+    let rows: CardRow[]
+    try {
+      rows = (await $.state.get(CARD)).value ?? []
+    } catch {
+      return next(e)
+    }
+    if (rows.length === 0) return next(e)
+    return drawBand($, e, rows, await next(e))
   })
 }
 
 export function clearCardState(): void {
   timer?.cancel()
   timer = null
-  rowsNewestFirst = []
   endedRowsById = new Map()
   refreshing = null
   statusShown = false
