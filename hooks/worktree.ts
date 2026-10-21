@@ -1,5 +1,5 @@
 import type { IntegrateStrategy } from './contract.ts'
-import { redactSecrets } from './types.ts'
+import { redactSecrets, shellWord } from './types.ts'
 
 /** Pure planning of the git argv orq runs. No I/O here: the engine and integrate run the argv. */
 
@@ -23,6 +23,30 @@ export function revParseHeadArgv(cwd: string): string[] {
  * hook a worker wrote in a shared task must not run with orq's rights.
  */
 export const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'] as const
+
+/** A large .worktreeinclude, such as node_modules, can take minutes to copy; the subagent watchdog allows 600 s of silence. */
+export const WORKTREE_INCLUDE_TIMEOUT_MS = 300000
+
+/**
+ * Copy into a new worktree the files the checkout's .worktreeinclude names, as Claude Code does: a file is
+ * copied when it matches a pattern and is also gitignored, so tracked files are never duplicated. Exits 0
+ * with nothing copied when the checkout has no .worktreeinclude, and prints the number of files copied.
+ */
+export function worktreeIncludeScript(toplevel: string, worktree: string): string {
+  const include = shellWord(`${toplevel}/.worktreeinclude`)
+  return [
+    '# orq:worktreeinclude',
+    'set -o pipefail',
+    `[ -f ${include} ] || { echo 0; exit 0; }`,
+    `cd ${shellWord(toplevel)} || exit 1`,
+    'list=$(mktemp) || exit 1',
+    'trap \'rm -f "$list"\' EXIT',
+    `git -c core.fsmonitor=false -c core.quotePath=false ls-files -z --others --ignored --exclude-from=${include} |`,
+    '  { git -c core.fsmonitor=false check-ignore -z --stdin || [ $? -eq 1 ]; } > "$list" || exit 1',
+    `tar --null -T "$list" -cf - | tar -C ${shellWord(worktree)} -xf - || exit 1`,
+    'tr -cd \'\\0\' < "$list" | wc -c',
+  ].join('\n')
+}
 
 export function worktreeAddArgv(cwd: string, worktree: string, branch: string, baseSha: string): string[] {
   return gitArgv(cwd, ...NO_HOOKS, 'worktree', 'add', worktree, '-b', branch, baseSha)

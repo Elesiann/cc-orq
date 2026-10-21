@@ -28,7 +28,9 @@ import {
   type JobPlace,
   revParseHeadArgv,
   revParseToplevelArgv,
+  WORKTREE_INCLUDE_TIMEOUT_MS,
   worktreeAddArgv,
+  worktreeIncludeScript,
   worktreePathFor,
   worktreeRemoveArgv,
 } from './worktree.ts'
@@ -311,6 +313,18 @@ export async function checkoutBusy($: Engine, jobsDir: string, path: string): Pr
   return busyJob(places, path)
 }
 
+/** Best effort: a copy that fails leaves the worktree as git made it, which is what a checkout without .worktreeinclude gets. */
+async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: string): Promise<void> {
+  try {
+    const r = await $.process.run(['bash', '-c', worktreeIncludeScript(toplevel, worktree)], { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
+    const copied = Number(r.stdout.trim())
+    if (r.exitCode !== 0) await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed (exit ${r.exitCode})${gitDetail(r.stderr)}`)
+    else if (copied > 0) await debugLog($, `orq: .worktreeinclude copied ${copied} file(s) into ${worktree}`)
+  } catch (err) {
+    await debugLog($, `orq: .worktreeinclude copy into ${worktree} did not finish: ${String(err)}`)
+  }
+}
+
 /**
  * Plan and create the worktree of task TASK_ID: REPO_PARENT/REPO_NAME-wt/TASK_ID on a new branch
  * orq/TASK_ID, cut from the checkout's HEAD. Refuses, and creates nothing, when cwd is not a git
@@ -361,6 +375,7 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string, sc
         },
       }
     }
+    await copyWorktreeIncludes($, toplevel, worktree)
     return { plan }
   } catch (err) {
     return { failure: { code: 'git_failed', message: `git could not run: ${String(err)}` } }
