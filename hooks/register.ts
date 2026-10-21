@@ -54,8 +54,8 @@ export const register: Register = (on, options) => {
     }
     return next(e)
   })
-  on('session.end', async (_$, e, next) => {
-    stopCard(e)
+  on('session.end', async ($, e, next) => {
+    stopCard($, e)
     stopPanel(e)
     return next(e)
   })

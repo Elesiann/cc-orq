@@ -439,7 +439,8 @@ the job has no `exit` file, so an `interrupted` job stays on the card. A job who
 once its `exit` file is 60 seconds old.
 
 The card refreshes every 2 seconds. A refresh that is still running makes the
-next tick skip.
+next tick skip, unless it has run for more than 60 seconds; then the next tick
+starts a new refresh.
 
 The card draws nothing when a survey holds the band, when the band gives it no
 rows, when the surface is neither the terminal nor the desktop, and when no job
@@ -455,7 +456,9 @@ as `/exit`, a logout, or a `-p` run that finishes, stops it.
 
 - `band`: the card draws above the prompt. This is the default.
 - `status`: the card goes to the status line under the prompt. It shows the newest
-  job's line, followed by ` (+N more)` when more jobs are listed.
+  job's line, followed by ` (+N more)` when more jobs are listed. The line is
+  cleared when the card stops, and a refresh with no jobs clears a line that an
+  earlier run left behind.
 - `off`: no card is drawn, and no refresh timer runs.
 
 An unknown value counts as `band`. Set it in `/config`, or in `settings.json`

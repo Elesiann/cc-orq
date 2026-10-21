@@ -7,6 +7,7 @@ import { formatDuration, type JobRecord, type JobStatus } from './types.ts'
 
 export const REFRESH_MS = 2000
 const ENDED_SHOWN_MS = 60000
+const STUCK_REFRESH_MS = 60000
 
 export type CardMode = 'band' | 'status' | 'off'
 
@@ -16,8 +17,11 @@ let mode: CardMode = 'band'
 let rowsNewestFirst: CardRow[] = []
 let endedRowsById = new Map<string, CardRow>()
 let timer: Timer | null = null
-let refreshing = false
+/** The refresh now running, and the clock time it began; null when none runs. */
+let refreshing: { startedAt: number } | null = null
 let statusShown = false
+/** True until the status line is cleared: a hot reload starts this module while the host may still show an old line. */
+let staleStatus = true
 
 export function displayMode(value: unknown): CardMode {
   return value === 'status' || value === 'off' ? value : 'band'
@@ -55,10 +59,13 @@ async function rowOf($: Engine, job: JobRecord, fallbackEndAt: number): Promise<
 }
 
 async function refresh($: Engine): Promise<void> {
-  if (refreshing) return
-  refreshing = true
+  let run: { startedAt: number } | null = null
   try {
     const now = await $.clock.now()
+    // A refresh still running after STUCK_REFRESH_MS is taken as stuck, so this tick starts another one.
+    if (refreshing && now - refreshing.startedAt < STUCK_REFRESH_MS) return
+    run = { startedAt: now }
+    refreshing = run
     const { config } = await loadConfig($)
     const nextRows: CardRow[] = []
     const nextEnded = new Map<string, CardRow>()
@@ -72,20 +79,32 @@ async function refresh($: Engine): Promise<void> {
         nextRows.push(row)
       }
     }
+    const hadRows = rowsNewestFirst.length > 0
     rowsNewestFirst = nextRows
     endedRowsById = nextEnded
-    show($)
+    show($, hadRows)
   } catch (err) {
     await debugLog($, 'refresh failed', err)
   } finally {
-    refreshing = false
+    // A stuck refresh that a newer one has replaced must not clear the newer one's mark.
+    if (run && refreshing === run) refreshing = null
   }
 }
 
-function show($: Engine): void {
+/** Clear the status line. A failure goes to the debug log. */
+function clearStatus($: Engine): void {
+  try {
+    $.ui.status(undefined)
+  } catch (err) {
+    void debugLog($, 'clearing the status line failed', err)
+  }
+}
+
+function show($: Engine, hadRows: boolean): void {
   try {
     if (mode === 'band') {
-      $.ui.invalidate('ui.render')
+      // An empty band before and after has nothing to redraw.
+      if (hadRows || rowsNewestFirst.length > 0) $.ui.invalidate('ui.render')
       return
     }
     if (mode !== 'status') return
@@ -94,9 +113,11 @@ function show($: Engine): void {
       const more = rowsNewestFirst.length > 1 ? ` (+${rowsNewestFirst.length - 1} more)` : ''
       $.ui.status(`${cardLine(newest)}${more}`)
       statusShown = true
-    } else if (statusShown) {
-      $.ui.status(undefined)
+      staleStatus = false
+    } else if (statusShown || staleStatus) {
+      clearStatus($)
       statusShown = false
+      staleStatus = false
     }
   } catch (err) {
     void debugLog($, 'redraw failed', err)
@@ -132,12 +153,13 @@ export function startCard($: Engine): void {
 }
 
 /** A /clear or a resume keeps the card: the engine sends no session.start after either. */
-export function stopCard(e: Pick<SessionEndInput, 'reason'>): void {
+export function stopCard($: Engine, e: Pick<SessionEndInput, 'reason'>): void {
   if (e.reason === 'clear' || e.reason === 'resume') return
   timer?.cancel()
   timer = null
   rowsNewestFirst = []
   endedRowsById = new Map()
+  if (statusShown) clearStatus($)
   statusShown = false
 }
 
@@ -154,6 +176,7 @@ export function clearCardState(): void {
   timer = null
   rowsNewestFirst = []
   endedRowsById = new Map()
-  refreshing = false
+  refreshing = null
   statusShown = false
+  staleStatus = true
 }

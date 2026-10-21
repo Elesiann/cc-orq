@@ -19,6 +19,11 @@ type State = {
   dirEntries: { name: string; kind: 'dir' }[]
   tails: Map<string, string>
   lists: number
+  stats: number
+  reads: number
+  exists: number
+  runs: number
+  hangLists: number
   invalidates: number
   statuses: (string | undefined)[]
   extractSummary: { tid: string; in: number; out: number; error: boolean }
@@ -31,10 +36,20 @@ function fresh(): State {
     dirEntries: [],
     tails: new Map(),
     lists: 0,
+    stats: 0,
+    reads: 0,
+    exists: 0,
+    runs: 0,
+    hangLists: 0,
     invalidates: 0,
     statuses: [],
     extractSummary: { tid: 'thread-1', in: 1, out: 1, error: false },
   }
+}
+
+/** The file and process calls so far. A band drawn from memory adds none. */
+function io(s: State): Pick<State, 'lists' | 'stats' | 'reads' | 'exists' | 'runs'> {
+  return { lists: s.lists, stats: s.stats, reads: s.reads, exists: s.exists, runs: s.runs }
 }
 
 const result = (exitCode: number, stdout = '') => ({
@@ -55,25 +70,39 @@ function stubs(on: On, s: State): void {
   })
   on('ui.log', () => ({ value: undefined }))
   // The kit fails a mount that no hook beneath the plugins answers ("no implementation for ui.render").
-  on('ui.render', ($, e) => $.ui.resolve(e).Box({ flexDirection: 'column', children: [] }))
+  // What the lower plugin draws stays under the card, so a test can check both survive.
+  on('ui.render', ($, e) => {
+    const { Box, Text } = $.ui.resolve(e)
+    return Box({ flexDirection: 'column', children: [Text({ children: 'other plugin' })] })
+  })
   on('env.get', () => ({ value: '/home/test' }))
-  on('fs.exists', (_$, e) => ({ value: s.files.has(e.path) }))
+  on('fs.exists', (_$, e) => {
+    s.exists += 1
+    return { value: s.files.has(e.path) }
+  })
   on('fs.read', (_$, e) => {
+    s.reads += 1
     const text = s.files.get(e.path)
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: text }
   })
-  on('fs.list', (_$, e) => {
+  on('fs.list', async (_$, e) => {
     if (e.path !== JOBS) throw new Error(`ENOENT: ${e.path}`)
     s.lists += 1
+    if (s.hangLists > 0) {
+      s.hangLists -= 1
+      await new Promise<never>(() => {})
+    }
     return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('fs.stat', (_$, e) => {
+    s.stats += 1
     if (!s.files.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file', size: 0, mtimeMs: s.mtimes.get(e.path) ?? REFRESH_AT, isLink: false } }
   })
   on('process.run', (_$, e) => {
     const argv = e.argv
+    s.runs += 1
     if (argv[0] === 'python3') return result(0, `${JSON.stringify(s.extractSummary)}\n`)
     const script = argv[2] ?? ''
     if (script.includes('# orq:liveness')) return result(11)
@@ -249,4 +278,85 @@ test('session.end on /clear or a resume keeps the timer, and on any other reason
   await $.session.end({ reason: 'other', sessionId: 'session-1', resume: { id: 'session-1' } })
   await clock.advance(2000)
   expect(s.lists).toBe(3)
+})
+
+test('the band keeps what the plugins beneath it draw, with the card line', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  const text = await band($, 'terminal')
+  expect(text.includes('other plugin')).toBe(true)
+  expect(count(text, RUNNING_LINE)).toBe(1)
+})
+
+test('drawing the band after a refresh reads no file and runs no process', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  const before = io(s)
+  expect(before.lists > 0 && before.reads > 0 && before.runs > 0).toBe(true)
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(1)
+  expect(count(await band($, 'desktop'), RUNNING_LINE)).toBe(1)
+  expect(io(s)).toEqual(before)
+})
+
+test('a refresh stuck for over 60 s no longer blocks the next tick', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  s.hangLists = 1
+  await start($)
+  await clock.advance(2000)
+  expect(s.lists).toBe(1)
+  for (let i = 0; i < 29; i++) await clock.advance(2000)
+  expect(s.lists).toBe(1)
+  await clock.advance(2000)
+  expect(s.lists).toBe(2)
+  expect(count(await band($, 'terminal'), ' · running · ')).toBe(1)
+})
+
+test('an empty band does not invalidate on each tick', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  await start($)
+  await clock.advance(6000)
+  expect(s.lists).toBe(3)
+  expect(s.invalidates).toBe(0)
+})
+
+test('a session end in status mode clears the status line', { options: { cardDisplay: 'status' } }, async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(s.statuses.at(-1)).toBe(RUNNING_LINE)
+  await $.session.end({ reason: 'other', sessionId: 'session-1', resume: { id: 'session-1' } })
+  expect(s.statuses.at(-1)).toBe(undefined)
+})
+
+test('status mode clears a status line an earlier instance left, once, on the first refresh with no rows', { options: { cardDisplay: 'status' } }, async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  await start($)
+  await clock.advance(2000)
+  await clock.advance(2000)
+  expect(s.lists).toBe(2)
+  expect(s.statuses).toEqual([undefined])
 })
