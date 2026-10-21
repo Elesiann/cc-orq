@@ -6,6 +6,23 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-21
+
+### Added
+
+- A task's worktree gets the files the checkout's `.worktreeinclude` names,
+  the file Claude Code reads for its own worktrees: every file that matches a
+  pattern and is gitignored, such as `node_modules` or generated types.
+
+### Fixed
+
+- `capabilities` lists every model `opencode models` reports, including the
+  free `opencode/*` models and providers configured through the environment.
+  It no longer filters by `opencode auth list`, and it retries a failed
+  `opencode models` once.
+- The handback footer names the effort a Claude or Antigravity task gave its
+  CLI, instead of `effort n/a`.
+
 ## [0.1.0] - 2026-10-21
 
 First public release.
@@ -38,5 +55,6 @@ First public release.
   `~/.config/orq/config.json` for the jobs directory, wait slice, allowed roots
   and provider instances.
 
-[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Elesiann/cc-orq/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Elesiann/cc-orq/releases/tag/v0.1.0

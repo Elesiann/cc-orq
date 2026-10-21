@@ -1,6 +1,6 @@
 {
   "name": "cc-orq",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Delegate tasks to external coding agents (Codex, OpenCode, Claude) from Claude Code with T3 Code style orchestration tools: capabilities, status, cancel, integrate.",
   "author": { "name": "Elesiann" },
   "license": "MIT",

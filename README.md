@@ -53,7 +53,8 @@ ceiling, and its answer comes back to the conversation when it ends.
   events and answer on disk, and can be read, cancelled or integrated from a
   later session.
 - **Worktree isolation.** A task works on its own branch in its own checkout,
-  and `integrate` merges it back with a fast-forward or a merge commit.
+  gets the ignored files your `.worktreeinclude` names, and `integrate` merges
+  it back with a fast-forward or a merge commit.
 - **A live view.** A card above the prompt shows each job's model, status, last
   action and timer, and `/orq-panel` lists the jobs, tails one, and cancels it.
 - **T3 Code's tool surface.** `capabilities`, `status` and `cancel` answer in
@@ -147,7 +148,8 @@ was written.
 ### `/orq result JOB_ID`
 
 Prints the final message of a finished job, followed by a footer with its kind,
-model, effort, duration, token counts, job id (`taskId`) and session id. The footer shows `tokens
+model, effort, duration, token counts, job id (`taskId`) and session id. The effort is the
+one a Codex job's rollout reports, else the one the task gave the CLI, else `n/a`. The footer shows `tokens
 n/a` when the CLI's event stream reports no counts. A failed job prints its exit code and
 the last 20 stderr lines, with secrets redacted. A job that exits 0 after asking a
 question gets the question instead (see [Child questions](#child-questions)). A job
@@ -211,7 +213,9 @@ Review the diff on this branch and list the risks.
 - `target: INSTANCE MODEL [effort=VALUE] [runtime=MODE] [interaction=MODE]`
   (required). `INSTANCE` is an `id` from `instances`. `MODEL` is passed to the
   CLI as written; orq does not check it against a catalog. `effort` is the
-  reasoning effort, one word. `runtime` and `interaction` narrow the session;
+  reasoning effort, one word. Codex, Claude and Antigravity get it as a CLI
+  flag. OpenCode does not, since its CLI takes an effort only inside the model
+  name, as `provider/model#variant`. `runtime` and `interaction` narrow the session;
   they never widen it. Any other `key=value` is refused.
 - `cwd: /absolute/path` (required): an existing directory, inside the session's
   working directory or an `allowedRoots` entry (see "Working directory").
@@ -323,6 +327,27 @@ removed. orq creates the worktree with the checkout's git hooks and fsmonitor
 turned off. `integrate` runs git in your checkout as you would, so the
 checkout's own hooks run there.
 
+### Files a worktree needs
+
+A worktree holds the tracked files only. To give each task the ignored files
+it needs to build and test, such as `node_modules` or generated code, list them
+in a `.worktreeinclude` file at the root of the checkout, the file Claude Code
+reads for its own worktrees. It uses `.gitignore` syntax, and a file is copied
+when it matches a pattern and is also gitignored, so tracked files are never
+duplicated:
+
+```
+node_modules/
+.claude-plugin/types/
+.env.local
+```
+
+orq copies the files before the task starts, keeping symlinks, and gives the
+copy 5 minutes. orq uses git's own matching, so the special case Claude Code
+makes for a `**/` pattern inside an ignored directory does not apply: name the
+directory instead. A copy that fails leaves the worktree as git made it, and the
+debug log says why.
+
 An `cc-orq:task` runs in a worktree unless its header says `isolation: shared`.
 A manual launch asks for one with `--worktree`:
 
@@ -405,7 +430,9 @@ Takes no input. Answers the provider instances of the configured `instances`
 and the permission mode the parent session runs under. Each provider has its
 `providerInstanceId`, its `driverKind`, its `models` (each with the `options`
 the CLI reports, such as `reasoningEffort` and its allowed values),
-`canRunChildTask` and `constraints`, the reasons it cannot run now.
+`canRunChildTask` and `constraints`, the reasons it cannot run now. An
+OpenCode instance lists every model of `opencode models`, which names only the
+providers OpenCode can use, logged in or configured through the environment.
 
 <details>
 <summary>Example answer</summary>
@@ -627,7 +654,7 @@ for both the kind and the agent suffix, for example
 
 | File | Written by | Contents |
 | --- | --- | --- |
-| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver and, for a Codex instance with a `CODEX_HOME`, that path. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
+| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
 | `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
 | `child.log` | start script | The supervisor's own stdout and stderr. |
@@ -754,6 +781,7 @@ from the job directories, and `scripts/session-start.sh` gives the parent
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
 | `integrate` answers `merge_conflict` | Delegate a rebase of the task branch to the same worker, then integrate again |
+| A worker's build or tests fail in its worktree for a missing dependency | List the ignored files it needs, such as `node_modules/`, in `.worktreeinclude`. See [Files a worktree needs](#files-a-worktree-needs) |
 | The card does not show | The surface must be the terminal or the desktop app, and `cardDisplay` must not be `off` |
 
 ## Known limitations
@@ -764,12 +792,10 @@ from the job directories, and `scripts/session-start.sh` gives the parent
 - Cancelling a job stops its process group. A process that leaves the group
   keeps running, and so do the tools of an `opencode run` job, which execute
   in the shared OpenCode server.
-- `capabilities` lists only the OpenCode providers that `opencode auth list`
-  reports as logged in, so models offered without a login are missing.
-- The handback footer reads the effort only from a Codex job's rollout, so it
-  shows `effort n/a` for the other drivers, even when the task named one.
-- A task's worktree is a fresh checkout: it has no `node_modules` or other
-  ignored files, so a worker that needs them has to install them first.
+- OpenCode tasks do not get the task's effort, and their footer says
+  `effort n/a`.
+- A task's worktree gets ignored files only through `.worktreeinclude`, and a
+  large copy, such as a big `node_modules`, delays the task's start.
 - In `claude -p`, Claude Code stops background agents after about 11 minutes,
   so a longer task loses its subagent. The job itself keeps running and its
   result stays readable through `/orq result` and `status`.
