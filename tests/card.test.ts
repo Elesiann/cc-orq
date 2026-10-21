@@ -274,12 +274,13 @@ test('five running jobs with maxRows 1 draw the newest job on one row, the count
   const s = fresh()
   stubs(on, s)
   const clock = mock.clock(on, { now: NOW })
-  for (let i = 0; i < 5; i++) seedJob(s, `job-${i}`, T0 + i)
+  for (let i = 0; i < 4; i++) seedJob(s, `job-${i}`, T0 + i)
+  seedJob(s, 'job-newest', T0 + 4, HELLO)
   await start($)
   await clock.advance(2000)
   const text = await band($, 'terminal', { maxRows: 1 })
   expect(count(text, ' · running · ')).toBe(1)
-  expect(count(text, '(+4 more) codex · fixture-model · running · ')).toBe(1)
+  expect(count(text, '(+4 more) codex · fixture-model · running · msg hello there · ')).toBe(1)
   expect(text.includes('"+4 more"')).toBe(false)
 })
 
@@ -405,6 +406,16 @@ test('a session end for any reason but /clear or a resume empties the card', asy
   await $.session.end({ reason: 'other', sessionId: 'session-1', resume: { id: 'session-1' } })
   expect(s.card).toEqual([])
   expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(0)
+})
+
+test('starting in status mode empties band rows an earlier band session left in state', { options: { cardDisplay: 'status' } }, async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  mock.clock(on, { now: NOW })
+  s.card = [{ id: 'job-old', instance: 'codex', model: 'fixture-model', status: 'running', lastAction: '—', durationMs: 1000 }]
+  await start($)
+  expect(s.card).toEqual([])
 })
 
 test('a session end in status mode clears the status line', { options: { cardDisplay: 'status' } }, async ($, on) => {

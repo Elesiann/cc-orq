@@ -28,6 +28,8 @@ let refreshing: { startedAt: number } | null = null
 let statusShown = false
 /** True until the status line is cleared: a hot reload starts this module while the host may still show an old line. */
 let staleStatus = true
+/** Bumped when the card stops, so a refresh that began before the stop writes nothing. */
+let generation = 0
 
 export function displayMode(value: unknown): CardMode {
   return value === 'status' || value === 'off' ? value : 'band'
@@ -72,6 +74,7 @@ async function refresh($: CardEngine): Promise<void> {
     if (refreshing && now - refreshing.startedAt < STUCK_REFRESH_MS) return
     run = { startedAt: now }
     refreshing = run
+    const started = generation
     const { config } = await loadConfig($)
     const nextRows: CardRow[] = []
     const nextEnded = new Map<string, CardRow>()
@@ -85,6 +88,7 @@ async function refresh($: CardEngine): Promise<void> {
         nextRows.push(row)
       }
     }
+    if (started !== generation) return
     endedRowsById = nextEnded
     await show($, nextRows)
   } catch (err) {
@@ -155,7 +159,17 @@ function drawBand($: Engine, e: RenderInput<'AbovePrompt'>, rows: CardRow[], res
   return Box({ flexDirection: 'column', children: [...children, rest] })
 }
 
+/** Empty the band's rows, which a session that drew the band may have left in state. */
+async function emptyBand($: CardEngine): Promise<void> {
+  try {
+    if (((await $.state.get(CARD)).value ?? []).length > 0) await $.state.set(CARD, [])
+  } catch (err) {
+    await debugLog($, 'clearing the card failed', err)
+  }
+}
+
 export function startCard($: CardEngine): void {
+  if (mode !== 'band') void emptyBand($)
   if (mode === 'off' || timer) return
   timer = $.clock.every(REFRESH_MS, () => {
     void refresh($)
@@ -163,14 +177,15 @@ export function startCard($: CardEngine): void {
 }
 
 /** A /clear or a resume keeps the card: the engine sends no session.start after either. */
-export function stopCard($: CardEngine, e: Pick<SessionEndInput, 'reason'>): void {
+export async function stopCard($: CardEngine, e: Pick<SessionEndInput, 'reason'>): Promise<void> {
   if (e.reason === 'clear' || e.reason === 'resume') return
   timer?.cancel()
   timer = null
+  generation += 1
   endedRowsById = new Map()
-  if (mode === 'band') $.state.set(CARD, []).catch((err: unknown) => debugLog($, 'clearing the card failed', err))
   if (statusShown) clearStatus($)
   statusShown = false
+  if (mode === 'band') await emptyBand($)
 }
 
 export function registerCard(on: On, options: PluginOptions): void {
