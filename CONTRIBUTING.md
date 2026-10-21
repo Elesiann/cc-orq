@@ -30,10 +30,11 @@ npm run test:plugin            # claude plugin test .
 bash tests/runners-shell.sh    # supervisor and runners with fake CLIs
 bash tests/integrate-shell.sh  # worktree launch and integrate against real git
 bash tests/question-shell.sh   # the child question protocol
+bash tests/worktree-include-shell.sh  # .worktreeinclude copies into task worktrees
 bash tests/allowlist-shell.sh  # only allowed paths are tracked
 ```
 
-CI runs `npm test` and the four shell suites. The other checks need a logged-in
+CI runs `npm test` and the five shell suites. The other checks need a logged-in
 Claude Code CLI, so run them locally.
 
 ## Rules

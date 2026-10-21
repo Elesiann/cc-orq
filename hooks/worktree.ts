@@ -24,6 +24,13 @@ export function revParseHeadArgv(cwd: string): string[] {
  */
 export const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'] as const
 
+/**
+ * A large .worktreeinclude, such as node_modules, can take minutes to copy, and the subagent watchdog allows
+ * 600 s of silence. The copy gives up at its own deadline, before the process timeout, so it can undo itself.
+ */
+export const WORKTREE_INCLUDE_TIMEOUT_MS = 300000
+export const WORKTREE_INCLUDE_DEADLINE_S = 270
+
 export function worktreeAddArgv(cwd: string, worktree: string, branch: string, baseSha: string): string[] {
   return gitArgv(cwd, ...NO_HOOKS, 'worktree', 'add', worktree, '-b', branch, baseSha)
 }

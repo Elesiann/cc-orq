@@ -28,6 +28,8 @@ import {
   type JobPlace,
   revParseHeadArgv,
   revParseToplevelArgv,
+  WORKTREE_INCLUDE_DEADLINE_S,
+  WORKTREE_INCLUDE_TIMEOUT_MS,
   worktreeAddArgv,
   worktreePathFor,
   worktreeRemoveArgv,
@@ -52,6 +54,8 @@ export type LaunchSpec = {
   flags?: string[]
   runtimeMode?: RuntimeMode
   interactionMode?: InteractionMode
+  /** The reasoning effort `flags` give the CLI, recorded for the answer's footer. */
+  effort?: string
   /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
   isolation?: 'worktree'
   /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
@@ -67,6 +71,7 @@ export type TaskLaunchSpec = {
   flags: string[]
   runtimeMode: RuntimeMode
   interactionMode: InteractionMode
+  effort?: string
   isolation: TaskIsolation
   /** The session directory and the allowed roots that scoped `cwd`. */
   scopeRoots: string[]
@@ -273,7 +278,8 @@ async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
   ]
   for (const [what, argv] of undo) {
     try {
-      const r = await $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
+      // A worktree can hold a copied node_modules, so its removal gets the copy's time.
+      const r = await $.process.run(argv, { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
       if (r.exitCode !== 0) await debugLog($, `orq: could not ${what} after a failed launch${gitDetail(r.stderr)}`)
     } catch (err) {
       await debugLog($, `orq: could not ${what} after a failed launch: ${String(err)}`)
@@ -306,6 +312,39 @@ export async function checkoutBusy($: Engine, jobsDir: string, path: string): Pr
     })
   }
   return busyJob(places, path)
+}
+
+/**
+ * Best effort: the script stages the copy beside the worktree and renames it in only when it is complete, so a
+ * copy that fails leaves the worktree as git made it, which is what a checkout without .worktreeinclude gets.
+ */
+async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: string): Promise<void> {
+  const script = `${$.plugin.root}/scripts/worktree-include.py`
+  try {
+    const argv = ['python3', script, toplevel, worktree, String(WORKTREE_INCLUDE_DEADLINE_S)]
+    const r = await $.process.run(argv, { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
+    if (r.exitCode === 1) {
+      await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and was undone${gitDetail(r.stderr)}`)
+      return
+    }
+    if (r.exitCode === 3) {
+      await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and part of it is still there${gitDetail(r.stderr)}`)
+      return
+    }
+    if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
+    const counts = JSON.parse(r.stdout) as { copied?: unknown; skipped?: unknown }
+    if (typeof counts.copied === 'number' && typeof counts.skipped === 'number' && counts.copied + counts.skipped > 0) {
+      await debugLog($, `orq: .worktreeinclude copied ${counts.copied} and skipped ${counts.skipped} file(s) into ${worktree}`)
+    }
+  } catch (err) {
+    // A killed copy can leave its staging directory beside the worktree, never a partial tree inside it.
+    await debugLog($, `orq: .worktreeinclude copy into ${worktree} did not finish: ${String(err)}`)
+    try {
+      await $.process.run(['python3', script, '--discard', worktree], { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
+    } catch {
+      /* the staging directory stays beside the worktree, outside it */
+    }
+  }
 }
 
 /**
@@ -358,6 +397,7 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string, sc
         },
       }
     }
+    await copyWorktreeIncludes($, toplevel, worktree)
     return { plan }
   } catch (err) {
     return { failure: { code: 'git_failed', message: `git could not run: ${String(err)}` } }
@@ -420,6 +460,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
       ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
+      ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
       ...worktreeFields,
     }
     try {
@@ -475,6 +516,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       instanceId: spec.instanceId,
       driver: spec.driver,
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
+      ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
       ...worktreeFields,
     }
     if (pgid) job.pgid = pgid
@@ -507,6 +549,7 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     flags: spec.flags,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
+    ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
     ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const, worktreeScope: spec.scopeRoots } : {}),
   })
   if (!('refusal' in launched)) return launched
@@ -630,11 +673,11 @@ export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord
   const durationMs = Math.max(0, (view.endedAt ?? now) - job.startedAt)
   const runner = job.runner
   let model = summary?.model || job.model || 'n/a'
-  let effort = 'n/a'
+  let effort = job.effort || 'n/a'
   if (runner === 'codex') {
     const rollout = await codexModelEffort($, config, job, summary?.tid ?? '')
     model = rollout.model || 'n/a'
-    effort = rollout.effort || 'n/a'
+    effort = rollout.effort || effort
   }
   const footer = buildFooter({
     kind: job.kind,

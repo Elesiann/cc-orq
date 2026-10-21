@@ -266,6 +266,7 @@ test('a header launches one task job on the named instance and the step waits th
     model: 'fixture-model',
     runtimeMode: 'auto',
     interactionMode: 'default',
+    effort: 'high',
   })
   expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('--approve-for-me\n-c\nmodel_reasoning_effort=high\n')
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe(`Say OK.\n\n${QUESTION_PROTOCOL}`)
@@ -288,6 +289,7 @@ test('a task without an isolation line runs in its own worktree on branch orq/JO
   expect(s.startScripts[0]).toContain(` codex ${worktree} fixture-model`)
   const meta = JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
   expect(meta).toMatchObject({ cwd: worktree, repo: REPO, baseSha: 'abc1234', branch: `orq/${id}`, worktree })
+  expect(meta.effort).toBeUndefined()
 })
 
 test('worktree add runs with the checkout hooks and fsmonitor off', async ($, on) => {

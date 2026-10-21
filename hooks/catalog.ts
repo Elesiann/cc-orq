@@ -69,32 +69,18 @@ export function parseCodexModels(text: string): CatalogModel[] {
   return out
 }
 
-/** Provider ids from `opencode auth list --format json`. Only the ids are read. */
-export function parseOpencodeAuthIds(text: string): string[] {
-  let doc: unknown
-  try {
-    doc = JSON.parse(text)
-  } catch {
-    return []
-  }
-  if (!Array.isArray(doc)) return []
-  return doc.flatMap((e) => (isRecord(e) && typeof e.id === 'string' ? [e.id] : []))
-}
+const OPENCODE_SLUG = /^[^\s/]+\/\S+$/
 
-/** Parse `opencode models` lines (`provider/model`), keeping the logged-in providers. */
-export function parseOpencodeModels(text: string, loggedIn: readonly string[]): CatalogModel[] {
-  const allowed = new Set(loggedIn)
-  const out: CatalogModel[] = []
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || !trimmed.includes('/')) continue
-    const slash = trimmed.indexOf('/')
-    const provider = trimmed.slice(0, slash)
-    const name = trimmed.slice(slash + 1)
-    if (!allowed.has(provider) || name.length === 0) continue
-    out.push({ id: trimmed, label: name })
-  }
-  return out
+/**
+ * Parse `opencode models` lines (`provider/model`). OpenCode lists only the providers it can use, so every one
+ * is kept. The label would repeat the id after the slash, and OpenCode can list hundreds of models, so it is null.
+ */
+export function parseOpencodeModels(text: string): CatalogModel[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => OPENCODE_SLUG.test(line))
+    .map((id) => ({ id, label: null }))
 }
 
 /** Parse `agy models`: tab-separated id and label; effort stays in the id. */

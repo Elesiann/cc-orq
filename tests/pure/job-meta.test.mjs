@@ -19,3 +19,9 @@ test('a recorded runtime and interaction mode is read, and an unknown value is l
   assert.equal(unknown.runtimeMode, undefined)
   assert.equal(unknown.interactionMode, undefined)
 })
+
+test('a recorded effort is read, and an empty or non-text one is left out', () => {
+  assert.equal(parseJobMeta({ ...base, effort: 'high' }, '/jobs', base.id).effort, 'high')
+  assert.equal(parseJobMeta({ ...base, effort: '' }, '/jobs', base.id).effort, undefined)
+  assert.equal(parseJobMeta({ ...base, effort: 3 }, '/jobs', base.id).effort, undefined)
+})

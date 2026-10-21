@@ -9,6 +9,7 @@ import { fail, isFailure, type Failure } from './contract.ts'
 import { composeAnswer, jobLiveness, launchTaskJob, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
 import {
+  appliedEffort,
   effortFlag,
   parentRuntimeModeFromPermissionMode,
   resolveTarget,
@@ -200,6 +201,7 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (isFailure(policy)) return { refusal: refusalText(policy) }
   const scoped = await scopedCwd($, config, header.cwd)
   if ('refusal' in scoped) return scoped
+  const effort = appliedEffort(resolved.instance.driver, resolved.options)
   const launched = await launchTaskJob($, config, {
     agentId,
     instance: resolved.instance,
@@ -209,6 +211,7 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
     flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
     runtimeMode: resolved.runtimeMode,
     interactionMode: resolved.interactionMode,
+    ...(effort !== undefined ? { effort } : {}),
     isolation: header.isolation,
     scopeRoots: scoped.roots,
   })

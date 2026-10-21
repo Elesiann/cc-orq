@@ -17,4 +17,5 @@ jobs:
       - run: bash tests/runners-shell.sh
       - run: bash tests/integrate-shell.sh
       - run: bash tests/question-shell.sh
+      - run: bash tests/worktree-include-shell.sh
       - run: bash tests/allowlist-shell.sh

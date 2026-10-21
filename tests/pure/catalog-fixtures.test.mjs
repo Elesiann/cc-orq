@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 import {
   parseAgyModels,
   parseCodexModels,
-  parseOpencodeAuthIds,
   parseOpencodeModels,
 } from '../../hooks/catalog.ts'
 
@@ -20,14 +19,13 @@ test('the codex fixture keeps the listed models with their default effort', () =
   assert.equal(effort.options.find((o) => o.id === 'medium').isDefault, true)
 })
 
-test('the opencode fixtures keep only the models of logged-in providers', () => {
-  const ids = parseOpencodeAuthIds(fixture('opencode-auth.json'))
-  assert.deepEqual(ids, ['fixture-provider-1', 'fixture-provider-2', 'fixture-provider-3'])
-  const models = parseOpencodeModels(fixture('opencode-models.txt'), ids)
+test('the opencode fixture keeps the models of every listed provider', () => {
+  const models = parseOpencodeModels(fixture('opencode-models.txt'))
   assert.deepEqual(models.map((m) => m.id), [
     'fixture-provider-1/fixture-model-4',
     'fixture-provider-1/fixture-model-5',
     'fixture-provider-2/fixture-model-6',
+    'fixture-provider-4/fixture-model-7',
   ])
 })
 
@@ -41,7 +39,7 @@ test('the antigravity fixture keeps the effort in the id and tolerates a missing
 
 test('the catalog fixtures name no real model or provider', () => {
   const real = /gpt|gemini|claude|muse|luna|sol|deepseek|qwen|nova|opus|sonnet|haiku|bedrock|cerebras|openai|google|nvidia|zenmux/i
-  for (const name of ['codex-models.json', 'opencode-auth.json', 'opencode-models.txt', 'agy-models.txt']) {
+  for (const name of ['codex-models.json', 'opencode-models.txt', 'agy-models.txt']) {
     assert.equal(real.test(fixture(name)), false, name)
   }
 })
