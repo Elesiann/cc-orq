@@ -15,7 +15,7 @@ export type OrqConfig = {
   jobsDir: string
   instances: InstanceConfig[]
   waitSeconds: number
-  /** Absolute directories, besides the session's own, that an orq:task may run in. */
+  /** Absolute directories, besides the session's own, that a cc-orq:task may run in. */
   allowedRoots: string[]
 }
 

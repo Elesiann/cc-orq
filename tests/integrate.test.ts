@@ -56,7 +56,7 @@ function stubs(on: any, s: State) {
   on('session.start', () => ({ cwd: '/srv/example/work' }))
   on('tool.register', (_$: unknown, e: any) => {
     s.registered.push(e)
-    return { value: { tool: `mcp__orq__${e.name}` } }
+    return { value: { tool: `mcp__cc-orq__${e.name}` } }
   })
   on('command.register', (_$: unknown, e: any) => ({ value: { command: e.name } }))
   on('ui.log', () => ({ value: undefined }))
@@ -92,7 +92,7 @@ async function start($: any) {
 
 // The answer the model reads: a string holding the payload as JSON, parsed here for the assertions.
 async function integrate($: any, args: Record<string, unknown>): Promise<Record<string, any>> {
-  const r = await $.tool.call({ tool: 'mcp__orq__integrate', ...args })
+  const r = await $.tool.call({ tool: 'mcp__cc-orq__integrate', ...args })
   expect(typeof r.result).toBe('string')
   return JSON.parse(r.result as string)
 }

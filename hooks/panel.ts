@@ -220,7 +220,7 @@ export async function tailEvents($: Engine, dir: string): Promise<string> {
   }
 }
 
-/** Cancel one job, the way mcp__orq__cancel does: only a running or waiting job gets a cancel file. */
+/** Cancel one job, the way mcp__cc-orq__cancel does: only a running or waiting job gets a cancel file. */
 export async function cancelJob($: Engine, id: string): Promise<string> {
   const { config } = await loadConfig($)
   const job = await readMeta($, config.jobsDir, id)

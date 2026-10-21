@@ -117,7 +117,7 @@ export async function declareIntegrateTool($: Pick<EngineInterface, 'tool'>): Pr
   await $.tool.register({ name: INTEGRATE_TOOL, description: INTEGRATE_DESCRIPTION, inputSchema: INTEGRATE_INPUT_SCHEMA })
 }
 
-/** Serve mcp__orq__integrate. */
+/** Serve mcp__cc-orq__integrate. */
 export function registerIntegrate(on: On): void {
   on('tool.call', { tool: INTEGRATE_TOOL_NAME }, async ($, e) => {
     try {

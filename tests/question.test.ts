@@ -199,7 +199,7 @@ test('a job that exits 0 after asking lists as done and composes the BLOCKED ans
   expect(rowStatus(await orq($, 'list'), 'job-asked')).toBe('done')
   expect(await orq($, 'result job-asked')).toBe(
     'BLOCKED on a question (taskId job-asked): Use `main` or `release/1.x`? (see $ORQ_JOB_DIR)\n\n' +
-      'Answer it in a new orq:task with the original brief plus the answer.',
+      'Answer it in a new cc-orq:task with the original brief plus the answer.',
   )
 })
 
@@ -214,7 +214,7 @@ test('a job that exits 0 after asking, with no last.txt, lists as done and answe
   expect(rowStatus(await orq($, 'list'), 'job-quiet')).toBe('done')
   expect(await orq($, 'result job-quiet')).toBe(
     'BLOCKED on a question (taskId job-quiet): Which database?\n\n' +
-      'Answer it in a new orq:task with the original brief plus the answer.',
+      'Answer it in a new cc-orq:task with the original brief plus the answer.',
   )
 })
 

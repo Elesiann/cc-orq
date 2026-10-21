@@ -133,7 +133,7 @@ async function start($: Kit): Promise<void> {
 
 async function band($: Kit, surface: 'terminal' | 'desktop', props: { hasSurvey?: boolean; maxRows?: number } = {}): Promise<string> {
   const mounted = await $.ui.mount({
-    plugin: 'orq',
+    plugin: 'cc-orq',
     surface,
     component: 'AbovePrompt',
     props: {

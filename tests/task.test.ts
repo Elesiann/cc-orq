@@ -120,7 +120,7 @@ function stubs(on: any, s: State) {
   })
   on('tool.register', (_$: unknown, e: any) => {
     s.tools.push(e)
-    return { value: { tool: `mcp__orq__${e.name}` } }
+    return { value: { tool: `mcp__cc-orq__${e.name}` } }
   })
   on('agent.register', (_$: unknown, e: any) => {
     s.agents.push(e)
@@ -204,12 +204,12 @@ async function start($: any) {
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
 }
 
-/** Spawn an orq:task agent whose first message is the prompt; the permission mode is optional. */
+/** Spawn a cc-orq:task agent whose first message is the prompt; the permission mode is optional. */
 async function spawnTask($: any, s: State, prompt: string, permissionMode?: string): Promise<string> {
   const spawned: any = await $.agent.spawn({
     prompt,
     description: 'task',
-    subagentType: 'orq:task',
+    subagentType: 'cc-orq:task',
     ...(permissionMode === undefined ? {} : { permissionMode }),
   } as any)
   s.messages = [{ role: 'user', text: prompt, toolUses: [] }]
@@ -234,25 +234,25 @@ function finish(s: State, text = 'OK') {
   s.files.set(`${dir}/last.txt`, text)
 }
 
-test('session start registers the wait tool and the orq:task agent, which runs in the background with that tool', async ($, on) => {
+test('session start registers the wait tool and the cc-orq:task agent, which runs in the background with that tool', async ($, on) => {
   const s = fresh()
   stubs(on, s)
   await start($)
   expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate', 'capabilities', 'status', 'cancel'])
   expect(s.agents.map((a) => a.name)).toEqual(['task'])
-  expect(s.agents[0].tools).toEqual(['mcp__orq__wait'])
+  expect(s.agents[0].tools).toEqual(['mcp__cc-orq__wait'])
   expect(s.agents[0].background).toBe(true)
   expect(s.agents[0].permissionMode).toBeUndefined()
 })
 
-test('a header launches one task job on the named instance and the step waits through mcp__orq__wait', async ($, on) => {
+test('a header launches one task job on the named instance and the step waits through mcp__cc-orq__wait', async ($, on) => {
   const s = fresh()
   stubs(on, s)
   await start($)
   const agentId = await spawnTask($, s, `target: codex fixture-model effort=high\ncwd: ${REPO}\nisolation: shared\nSay OK.`, 'auto')
   const chunks = await step($, agentId)
   expect(chunks.map((c: any) => c.kind)).toEqual(['tool', 'input', 'stop'])
-  expect(chunks[0].name).toBe('mcp__orq__wait')
+  expect(chunks[0].name).toBe('mcp__cc-orq__wait')
   const job = JSON.parse(chunks[1].json).job as string
   expect(job.startsWith('task-2000000-')).toBe(true)
   expect(s.startScripts.length).toBe(1)
@@ -277,7 +277,7 @@ test('a task without an isolation line runs in its own worktree on branch orq/JO
   await start($)
   const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
   const chunks = await step($, agentId)
-  expect(chunks[0].name).toBe('mcp__orq__wait')
+  expect(chunks[0].name).toBe('mcp__cc-orq__wait')
   const id = JSON.parse(chunks[1].json).job as string
   const worktree = `${REPO}-wt/${id}`
   expect(s.gitCalls.map((argv) => argv.filter((a) => !a.startsWith('core.') && a !== '-c').slice(3).join(' '))).toEqual([
@@ -472,7 +472,7 @@ test('a task that exits 0 after writing question.txt hands back BLOCKED with the
   expect(chunks[0].name).toBe('SubagentHandback')
   const answer = answerOf(chunks)
   expect(answer).toContain(`BLOCKED on a question (taskId ${dir.split('/').pop()}): Which branch should I target?`)
-  expect(answer).toContain('Answer it in a new orq:task')
+  expect(answer).toContain('Answer it in a new cc-orq:task')
 })
 
 test('a second step after the handback answers with text, not a second handback', async ($, on) => {
@@ -530,11 +530,11 @@ test('the wait tool answers finished, still running and supervisor gone from the
   await start($)
   const job = 'task-1000000-a-1-abc'
   s.waitExit = 0
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job })).result).toBe('finished')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job })).result).toBe('finished')
   s.waitExit = 11
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job })).result).toBe('still running, 16m40s')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job })).result).toBe('still running, 16m40s')
   s.waitExit = 12
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job })).result).toBe('supervisor gone')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job })).result).toBe('supervisor gone')
 })
 
 test('a wait whose run is stopped writes the cancel file for its job', async ($, on) => {
@@ -542,7 +542,7 @@ test('a wait whose run is stopped writes the cancel file for its job', async ($,
   stubs(on, s)
   s.files.set(`${JOBS}/task-1000000-a-1-abc/meta.json`, JSON.stringify({ id: 'task-1000000-a-1-abc', kind: 'task', agentId: 'a-1', cwd: REPO, startedAt: 1000000, startedAtIso: new Date(1000000).toISOString(), runner: 'codex', model: 'fixture-model', instanceId: 'codex', driver: 'codex' }))
   await start($)
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: 'task-1000000-a-1-abc' })).result).toBe('cancelled')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job: 'task-1000000-a-1-abc' })).result).toBe('cancelled')
   expect(s.writes.some((w) => w.path === `${JOBS}/task-1000000-a-1-abc/cancel`)).toBe(true)
 })
 
@@ -550,8 +550,8 @@ test('a wait on an unknown or unsafe job id answers unknown job and runs nothing
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: '../x' })).result).toBe('unknown job ../x')
-  expect((await $.tool.call({ tool: 'mcp__orq__wait' })).result).toBe('unknown job (missing)')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job: '../x' })).result).toBe('unknown job ../x')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait' })).result).toBe('unknown job (missing)')
 })
 
 test('a spawn without a permission mode whose header asks runtime=auto is refused as an escalation, and nothing launches', async ($, on) => {
@@ -566,7 +566,7 @@ test('a spawn without a permission mode whose header asks runtime=auto is refuse
   expect(s.logs).toContain(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`)
 })
 
-test('a turn step for an agent not spawned as orq:task yields what the chain beneath yields, even when its first line is a target header', async ($, on) => {
+test('a turn step for an agent not spawned as cc-orq:task yields what the chain beneath yields, even when its first line is a target header', async ($, on) => {
   const s = fresh()
   stubs(on, s)
   on('turn.step', async function* (_$: unknown, e: any) {
@@ -603,7 +603,7 @@ test('a cwd inside the session directory is accepted, and the job runs there', a
   await start($)
   const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${SESSION}/nested/repo\nisolation: shared\nGo.`, 'auto')
   const chunks = await step($, agentId)
-  expect(chunks[0].name).toBe('mcp__orq__wait')
+  expect(chunks[0].name).toBe('mcp__cc-orq__wait')
   expect(s.startScripts[0]).toContain(` codex ${SESSION}/nested/repo fixture-model`)
 })
 
@@ -625,7 +625,7 @@ test('a cwd under an allowedRoots entry is accepted', async ($, on) => {
   await start($)
   const agentId = await spawnTask($, s, 'target: codex fixture-model\ncwd: /srv/shared/tool\nisolation: shared\nGo.', 'auto')
   const chunks = await step($, agentId)
-  expect(chunks[0].name).toBe('mcp__orq__wait')
+  expect(chunks[0].name).toBe('mcp__cc-orq__wait')
   expect(s.startScripts[0]).toContain(' codex /srv/shared/tool fixture-model')
 })
 
@@ -662,7 +662,7 @@ test('a config that asks for a 600 s wait keeps the default, so one wait call bl
   stubs(on, s)
   seedJob(s)
   await start($)
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toBe('still running, 16m40s')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job: JOB })).result).toBe('still running, 16m40s')
   expect(s.waitCalls.length).toBe(1)
   expect(s.waitCalls[0]?.script).toContain('$(seq 1 60)')
   expect(s.waitCalls[0]?.timeoutMs).toBe(125000)
@@ -673,7 +673,7 @@ test('a wait blocks 240 s at most, the largest waitSeconds the config allows', a
   stubs(on, s)
   seedJob(s)
   await start($)
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toBe('still running, 16m40s')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job: JOB })).result).toBe('still running, 16m40s')
   expect(s.waitCalls[0]?.script).toContain('$(seq 1 120)')
   expect(s.waitCalls[0]?.timeoutMs).toBe(245000)
 })
@@ -683,7 +683,7 @@ test('a wait whose script exits with a code other than 0, 11 or 12 answers an er
   stubs(on, s)
   seedJob(s)
   await start($)
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toBe('orq: wait failed (exit 1)')
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job: JOB })).result).toBe('orq: wait failed (exit 1)')
 })
 
 test('a jobs directory with a single quote is quoted in the wait script', async ($, on) => {
@@ -691,7 +691,7 @@ test('a jobs directory with a single quote is quoted in the wait script', async 
   stubs(on, s)
   seedJob(s)
   await start($)
-  expect((await $.tool.call({ tool: 'mcp__orq__wait', job: JOB })).result).toMatch(/^still running, /)
+  expect((await $.tool.call({ tool: 'mcp__cc-orq__wait', job: JOB })).result).toMatch(/^still running, /)
   expect(s.waitCalls[0]?.script).toContain(`[ -e '/srv/example/it'\\''s jobs/${JOB}/exit' ]`)
   expect(s.waitCalls[0]?.script).toContain(`cat '/srv/example/it'\\''s jobs/${JOB}/pgid'`)
 })

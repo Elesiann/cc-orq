@@ -1,6 +1,13 @@
 {
-  "name": "orq",
-  "description": "orq: T3 Code style orchestration surface for Claude Code",
-  "owner": { "name": "Elesiann" },
-  "plugins": [{ "name": "orq", "source": "./" }]
+  "name": "cc-orq",
+  "description": "cc-orq: T3 Code style orchestration surface for Claude Code",
+  "owner": {
+    "name": "Elesiann"
+  },
+  "plugins": [
+    {
+      "name": "cc-orq",
+      "source": "./"
+    }
+  ]
 }

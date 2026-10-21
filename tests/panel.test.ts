@@ -144,7 +144,7 @@ async function panel($: any, args: string): Promise<string> {
 /** The pane as the engine draws it: the kit mounts it, and the panel's own render hook answers. */
 async function mountPane($: Kit) {
   return $.ui.mount({
-    plugin: 'orq',
+    plugin: 'cc-orq',
     surface: 'terminal',
     component: 'Pane',
     requestId: PANEL_ID,

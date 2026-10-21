@@ -99,7 +99,7 @@ function stubs(on: any, s: State) {
   })
   on('tool.register', (_$: unknown, e: any) => {
     s.tools.push(e.name)
-    return { value: { tool: `mcp__orq__${e.name}` } }
+    return { value: { tool: `mcp__cc-orq__${e.name}` } }
   })
   on('fs.list', (_$: unknown, e: any) => {
     if (e.path !== JOBS) throw new Error(`ENOENT: ${e.path}`)
@@ -175,7 +175,7 @@ test('status answers a running job with working and no end time', async ($, on) 
   seedJob(s, 'job-run', 8000000)
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__status', { taskId: 'job-run' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__status', { taskId: 'job-run' })).toEqual({
     taskId: 'job-run',
     status: 'running',
     workState: 'working',
@@ -195,7 +195,7 @@ test('status answers a completed job with its final answer and end time', async 
   s.extractSummary = { tid: 'thread-ok', in: 1, out: 1, error: false }
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__status', { taskId: 'job-ok' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__status', { taskId: 'job-ok' })).toEqual({
     taskId: 'job-ok',
     status: 'completed',
     workState: 'result_available',
@@ -214,7 +214,7 @@ test('status answers a job that wrote a question and still runs as waiting', asy
   s.files.set(`${JOBS}/job-ask/question.txt`, 'Which branch?\n')
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__status', { taskId: 'job-ask' })).toMatchObject({ taskId: 'job-ask', status: 'waiting', workState: 'working' })
+  expect(await call($, 'mcp__cc-orq__status', { taskId: 'job-ask' })).toMatchObject({ taskId: 'job-ask', status: 'waiting', workState: 'working' })
 })
 
 test('status answers a job that exited 0 after a question as completed, with the BLOCKED text as its result', async ($, on) => {
@@ -225,9 +225,9 @@ test('status answers a job that exited 0 after a question as completed, with the
   s.files.set(`${JOBS}/job-blk/last.txt`, 'BLOCKED: Which branch?')
   stubs(on, s)
   await start($)
-  const answer = await call($, 'mcp__orq__status', { taskId: 'job-blk' })
+  const answer = await call($, 'mcp__cc-orq__status', { taskId: 'job-blk' })
   expect(answer).toMatchObject({ status: 'completed', workState: 'result_available' })
-  expect(answer.result).toBe('BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it in a new orq:task with the original brief plus the answer.')
+  expect(answer.result).toBe('BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.')
 })
 
 test('status answers a failed job with the exit code and the redacted stderr tail', async ($, on) => {
@@ -238,7 +238,7 @@ test('status answers a failed job with the exit code and the redacted stderr tai
   s.stderrTail = 'Error: request refused\nAuthorization: Bearer fixture-bearer-value\n'
   stubs(on, s)
   await start($)
-  const answer = await call($, 'mcp__orq__status', { taskId: 'job-bad' })
+  const answer = await call($, 'mcp__cc-orq__status', { taskId: 'job-bad' })
   expect(answer).toEqual({
     taskId: 'job-bad',
     status: 'failed',
@@ -260,7 +260,7 @@ test('status answers a cancelled job, exit 124, as cancelled', async ($, on) => 
   s.mtimes.set(`${JOBS}/job-cut/exit`, 3000000)
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__status', { taskId: 'job-cut' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__status', { taskId: 'job-cut' })).toEqual({
     taskId: 'job-cut',
     status: 'cancelled',
     workState: 'result_available',
@@ -278,7 +278,7 @@ test('status answers a job whose supervisor is gone without an exit file as inte
   s.goneJobs.add('job-gone')
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__status', { taskId: 'job-gone' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__status', { taskId: 'job-gone' })).toEqual({
     taskId: 'job-gone',
     status: 'interrupted',
     workState: 'result_available',
@@ -295,11 +295,11 @@ test('status of an unknown or unsafe id is task_not_found, and without a taskId 
   stubs(on, s)
   await start($)
   const missing = { error: { code: 'task_not_found', message: 'no task nope' } }
-  expect(await call($, 'mcp__orq__status', { taskId: 'nope' })).toEqual(missing)
-  expect(await call($, 'mcp__orq__status', { taskId: '../x' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__status', { taskId: 'nope' })).toEqual(missing)
+  expect(await call($, 'mcp__cc-orq__status', { taskId: '../x' })).toEqual({
     error: { code: 'task_not_found', message: 'no task ../x' },
   })
-  expect((await call($, 'mcp__orq__status', {})).error.code).toBe('invalid_request')
+  expect((await call($, 'mcp__cc-orq__status', {})).error.code).toBe('invalid_request')
 })
 
 test('cancel of a running job writes the cancel marker and answers cancel_requested', async ($, on) => {
@@ -307,7 +307,7 @@ test('cancel of a running job writes the cancel marker and answers cancel_reques
   seedJob(s, 'job-a', 8000000)
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-a' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__cancel', { taskId: 'job-a' })).toEqual({
     taskId: 'job-a',
     status: 'cancel_requested',
   })
@@ -321,7 +321,7 @@ test('cancel of a waiting job, one that wrote a question and still runs, writes 
   s.files.set(`${JOBS}/job-ask/question.txt`, 'Which branch?\n')
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-ask' })).toEqual({ taskId: 'job-ask', status: 'cancel_requested' })
+  expect(await call($, 'mcp__cc-orq__cancel', { taskId: 'job-ask' })).toEqual({ taskId: 'job-ask', status: 'cancel_requested' })
   expect(s.writes.some((w) => w.path === `${JOBS}/job-ask/cancel`)).toBe(true)
 })
 
@@ -334,14 +334,14 @@ test('cancel of a finished or interrupted job is task_not_cancellable and writes
   s.goneJobs.add('job-int')
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-fin' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__cancel', { taskId: 'job-fin' })).toEqual({
     error: { code: 'task_not_cancellable', message: 'task job-fin is completed, so it has nothing left to cancel' },
   })
-  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-int' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__cancel', { taskId: 'job-int' })).toEqual({
     error: { code: 'task_not_cancellable', message: 'task job-int is interrupted, so it has nothing left to cancel' },
   })
   expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
-  expect((await call($, 'mcp__orq__cancel', { taskId: 'nope' })).error.code).toBe('task_not_found')
+  expect((await call($, 'mcp__cc-orq__cancel', { taskId: 'nope' })).error.code).toBe('task_not_found')
 })
 
 test('cancel writes its reason into the cancel marker', async ($, on) => {
@@ -349,7 +349,7 @@ test('cancel writes its reason into the cancel marker', async ($, on) => {
   seedJob(s, 'job-why', 8000000)
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-why', reason: 'the user stopped it' })).toEqual({
+  expect(await call($, 'mcp__cc-orq__cancel', { taskId: 'job-why', reason: 'the user stopped it' })).toEqual({
     taskId: 'job-why',
     status: 'cancel_requested',
   })
@@ -362,12 +362,12 @@ test('cancel refuses a reason that is not a string or is longer than 200 charact
   seedJob(s, 'job-long', 8000000)
   stubs(on, s)
   await start($)
-  const tooLong = await call($, 'mcp__orq__cancel', { taskId: 'job-long', reason: 'x'.repeat(201) })
+  const tooLong = await call($, 'mcp__cc-orq__cancel', { taskId: 'job-long', reason: 'x'.repeat(201) })
   expect(tooLong.error.code).toBe('invalid_request')
-  const notText = await call($, 'mcp__orq__cancel', { taskId: 'job-long', reason: 5 })
+  const notText = await call($, 'mcp__cc-orq__cancel', { taskId: 'job-long', reason: 5 })
   expect(notText.error.code).toBe('invalid_request')
   expect(s.writes.some((w) => w.path.endsWith('/cancel'))).toBe(false)
-  const atLimit = await call($, 'mcp__orq__cancel', { taskId: 'job-long', reason: 'x'.repeat(200) })
+  const atLimit = await call($, 'mcp__cc-orq__cancel', { taskId: 'job-long', reason: 'x'.repeat(200) })
   expect(atLimit).toEqual({ taskId: 'job-long', status: 'cancel_requested' })
 })
 
@@ -377,8 +377,8 @@ test('a job with a cancel request still reads as running, and cancelling it agai
   s.files.set(`${JOBS}/job-again/cancel`, 'cancelled at 1970-01-01T00:00:00.000Z\n')
   stubs(on, s)
   await start($)
-  expect((await call($, 'mcp__orq__status', { taskId: 'job-again' })).status).toBe('running')
-  expect(await call($, 'mcp__orq__cancel', { taskId: 'job-again', reason: 'second request' })).toEqual({
+  expect((await call($, 'mcp__cc-orq__status', { taskId: 'job-again' })).status).toBe('running')
+  expect(await call($, 'mcp__cc-orq__cancel', { taskId: 'job-again', reason: 'second request' })).toEqual({
     taskId: 'job-again',
     status: 'cancel_requested',
   })
@@ -389,7 +389,7 @@ test('capabilities lists the probed providers with the modes of the settings and
   const s = fresh({ settings: { permissions: { defaultMode: 'plan' } } })
   stubs(on, s)
   await start($)
-  expect(await call($, 'mcp__orq__capabilities', {})).toEqual({
+  expect(await call($, 'mcp__cc-orq__capabilities', {})).toEqual({
     parentThreadId: null,
     inheritedProviderInstanceId: null,
     inheritedModel: null,
@@ -451,7 +451,7 @@ test('capabilities answers with the mode recorded for the session before the set
   const s = fresh({ settings: { permissions: { defaultMode: 'plan' } }, store: { 'perm:session:sess-1': 'acceptEdits' } })
   stubs(on, s)
   await start($)
-  const answer = await call($, 'mcp__orq__capabilities', {})
+  const answer = await call($, 'mcp__cc-orq__capabilities', {})
   expect({ runtimeMode: answer.runtimeMode, interactionMode: answer.interactionMode }).toEqual({
     runtimeMode: 'auto-accept-edits',
     interactionMode: 'default',
@@ -462,7 +462,7 @@ test('capabilities maps an unknown or missing permission mode to approval-requir
   const s = fresh({ settings: { permissions: { defaultMode: 'something-new' } } })
   stubs(on, s)
   await start($)
-  const answer = await call($, 'mcp__orq__capabilities', {})
+  const answer = await call($, 'mcp__cc-orq__capabilities', {})
   expect({ runtimeMode: answer.runtimeMode, interactionMode: answer.interactionMode }).toEqual({
     runtimeMode: 'approval-required',
     interactionMode: 'default',
@@ -475,7 +475,7 @@ test('capabilities falls through to the settings when the session id cannot be r
   const s = fresh({ settings: { permissions: { defaultMode: 'plan' } }, sessionIdThrow: true })
   stubs(on, s)
   await start($)
-  expect(modesOf(await call($, 'mcp__orq__capabilities', {}))).toEqual({
+  expect(modesOf(await call($, 'mcp__cc-orq__capabilities', {}))).toEqual({
     runtimeMode: 'approval-required',
     interactionMode: 'plan',
   })
@@ -485,7 +485,7 @@ test('capabilities falls through to the settings when the recorded mode cannot b
   const s = fresh({ settings: { permissions: { defaultMode: 'plan' } }, store: { 'perm:session:sess-1': 'acceptEdits' }, storeThrow: true })
   stubs(on, s)
   await start($)
-  expect(modesOf(await call($, 'mcp__orq__capabilities', {}))).toEqual({
+  expect(modesOf(await call($, 'mcp__cc-orq__capabilities', {}))).toEqual({
     runtimeMode: 'approval-required',
     interactionMode: 'plan',
   })
@@ -495,7 +495,7 @@ test('capabilities answers the recorded mode when the settings cannot be read', 
   const s = fresh({ store: { 'perm:session:sess-1': 'acceptEdits' }, settingsThrow: true })
   stubs(on, s)
   await start($)
-  expect(modesOf(await call($, 'mcp__orq__capabilities', {}))).toEqual({
+  expect(modesOf(await call($, 'mcp__cc-orq__capabilities', {}))).toEqual({
     runtimeMode: 'auto-accept-edits',
     interactionMode: 'default',
   })
@@ -505,7 +505,7 @@ test('capabilities answers approval-required when every permission source throws
   const s = fresh({ sessionIdThrow: true, storeThrow: true, settingsThrow: true })
   stubs(on, s)
   await start($)
-  const answer = await call($, 'mcp__orq__capabilities', {})
+  const answer = await call($, 'mcp__cc-orq__capabilities', {})
   expect(modesOf(answer)).toEqual({ runtimeMode: 'approval-required', interactionMode: 'default' })
   expect(answer.providers.map((p: any) => p.providerInstanceId)).toEqual(['codex', 'opencode'])
 })
@@ -514,14 +514,14 @@ test('the catalog probe is cached for ten minutes', async ($, on) => {
   const s = fresh()
   stubs(on, s)
   await start($)
-  await call($, 'mcp__orq__capabilities', {})
-  await call($, 'mcp__orq__capabilities', {})
+  await call($, 'mcp__cc-orq__capabilities', {})
+  await call($, 'mcp__cc-orq__capabilities', {})
   expect(s.catalogCalls.length).toBe(1)
   s.now += 9 * 60 * 1000
-  await call($, 'mcp__orq__capabilities', {})
+  await call($, 'mcp__cc-orq__capabilities', {})
   expect(s.catalogCalls.length).toBe(1)
   s.now += 2 * 60 * 1000
-  await call($, 'mcp__orq__capabilities', {})
+  await call($, 'mcp__cc-orq__capabilities', {})
   expect(s.catalogCalls.length).toBe(2)
 })
 
@@ -529,12 +529,12 @@ test('a changed instances list probes again inside the ten minutes, and the answ
   const s = fresh()
   stubs(on, s)
   await start($)
-  await call($, 'mcp__orq__capabilities', {})
+  await call($, 'mcp__cc-orq__capabilities', {})
   expect(JSON.parse(s.catalogCalls[0] ?? '[]').map((i: any) => i.instanceId)).toEqual(['codex', 'opencode', 'claudeAgent'])
   s.files.set(CONFIG_PATH, JSON.stringify({ jobsDir: JOBS, instances: [{ id: 'codex-work', driver: 'codex' }] }))
   s.catalogJson = JSON.stringify([{ ...JSON.parse(CATALOG)[0], instanceId: 'codex-work' }])
   s.now += 60 * 1000
-  const answer = await call($, 'mcp__orq__capabilities', {})
+  const answer = await call($, 'mcp__cc-orq__capabilities', {})
   expect(s.catalogCalls.length).toBe(2)
   expect(JSON.parse(s.catalogCalls[1] ?? '[]')).toEqual([{ instanceId: 'codex-work', driver: 'codex' }])
   expect(answer.providers.map((p: any) => p.providerInstanceId)).toEqual(['codex-work'])
@@ -544,10 +544,10 @@ test('a failed catalog probe answers no providers, logs why and is probed again 
   const s = fresh({ catalogExit: 1, catalogJson: '' })
   stubs(on, s)
   await start($)
-  const answer = await call($, 'mcp__orq__capabilities', {})
+  const answer = await call($, 'mcp__cc-orq__capabilities', {})
   expect(answer.providers).toEqual([])
   expect(s.logs).toContain('orq: catalog probe failed: Error: catalog.py exited 1')
-  await call($, 'mcp__orq__capabilities', {})
+  await call($, 'mcp__cc-orq__capabilities', {})
   expect(s.catalogCalls.length).toBe(2)
 })
 

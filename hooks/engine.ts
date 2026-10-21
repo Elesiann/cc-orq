@@ -484,7 +484,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
 }
 
 /**
- * Launch one orq:task job. The model and each runner flag reach the CLI as one argv item, so a value
+ * Launch one cc-orq:task job. The model and each runner flag reach the CLI as one argv item, so a value
  * that could read as an option or span lines is refused before anything is written.
  */
 export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
@@ -613,7 +613,7 @@ export function notEndedText(id: string, status: 'running' | 'cancelling' | 'int
 
 /** The answer for a job that stopped on a question. The parent answers it in a new task, not in this one. */
 export function blockedText(id: string, question: string): string {
-  return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new orq:task with the original brief plus the answer.`
+  return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.`
 }
 
 export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord): Promise<string> {

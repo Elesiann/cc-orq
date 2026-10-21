@@ -17,7 +17,7 @@ export type CardRow = OrqCardRow
 type CardEngine = Engine & Pick<EngineInterface, 'state'>
 
 /** The rows, newest first. Session state survives a hot reload, and a render that reads it is drawn again when it changes. */
-const CARD = { plugin: 'orq', key: 'card' } as const
+const CARD = { plugin: 'cc-orq', key: 'card' } as const
 
 let mode: CardMode = 'band'
 /** Rows of jobs that ended, kept so an ended job is read once rather than on every tick. */
