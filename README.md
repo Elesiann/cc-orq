@@ -47,6 +47,9 @@ claude plugin marketplace add /path/to/cc-orq
 claude plugin install cc-orq@cc-orq
 ```
 
+`claude plugin install` reports that the `cardDisplay` option is not set yet.
+Until you set it, the task card uses `band`; see "Setting `cardDisplay`".
+
 For one session only, without installing:
 
 ```bash
