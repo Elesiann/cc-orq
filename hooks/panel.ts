@@ -1,7 +1,16 @@
-import type { CommandRunInput, EngineInterface, On, RenderElement, RenderInput, Timer, UiOpenResult } from 'claude-code'
+import type {
+  CommandRunInput,
+  EngineInterface,
+  On,
+  RenderElement,
+  RenderInput,
+  SessionEndInput,
+  Timer,
+  UiOpenResult,
+} from 'claude-code'
 
 import { loadConfig } from './config.ts'
-import { jobView, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
+import { jobView, listJobs, readMeta, writeCancel, type Engine, type JobView } from './engine.ts'
 import { formatDuration, isRecord, isSafeJobId, shellWord, type JobRecord, type JobStatus } from './types.ts'
 
 export const PANEL_ID = 'orq-panel'
@@ -12,6 +21,7 @@ const TAIL_BYTES = 32768
 const TAIL_LINES = 30
 const REFRESH_MS = 2000
 const PROCESS_TIMEOUT_MS = 15000
+const FINAL_VIEWS_MAX = 200
 const USAGE = 'orq-panel: usage: /orq-panel [show <id> | cancel <id>]'
 
 /** A job row: its meta.json, the status jobView reads for it, and how long it has run or ran until it ended. */
@@ -28,6 +38,8 @@ export type PanelSnapshot = {
 
 let selectedId: string | null = null
 let refreshTimer: Timer | null = null
+/** The views of ended jobs, by job id. See cachedJobView. */
+const finalViews = new Map<string, JobView>()
 
 function shortText(s: string, n: number): string {
   const one = s.replace(/\s+/g, ' ').trim()
@@ -224,16 +236,44 @@ export async function cancelJob($: Engine, id: string): Promise<string> {
   return `orq-panel: ${job.id} is ${status}; nothing to cancel`
 }
 
-/** The panel's state: the newest jobs with their status and elapsed time, and the selected job's tail. */
+/**
+ * jobView, with the view of an ended job kept. An exit file never changes, so an ended job is read once, and a
+ * finished job costs one extract.py run, not one per render. Running and interrupted jobs are read every time.
+ */
+export async function cachedJobView($: Engine, job: JobRecord): Promise<JobView> {
+  const known = finalViews.get(job.id)
+  if (known) return known
+  const view = await jobView($, job)
+  if (view.endedAt !== null) {
+    // The cap is well above the listing, so the map stays small and a job still listed is never dropped.
+    if (finalViews.size >= FINAL_VIEWS_MAX) {
+      const oldest = finalViews.keys().next().value
+      if (oldest !== undefined) finalViews.delete(oldest)
+    }
+    finalViews.set(job.id, view)
+  }
+  return view
+}
+
+/**
+ * The panel's state: the newest jobs with their status and elapsed time, and the selected job's tail. A job whose
+ * view throws is logged at debug level with its id and left out; the other jobs are still listed.
+ */
 export async function collectSnapshot($: Engine): Promise<PanelSnapshot> {
   const now = await $.clock.now()
   const { config } = await loadConfig($)
-  const jobs = await Promise.all(
-    (await listJobs($, config.jobsDir)).map(async (job) => {
-      const view = await jobView($, job)
-      return { ...job, status: view.status, elapsedMs: Math.max(0, (view.endedAt ?? now) - job.startedAt) }
+  const listed = await Promise.all(
+    (await listJobs($, config.jobsDir)).map(async (job): Promise<PanelJob | null> => {
+      try {
+        const view = await cachedJobView($, job)
+        return { ...job, status: view.status, elapsedMs: Math.max(0, (view.endedAt ?? now) - job.startedAt) }
+      } catch (err) {
+        await debugLog($, `job ${job.id} could not be read`, err)
+        return null
+      }
     }),
   )
+  const jobs = listed.filter((job): job is PanelJob => job !== null)
   const selected = jobs.find((job) => job.id === selectedId)
   let tail: string[] = []
   let note = ''
@@ -323,7 +363,12 @@ function drawSnapshot($: Engine, e: RenderInput<'Pane'>, snap: PanelSnapshot): R
           key: 'panel:close',
           label: 'close',
           onPress: () => {
-            void $.ui.close({ id: PANEL_ID }).catch((err: unknown) => debugLog($, 'close failed', err))
+            // Once the close settles, one tick finds the pane gone and stops the timer. A close a hook
+            // answered without next leaves the pane up, and the same tick keeps the timer.
+            void $.ui.close({ id: PANEL_ID }).then(
+              () => refreshTick($),
+              (err: unknown) => debugLog($, 'close failed', err),
+            )
           },
         }),
       ],
@@ -332,16 +377,41 @@ function drawSnapshot($: Engine, e: RenderInput<'Pane'>, snap: PanelSnapshot): R
   return Box({ flexDirection: 'column', children: rows })
 }
 
-/** Redraw the pane every REFRESH_MS. Started once, when the pane opens. */
+function cancelRefresh(): void {
+  refreshTimer?.cancel()
+  refreshTimer = null
+}
+
+/** One tick of the refresh timer: redraw while the host lists the pane, and stop the timer once it does not. */
+async function refreshTick($: Engine): Promise<void> {
+  try {
+    const open = (await $.ui.panes()).some((pane) => pane.id === PANEL_ID)
+    if (!open) {
+      cancelRefresh()
+      return
+    }
+  } catch (err) {
+    await debugLog($, 'pane check failed', err)
+  }
+  await redraw($)
+}
+
+/** Redraw the pane every REFRESH_MS while it is open. Started once, when the pane opens. */
 function ensureRefresh($: Engine): void {
   if (refreshTimer) return
   try {
     refreshTimer = $.clock.every(REFRESH_MS, () => {
-      void redraw($)
+      void refreshTick($)
     })
   } catch (err) {
     void debugLog($, 'refresh timer failed', err)
   }
+}
+
+/** Stop the refresh timer when the session ends. A /clear or a resume keeps it, as it keeps the card. */
+export function stopPanel(e: Pick<SessionEndInput, 'reason'>): void {
+  if (e.reason === 'clear' || e.reason === 'resume') return
+  cancelRefresh()
 }
 
 async function openPane($: Engine): Promise<{ text: string }> {
@@ -403,10 +473,11 @@ export async function onPaneRender($: Engine, e: RenderInput<'Pane'>): Promise<R
   }
 }
 
-/** Test seam: drop the selected job and the refresh timer between isolated runs. */
+/** Test seam: drop the selected job, the refresh timer and the ended jobs' views between isolated runs. */
 export function clearPanelSelection(): void {
+  cancelRefresh()
   selectedId = null
-  refreshTimer = null
+  finalViews.clear()
 }
 
 /** The panel's own hooks. The command itself is declared from session.start, through registerPanelCommand. */

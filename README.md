@@ -465,7 +465,8 @@ under `pluginConfigs.orq.options.cardDisplay`.
 
 `/orq-panel [show <id> | cancel <id>]` opens a pane with the 50 newest jobs. Each
 job is one row, with its status, elapsed time, kind and model. The pane redraws
-every 2 seconds.
+every 2 seconds while it is open. Its timer stops when the pane closes, and at
+the end of the session as the card's does.
 
 - A running or waiting job has a `cancel` button. It asks the supervisor to stop
   the job, as `/orq cancel` does.

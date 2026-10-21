@@ -1,5 +1,5 @@
 import { expect, mock, test, type TestBody } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import type { On, UiPane } from 'claude-code'
 
 import {
   PANEL_COMMAND,
@@ -28,6 +28,12 @@ type State = {
   commands: { name: string; description: string }[]
   opens: unknown[]
   invalidates: unknown[]
+  panes: UiPane[]
+  panesCalls: number
+  closes: string[]
+  logs: string[]
+  extracts: number
+  unreadable: Set<string>
   extractSummary: { tid: string; in: number; out: number; error: boolean }
 }
 
@@ -41,6 +47,12 @@ function fresh(): State {
     commands: [],
     opens: [],
     invalidates: [],
+    panes: [],
+    panesCalls: 0,
+    closes: [],
+    logs: [],
+    extracts: 0,
+    unreadable: new Set(),
     extractSummary: { tid: 'thread-1', in: 1, out: 1, error: false },
   }
 }
@@ -57,17 +69,32 @@ function stubs(on: On, s: State): void {
   })
   on('ui.open', (_$, e) => {
     s.opens.push(e)
+    s.panes = [...s.panes.filter((p) => p.id !== e.id), { id: e.id, title: e.title ?? e.id, isShown: true, isFocused: true, isPlaced: true }]
     return { value: { isPlaced: true } }
+  })
+  on('ui.close', (_$, e) => {
+    s.closes.push(e.id)
+    s.panes = s.panes.filter((p) => p.id !== e.id)
+    return { value: undefined }
+  })
+  on('ui.panes', () => {
+    s.panesCalls += 1
+    return { value: s.panes }
   })
   on('ui.invalidate', (_$, e) => {
     s.invalidates.push(e)
     return { value: undefined }
   })
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_$, e) => {
+    s.logs.push(e.text)
+    return { value: undefined }
+  })
   on('env.get', () => ({ value: '/home/test' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('fs.exists', (_$, e) => ({ value: s.files.has(e.path) }))
   on('fs.read', (_$, e) => {
+    // A host that answers a number where it should answer text makes the engine's readQuestion throw.
+    if (s.unreadable.has(e.path)) return { value: 42 as unknown as string }
     const text = s.files.get(e.path)
     if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
     return { value: text }
@@ -87,7 +114,10 @@ function stubs(on: On, s: State): void {
   })
   on('process.run', (_$, e) => {
     const argv = e.argv
-    if (argv[0] === 'python3') return result(0, `${JSON.stringify(s.extractSummary)}\n`)
+    if (argv[0] === 'python3') {
+      s.extracts += 1
+      return result(0, `${JSON.stringify(s.extractSummary)}\n`)
+    }
     const script = argv[2] ?? ''
     if (script.includes('# orq:liveness')) {
       const gone = [...s.goneJobs].some((id) => script.includes(`${JOBS}/${id}/pgid`))
@@ -112,15 +142,21 @@ async function panel($: any, args: string): Promise<string> {
 }
 
 /** The pane as the engine draws it: the kit mounts it, and the panel's own render hook answers. */
-async function drawn($: Kit): Promise<string> {
-  const mounted = await $.ui.mount({
+async function mountPane($: Kit) {
+  return $.ui.mount({
     plugin: 'orq',
     surface: 'terminal',
     component: 'Pane',
     requestId: PANEL_ID,
     props: { title: PANEL_TITLE, isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   })
-  return JSON.stringify(await mounted.drawn())
+}
+
+async function drawn($: Kit): Promise<string> {
+  const mounted = await mountPane($)
+  const text = JSON.stringify(await mounted.drawn())
+  await mounted.unmount()
+  return text
 }
 
 function seedJob(s: State, id: string, startedAt: number): void {
@@ -252,7 +288,7 @@ test('/orq-panel opens the pane from the slash command', async ($, on) => {
   expect(s.opens).toEqual([{ id: PANEL_ID, title: 'orq', focus: true }])
 })
 
-test('the open pane redraws on a two-second clock', async ($, on) => {
+test('the open pane redraws on a two-second clock', { options: { cardDisplay: 'off' } }, async ($, on) => {
   clearPanelSelection()
   const s = fresh()
   stubs(on, s)
@@ -261,6 +297,89 @@ test('the open pane redraws on a two-second clock', async ($, on) => {
   await panel($, '')
   await clock.advance(2000)
   expect(s.invalidates.length > 0).toBe(true)
+})
+
+test('the refresh timer stops once the host no longer lists the pane', { options: { cardDisplay: 'off' } }, async ($, on) => {
+  clearPanelSelection()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  await start($)
+  await panel($, '')
+  await clock.advance(2000)
+  expect(s.invalidates.length).toBe(1)
+  s.panes = []
+  await clock.advance(2000)
+  const listed = s.panesCalls
+  const drawnCount = s.invalidates.length
+  await clock.advance(6000)
+  expect(s.panesCalls).toBe(listed)
+  expect(s.invalidates.length).toBe(drawnCount)
+})
+
+test('the close button closes the pane and stops its refresh timer', { options: { cardDisplay: 'off' } }, async ($, on) => {
+  clearPanelSelection()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  await start($)
+  await panel($, '')
+  await clock.advance(2000)
+  const redrawnWhileOpen = s.invalidates.length
+  await (await mountPane($)).press({ key: 'panel:close' })
+  expect(s.closes).toEqual([PANEL_ID])
+  await clock.advance(6000)
+  expect(s.invalidates.length).toBe(redrawnWhileOpen)
+})
+
+test('the pane draws cancel for a running job only, and pressing it cancels that job', async ($, on) => {
+  clearPanelSelection()
+  const s = fresh()
+  stubs(on, s)
+  mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0)
+  seedJob(s, 'job-done', T0)
+  finish(s, 'job-done', '0')
+  await start($)
+  const pane = await mountPane($)
+  expect(await pane.find({ key: 'cancel:job-run' })).toBeDefined()
+  expect(await pane.find({ key: 'cancel:job-done' })).toBeUndefined()
+  await pane.press({ key: 'cancel:job-run' })
+  expect(s.writes.some((w) => w.path === `${JOBS}/job-run/cancel`)).toBe(true)
+  expect(s.writes.some((w) => w.path === `${JOBS}/job-done/cancel`)).toBe(false)
+})
+
+test('a finished job is read once, across renders and refresh ticks', { options: { cardDisplay: 'off' } }, async ($, on) => {
+  clearPanelSelection()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-done', T0)
+  finish(s, 'job-done', '0')
+  await start($)
+  await panel($, '')
+  expect(await drawn($)).toContain('✓ done ')
+  expect(await drawn($)).toContain('✓ done ')
+  await clock.advance(2000)
+  await clock.advance(2000)
+  expect(await drawn($)).toContain('✓ done ')
+  expect(s.extracts).toBe(1)
+})
+
+test('a job whose view throws is logged by its id and left out, and the pane still draws the others', async ($, on) => {
+  clearPanelSelection()
+  const s = fresh()
+  stubs(on, s)
+  mock.clock(on, { now: NOW })
+  seedJob(s, 'job-bad', T0)
+  seedJob(s, 'job-good', T0 + 1)
+  s.unreadable.add(`${JOBS}/job-bad/question.txt`)
+  await start($)
+  const text = await drawn($)
+  expect(text.includes('"job:job-good"')).toBe(true)
+  expect(text.includes('"job:job-bad"')).toBe(false)
+  expect(text.includes('could not read jobs')).toBe(false)
+  expect(s.logs.some((line) => line.includes('job-bad') && line.includes('could not be read'))).toBe(true)
 })
 
 test('the pane shows each orq job status as jobView reads it', async ($, on) => {

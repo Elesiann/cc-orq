@@ -2,7 +2,7 @@ import type { Register } from 'claude-code'
 import { registerCard, startCard, stopCard } from './card.ts'
 import { registerEngine, registerOrqCommand } from './commands.ts'
 import { loadConfig } from './config.ts'
-import { registerPanel, registerPanelCommand } from './panel.ts'
+import { registerPanel, registerPanelCommand, stopPanel } from './panel.ts'
 import { registerTask, registerTaskSurface } from './task.ts'
 import { declareIntegrateTool, registerIntegrate } from './integrate.ts'
 import { registerTools, startTools } from './tools.ts'
@@ -56,6 +56,7 @@ export const register: Register = (on, options) => {
   })
   on('session.end', async (_$, e, next) => {
     stopCard(e)
+    stopPanel(e)
     return next(e)
   })
 }

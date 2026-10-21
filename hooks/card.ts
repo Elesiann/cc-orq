@@ -1,8 +1,8 @@
 import type { On, PluginOptions, RenderElement, RenderInput, SessionEndInput, Timer } from 'claude-code'
 
 import { loadConfig } from './config.ts'
-import { jobView, listJobs, type Engine } from './engine.ts'
-import { renderTail, tailEvents } from './panel.ts'
+import { listJobs, type Engine } from './engine.ts'
+import { cachedJobView, renderTail, tailEvents } from './panel.ts'
 import { formatDuration, type JobRecord, type JobStatus } from './types.ts'
 
 export const REFRESH_MS = 2000
@@ -42,7 +42,7 @@ async function exitFileMtimeMs($: Engine, job: JobRecord): Promise<number | null
 }
 
 async function rowOf($: Engine, job: JobRecord, fallbackEndAt: number): Promise<CardRow> {
-  const view = await jobView($, job)
+  const view = await cachedJobView($, job)
   const [lastAction] = renderTail(await tailEvents($, job.dir), 1)
   return {
     id: job.id,
