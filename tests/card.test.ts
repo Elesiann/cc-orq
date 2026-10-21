@@ -1,0 +1,252 @@
+import { expect, mock, test, type TestBody } from 'claude-code/testing'
+import type { On } from 'claude-code'
+
+import { REFRESH_MS, clearCardState } from '../hooks/card.ts'
+
+type Kit = Parameters<TestBody>[0]
+
+const JOBS = '/srv/example/jobs'
+const CONFIG_PATH = '/home/test/.config/orq/config.json'
+const CONFIG = JSON.stringify({ jobsDir: JOBS })
+const T0 = 1000000
+const NOW = 4600000
+const REFRESH_AT = NOW + REFRESH_MS
+const RUNNING_LINE = 'codex · fixture-model · running · msg hello there · 60m02s'
+
+type State = {
+  files: Map<string, string>
+  mtimes: Map<string, number>
+  dirEntries: { name: string; kind: 'dir' }[]
+  tails: Map<string, string>
+  lists: number
+  invalidates: number
+  statuses: (string | undefined)[]
+  extractSummary: { tid: string; in: number; out: number; error: boolean }
+}
+
+function fresh(): State {
+  return {
+    files: new Map([[CONFIG_PATH, CONFIG]]),
+    mtimes: new Map(),
+    dirEntries: [],
+    tails: new Map(),
+    lists: 0,
+    invalidates: 0,
+    statuses: [],
+    extractSummary: { tid: 'thread-1', in: 1, out: 1, error: false },
+  }
+}
+
+const result = (exitCode: number, stdout = '') => ({
+  value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+})
+
+function stubs(on: On, s: State): void {
+  on('session.start', () => ({ cwd: '/work' }))
+  on('session.end', () => ({ sessionId: 'session-1' }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('ui.invalidate', () => {
+    s.invalidates += 1
+    return { value: undefined }
+  })
+  on('ui.status', (_$, e) => {
+    s.statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  // The kit fails a mount that no hook beneath the plugins answers ("no implementation for ui.render").
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ flexDirection: 'column', children: [] }))
+  on('env.get', () => ({ value: '/home/test' }))
+  on('fs.exists', (_$, e) => ({ value: s.files.has(e.path) }))
+  on('fs.read', (_$, e) => {
+    const text = s.files.get(e.path)
+    if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: text }
+  })
+  on('fs.list', (_$, e) => {
+    if (e.path !== JOBS) throw new Error(`ENOENT: ${e.path}`)
+    s.lists += 1
+    return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
+  })
+  on('fs.stat', (_$, e) => {
+    if (!s.files.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file', size: 0, mtimeMs: s.mtimes.get(e.path) ?? REFRESH_AT, isLink: false } }
+  })
+  on('process.run', (_$, e) => {
+    const argv = e.argv
+    if (argv[0] === 'python3') return result(0, `${JSON.stringify(s.extractSummary)}\n`)
+    const script = argv[2] ?? ''
+    if (script.includes('# orq:liveness')) return result(11)
+    if (script.includes('# orq-panel:tail')) {
+      const id = [...s.tails.keys()].find((job) => script.includes(`${JOBS}/${job}/events.jsonl`))
+      return result(0, id === undefined ? '' : (s.tails.get(id) ?? ''))
+    }
+    throw new Error(`unexpected process.run: ${script.slice(0, 80)}`)
+  })
+}
+
+async function start($: Kit): Promise<void> {
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+}
+
+async function band($: Kit, surface: 'terminal' | 'desktop', props: { hasSurvey?: boolean; maxRows?: number } = {}): Promise<string> {
+  const mounted = await $.ui.mount({
+    plugin: 'orq',
+    surface,
+    component: 'AbovePrompt',
+    props: {
+      hasSurvey: false,
+      isWorking: false,
+      maxRows: 6,
+      bodyColumns: 100,
+      scroll: { offset: 0, bodyRows: 6 },
+      view: {},
+      ...props,
+    },
+  })
+  return JSON.stringify(await mounted.drawn())
+}
+
+function count(text: string, needle: string): number {
+  return text.split(needle).length - 1
+}
+
+function seedJob(s: State, id: string, startedAt: number, tail?: string): void {
+  s.dirEntries.push({ name: id, kind: 'dir' })
+  s.files.set(
+    `${JOBS}/${id}/meta.json`,
+    JSON.stringify({
+      id,
+      kind: 'manual',
+      agentId: 'manual',
+      cwd: '/work',
+      startedAt,
+      startedAtIso: new Date(startedAt).toISOString(),
+      runner: 'codex',
+      model: 'fixture-model',
+      instanceId: 'codex',
+      driver: 'codex',
+    }),
+  )
+  if (tail !== undefined) s.tails.set(id, tail)
+}
+
+function finishWithAnswer(s: State, id: string, exitCode: string, endedAt: number): void {
+  s.files.set(`${JOBS}/${id}/exit`, exitCode)
+  s.mtimes.set(`${JOBS}/${id}/exit`, endedAt)
+  s.files.set(`${JOBS}/${id}/last.txt`, 'The answer is 42.\n')
+}
+
+const HELLO = '{"type":"item.completed","item":{"type":"agent_message","text":"hello there"}}\n'
+
+test('one running job draws one card line, the same on the terminal and the desktop', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    expect(count(await band($, surface), RUNNING_LINE)).toBe(1)
+  }
+})
+
+test('a survey holds the band, so the card yields and draws no card line', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(count(await band($, 'terminal', { hasSurvey: true }), RUNNING_LINE)).toBe(0)
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(1)
+})
+
+test('maxRows 0 yields, so the card draws no card line', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(count(await band($, 'terminal', { maxRows: 0 }), RUNNING_LINE)).toBe(0)
+})
+
+test('cardDisplay off draws nothing and starts no timer', { options: { cardDisplay: 'off' } }, async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(s.lists).toBe(0)
+  expect(s.invalidates).toBe(0)
+  expect(s.statuses).toEqual([])
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(0)
+})
+
+test('cardDisplay status sends the line to the status line and leaves the band empty', { options: { cardDisplay: 'status' } }, async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(s.statuses.at(-1)).toBe(RUNNING_LINE)
+  expect(count(await band($, 'terminal'), RUNNING_LINE)).toBe(0)
+})
+
+test('five running jobs with maxRows 3 draw two card rows and a +3 more row', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  for (let i = 0; i < 5; i++) seedJob(s, `job-${i}`, T0 + i)
+  await start($)
+  await clock.advance(2000)
+  const text = await band($, 'terminal', { maxRows: 3 })
+  expect(count(text, ' · running · ')).toBe(2)
+  expect(text.includes('+3 more')).toBe(true)
+})
+
+test('a job whose exit file is 60 s old is dropped and one that ended 10 s ago is shown', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-old', T0, '{"type":"item.completed","item":{"type":"agent_message","text":"stale"}}\n')
+  finishWithAnswer(s, 'job-old', '0', REFRESH_AT - 60000)
+  seedJob(s, 'job-fresh', T0, '{"type":"item.completed","item":{"type":"agent_message","text":"wrapped up"}}\n')
+  finishWithAnswer(s, 'job-fresh', '0', REFRESH_AT - 10000)
+  await start($)
+  await clock.advance(2000)
+  const text = await band($, 'terminal')
+  expect(count(text, ' · done · ')).toBe(1)
+  expect(text.includes('codex · fixture-model · done · msg wrapped up · 59m52s')).toBe(true)
+  expect(text.includes('stale')).toBe(false)
+})
+
+test('session.end on /clear or a resume keeps the timer, and on any other reason stops it', async ($, on) => {
+  clearCardState()
+  const s = fresh()
+  stubs(on, s)
+  const clock = mock.clock(on, { now: NOW })
+  seedJob(s, 'job-run', T0, HELLO)
+  await start($)
+  await clock.advance(2000)
+  expect(s.lists).toBe(1)
+  await $.session.end({ reason: 'clear', sessionId: 'session-1', resume: { id: 'session-1' } })
+  await clock.advance(2000)
+  expect(s.lists).toBe(2)
+  await $.session.end({ reason: 'resume', sessionId: 'session-1', resume: { id: 'session-1' } })
+  await clock.advance(2000)
+  expect(s.lists).toBe(3)
+  await $.session.end({ reason: 'other', sessionId: 'session-1', resume: { id: 'session-1' } })
+  await clock.advance(2000)
+  expect(s.lists).toBe(3)
+})

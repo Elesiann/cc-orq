@@ -197,7 +197,7 @@ async function redraw($: Engine): Promise<void> {
 }
 
 /** The last TAIL_BYTES of a job's events file. A full read would be too big on a long run. */
-async function tailEvents($: Engine, dir: string): Promise<string> {
+export async function tailEvents($: Engine, dir: string): Promise<string> {
   const script = `# orq-panel:tail\ntail -c ${TAIL_BYTES} ${shellWord(`${dir}/events.jsonl`)} 2>/dev/null; exit 0`
   try {
     const r = await $.process.run(['bash', '-c', script], { timeoutMs: PROCESS_TIMEOUT_MS })
