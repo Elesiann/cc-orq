@@ -1,4 +1,4 @@
-// Shapes from T3 Code's orchestrator contract (MIT), reduced to what orq:task uses. Thread,
+// Shapes from T3 Code's orchestrator contract (MIT), reduced to what cc-orq:task uses. Thread,
 // scheduling and context-transfer fields are left out. The driver list lives in config.ts.
 
 import type { DriverKind, InstanceConfig } from './config.ts'
@@ -93,7 +93,7 @@ export type CapabilitiesResult = {
 export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type WorkState = 'working' | 'waiting_for_children' | 'result_available'
 
-/** What `mcp__orq__status` answers for one task, read from its job directory. */
+/** What `mcp__cc-orq__status` answers for one task, read from its job directory. */
 export type TaskStatusResult = {
   taskId: string
   status: TaskStatus
@@ -112,7 +112,7 @@ export type TaskStatusResult = {
 export type TaskCancelResult = { taskId: string; status: 'cancel_requested' }
 
 /**
- * Every failure code an orq answer can name, refusals of orq:task and tool answers alike. A code is
+ * Every failure code an orq answer can name, refusals of cc-orq:task and tool answers alike. A code is
  * part of the contract, so a rename is a breaking change for the instructions that name it.
  */
 export const FAILURE_CODES = [
@@ -133,7 +133,7 @@ export const FAILURE_CODES = [
   'worktree_busy',
   // No meta.json for the task id.
   'task_not_found',
-  // mcp__orq__cancel on a task that has ended or is interrupted.
+  // mcp__cc-orq__cancel on a task that has ended or is interrupted.
   'task_not_cancellable',
   // The capability probe found the provider unable to run a child task.
   'capability_denied',
@@ -171,7 +171,7 @@ export type GitFailure = { code: FailureCode; message: string; files?: string[] 
 
 /** The tool names and the input of `integrate`. */
 export const INTEGRATE_TOOL = 'integrate'
-export const INTEGRATE_TOOL_NAME = 'mcp__orq__integrate'
+export const INTEGRATE_TOOL_NAME = 'mcp__cc-orq__integrate'
 
 export const INTEGRATE_STRATEGIES = ['ff-only', 'merge'] as const
 export type IntegrateStrategy = (typeof INTEGRATE_STRATEGIES)[number]

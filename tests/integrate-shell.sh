@@ -81,7 +81,7 @@ const check = (label, ok) => {
 // The answer of the tool for one task, as the model reads its structured content.
 async function integrate(taskId, strategy) {
   const input = strategy === undefined ? { taskId } : { taskId, strategy }
-  const r = await handler(dollar, { tool: 'mcp__orq__integrate', tool_use_id: `use-${taskId}`, ...input }, async () => {
+  const r = await handler(dollar, { tool: 'mcp__cc-orq__integrate', tool_use_id: `use-${taskId}`, ...input }, async () => {
     throw new Error('the integrate tool answers every call itself')
   })
   return JSON.parse(r.result)

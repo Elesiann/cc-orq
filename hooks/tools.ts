@@ -18,9 +18,9 @@ import { loadConfig, type OrqConfig } from './config.ts'
 import { jobView, listJobs, readJobStatus, readMeta, taskStatusOf, writeCancel } from './engine.ts'
 import { formatDuration, isRecord } from './types.ts'
 
-const CAPABILITIES_TOOL = 'mcp__orq__capabilities'
-const STATUS_TOOL = 'mcp__orq__status'
-const CANCEL_TOOL = 'mcp__orq__cancel'
+const CAPABILITIES_TOOL = 'mcp__cc-orq__capabilities'
+const STATUS_TOOL = 'mcp__cc-orq__status'
+const CANCEL_TOOL = 'mcp__cc-orq__cancel'
 
 const NO_INPUT = { type: 'object', properties: {}, required: [], additionalProperties: false }
 const TASK_ID_INPUT = {
@@ -43,7 +43,7 @@ const TOOL_SPECS = [
     description:
       'List the orq provider instances (as configured in the instances list) with their live models from the catalog probe, ' +
       `each model's options and allowed values (such as reasoningEffort), each instance's constraints, and the parent session's runtimeMode and interactionMode. ` +
-      'Read it before you name a target in an orq:task brief, and do not guess model ids. Takes no input.',
+      'Read it before you name a target in a cc-orq:task brief, and do not guess model ids. Takes no input.',
     inputSchema: NO_INPUT,
   },
   {

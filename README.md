@@ -1,21 +1,22 @@
-# orq
+# cc-orq
 
-orq brings a T3 Code style orchestration surface into Claude Code. The main
+cc-orq brings a T3 Code style orchestration surface into Claude Code. The main
 session delegates self-contained tasks to external coding agents (Codex,
-OpenCode, Claude headless) through one agent type, `orq:task`, and follows,
+OpenCode, Claude headless) through one agent type, `cc-orq:task`, and follows,
 cancels and integrates their work through MCP tools. Workers run as detached
 jobs that survive the session, keep their state on disk, and report back as
 text.
 
-orq does not pick models or providers. The parent session names the provider
-instance and model in every task.
+cc-orq does not pick models or providers. The parent session names the provider
+instance and model in every task. Its slash commands keep the short name, `/orq`
+and `/orq-panel`, and so do its directories, `~/.config/orq` and `~/.cache/orq`.
 
 ## Status
 
 Early. This version loads and reads its configuration, runs detached jobs, and
-lets you list, show, cancel and launch them with `/orq`. The `orq:task` agent
+lets you list, show, cancel and launch them with `/orq`. The `cc-orq:task` agent
 runs a task as a job for the parent session, under the parent's permission
-ceiling; see "Delegating with orq:task". A task can run in its own git
+ceiling; see "Delegating with cc-orq:task". A task can run in its own git
 worktree, and the `integrate` tool merges that work back. The `capabilities`,
 `status` and `cancel` tools are described under Tools.
 
@@ -35,14 +36,14 @@ worktree, and the `integrate` tool merges that work back. The `capabilities`,
 From a local clone:
 
 ```bash
-claude plugin marketplace add /path/to/orq
-claude plugin install orq@orq
+claude plugin marketplace add /path/to/cc-orq
+claude plugin install cc-orq@cc-orq
 ```
 
 For one session only, without installing:
 
 ```bash
-claude --plugin-dir /path/to/orq
+claude --plugin-dir /path/to/cc-orq
 ```
 
 ## Commands
@@ -104,15 +105,15 @@ with a model your provider CLI accepts.
 With `--worktree` before the instance, the job runs in its own git worktree.
 See [Worktrees and integrate](#worktrees-and-integrate).
 
-Until the `orq:task` agent brings the permission policy, a manual launch uses
+Until the `cc-orq:task` agent brings the permission policy, a manual launch uses
 each provider CLI's own defaults for sandbox, permissions and reasoning effort.
 
-## Delegating with orq:task
+## Delegating with cc-orq:task
 
 The main session starts a task with one agent type:
 
 ```
-Agent({ subagent_type: "orq:task", run_in_background: true, prompt: HEADER + TASK })
+Agent({ subagent_type: "cc-orq:task", run_in_background: true, prompt: HEADER + TASK })
 ```
 
 The prompt starts with header lines, in any order, then the task. The first
@@ -152,7 +153,7 @@ The parent session's permission mode sets the most a task may do. The mode
 comes only from the `Agent` call that spawned that task. When that call set no
 mode, the ceiling is `approval-required` with interaction `default`, and the
 debug log says `orq: ceiling for AGENT_ID: no permission mode captured at spawn`.
-The session's last `orq:task` mode and `permissions.defaultMode` in settings never
+The session's last `cc-orq:task` mode and `permissions.defaultMode` in settings never
 raise a task's ceiling.
 
 | Parent permission mode | Runtime ceiling | Interaction ceiling |
@@ -200,11 +201,11 @@ the pair; its sandbox follows the Codex config.
 ### Handback
 
 How a finished task is delivered reads the mode in this order: the task's own
-spawn, then the session's last `orq:task` spawn, then `permissions.defaultMode`
+spawn, then the session's last `cc-orq:task` spawn, then `permissions.defaultMode`
 in settings. This choice only sets the format of the answer. It never changes
 the ceiling above.
 
-A task's job runs detached. The subagent waits on it through `mcp__orq__wait`,
+A task's job runs detached. The subagent waits on it through `mcp__cc-orq__wait`,
 one call per `waitSeconds` slice, and each call answers `finished`,
 `still running, DURATION` or `supervisor gone`.
 
@@ -233,7 +234,7 @@ beside the checkout it came from, on a new branch `orq/JOB_ID` cut from that
 checkout's HEAD when the job started.
 
 A task whose `cwd` is a subdirectory of its checkout runs in the same
-subdirectory of the worktree. For an `orq:task`, the whole checkout must lie
+subdirectory of the worktree. For an `cc-orq:task`, the whole checkout must lie
 inside the session directory or an `allowedRoots` entry, since the worktree
 copies all of it; otherwise the task is refused with `cwd_out_of_scope`. A
 `cwd` that is not in the checkout's HEAD, such as an untracked directory, has
@@ -242,7 +243,7 @@ removed. orq creates the worktree with the checkout's git hooks and fsmonitor
 turned off. `integrate` runs git in your checkout as you would, so the
 checkout's own hooks run there.
 
-An `orq:task` runs in a worktree unless its header says `isolation: shared`.
+An `cc-orq:task` runs in a worktree unless its header says `isolation: shared`.
 A manual launch asks for one with `--worktree`:
 
 ```
@@ -262,7 +263,7 @@ records it, and the refusal still names the launch's own failure. Remove the
 leftovers by hand with `git worktree remove --force PATH` and
 `git branch -D orq/JOB_ID`.
 
-### `mcp__orq__integrate`
+### `mcp__cc-orq__integrate`
 
 Merges a finished task's branch into the checkout the task was launched from.
 The input is `taskId`, the job id, and an optional `strategy`:
@@ -304,9 +305,9 @@ conflict for you.
 
 ## Tools
 
-Beside `mcp__orq__integrate`, the mod serves three MCP tools for the parent
-session, named `mcp__orq__capabilities`, `mcp__orq__status` and
-`mcp__orq__cancel`. Each answers with a JSON text. A
+Beside `mcp__cc-orq__integrate`, the mod serves three MCP tools for the parent
+session, named `mcp__cc-orq__capabilities`, `mcp__cc-orq__status` and
+`mcp__cc-orq__cancel`. Each answers with a JSON text. A
 refusal has the shape `{"error": {"code": "...", "message": "..."}}`, and the
 codes orq answers with are `task_not_found`, `task_not_cancellable` and
 `invalid_request`. A task is one job: its `taskId` is the job id that
@@ -318,7 +319,7 @@ context: a `SessionStart` hook runs `scripts/session-start.sh`, which prints
 A test keeps `instructions.md` equal to the `ORCHESTRATION_INSTRUCTIONS` constant
 in `hooks/instructions.ts`, so change the constant and the file together.
 
-### `mcp__orq__capabilities`
+### `mcp__cc-orq__capabilities`
 
 Takes no input. Answers the provider instances of the configured `instances`
 and the permission mode the parent session runs under. Each provider has its
@@ -365,7 +366,7 @@ with `plan`; `acceptEdits` gives `auto-accept-edits`; `auto` gives `auto`;
 `bypassPermissions` gives `full-access`; `default`, `dontAsk` and any other value
 give `approval-required`.
 
-### `mcp__orq__status`
+### `mcp__cc-orq__status`
 
 Takes `{"taskId": "<id>"}` and reads that job's directory, so it also answers for
 jobs of earlier sessions. An unknown or unsafe id answers `task_not_found`.
@@ -403,7 +404,7 @@ recorded them.
 `result_available` once the task has ended. orq does not produce
 `waiting_for_children`, since a task has no children of its own.
 
-### `mcp__orq__cancel`
+### `mcp__cc-orq__cancel`
 
 Takes `{"taskId": "<id>", "reason": "<optional text>"}`. The reason is up to 200
 characters; a longer one, or one that is not text, answers `invalid_request` and
@@ -467,7 +468,7 @@ as `/exit`, a logout, or a `-p` run that finishes, stops it.
 - `off`: no card is drawn, and no refresh timer runs.
 
 An unknown value counts as `band`. Set it in `/config`, or in `settings.json`
-under `pluginConfigs.orq.options.cardDisplay`.
+under `pluginConfigs.cc-orq.options.cardDisplay`.
 
 ### `/orq-panel`
 
@@ -508,7 +509,7 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
 - `waitSeconds`: how long one wait step blocks before the next one, between 10 and 240. The
   engine aborts a subagent silent for 600 s, so orq keeps each wait under 240 s. Default 120.
 - `allowedRoots`: directories, as absolute paths or paths that start with `~/`,
-  where an `orq:task` may run besides the session's own working directory. A
+  where an `cc-orq:task` may run besides the session's own working directory. A
   `cwd` must resolve inside one of them. Default: none. Entries that are not
   absolute are dropped with a warning in the debug log.
 - `instances`: the provider instances the parent can target. `id` is the name
@@ -544,7 +545,7 @@ for both the kind and the agent suffix, for example
 | `cancel` | `/orq cancel` | A request to stop the job. Only its existence counts. |
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
 | `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
-| `flags` | `orq:task` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
+| `flags` | `cc-orq:task` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
 The `exit` file holds one number:
 
@@ -579,7 +580,7 @@ prints `BLOCKED:` followed by the question as its final message, and stops.
 - A job that fails or is cancelled keeps its failed or cancelled answer, even when
   it left a question.
 
-Every `orq:task` and `/orq launch` prompt ends with the protocol paragraph, `QUESTION_PROTOCOL` in
+Every `cc-orq:task` and `/orq launch` prompt ends with the protocol paragraph, `QUESTION_PROTOCOL` in
 `hooks/question.ts`. A Codex or Claude worker writes its question with its shell
 tool:
 
@@ -593,7 +594,7 @@ An OpenCode worker can call the `orq_ask` tool instead. The tool is in
 
 ```bash
 mkdir -p ~/.config/opencode/tools
-ln -s /path/to/orq/opencode/tools/orq_ask.ts ~/.config/opencode/tools/orq_ask.ts
+ln -s /path/to/cc-orq/opencode/tools/orq_ask.ts ~/.config/opencode/tools/orq_ask.ts
 ```
 
 The tool writes the same file. Without the link, an OpenCode worker still has its

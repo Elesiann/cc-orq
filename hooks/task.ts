@@ -1,6 +1,6 @@
-// The orq:task subagent. Its prompt names a target; the mod runs the task as a detached job and serves
+// The cc-orq:task subagent. Its prompt names a target; the mod runs the task as a detached job and serves
 // each step of the subagent itself, so no model call happens for it. The subagent waits on its job
-// through mcp__orq__wait, and its answer goes back through SubagentHandback in auto mode, as text otherwise.
+// through mcp__cc-orq__wait, and its answer goes back through SubagentHandback in auto mode, as text otherwise.
 
 import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
@@ -19,9 +19,9 @@ import { formatDuration, isRecord, isWithin, shellWord, TASK_REFUSAL, type JobRe
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
-/** The subagent type a parent spawns with `Agent({ subagent_type: "orq:task" })`. */
-export const TASK_SUBAGENT = 'orq:task'
-const WAIT_TOOL = 'mcp__orq__wait'
+/** The subagent type a parent spawns with `Agent({ subagent_type: "cc-orq:task" })`. */
+export const TASK_SUBAGENT = 'cc-orq:task'
+const WAIT_TOOL = 'mcp__cc-orq__wait'
 const HANDBACK_TOOL = 'SubagentHandback'
 
 const WAIT_DESCRIPTION =
@@ -38,7 +38,7 @@ const TASK_AGENT_DESCRIPTION =
   '`cwd: /absolute/path`, then optionally `isolation: worktree | shared` (default worktree: a new branch in its own git worktree, so cwd must be in a git checkout) and `role: implementation | research | review | design | test | general`, ' +
   'then the task. runtime and interaction can narrow the session, never widen it. The answer arrives when the job ends.'
 const ONE_LINE_PROMPT =
-  'An orq runner: the orq plugin serves your steps and runs your task on the external CLI its target line names. Call mcp__orq__wait with the job id until the job finishes.'
+  'An orq runner: the orq plugin serves your steps and runs your task on the external CLI its target line names. Call mcp__cc-orq__wait with the job id until the job finishes.'
 
 /** A launched job's id, or the refusal a step answers with. Stored per agent so a repeated step reuses it. */
 type TaskRun = { jobId: string } | { refusal: string }
@@ -87,7 +87,7 @@ async function spawnPermissionMode($: TaskEngine, agentId: string): Promise<stri
 }
 
 /**
- * The mode that picks how a finished task is delivered: the spawn's, then the session's last orq:task spawn,
+ * The mode that picks how a finished task is delivered: the spawn's, then the session's last cc-orq:task spawn,
  * then the settings default. It chooses a delivery format, never a privilege.
  */
 async function handbackPermissionMode($: TaskEngine, agentId: string): Promise<string | undefined> {
@@ -159,7 +159,7 @@ function firstUserText(messages: { role: string; text: string }[]): string | und
   return messages.find((message) => message.role === 'user')?.text
 }
 
-/** A task agent is one whose spawn the mod saw as orq:task. Every other agent passes through untouched. */
+/** A task agent is one whose spawn the mod saw as cc-orq:task. Every other agent passes through untouched. */
 async function isTaskAgent($: TaskEngine, agentId: string): Promise<boolean> {
   return (await storeRead($, `task:${agentId}`)) === TASK_SUBAGENT
 }
@@ -273,7 +273,7 @@ async function* answerStep($: TaskEngine, e: TurnStepInput, agentId: string, ans
   return { turnId: e.turnId, index: e.index, answer, toolUses: [], stopReason: 'end_turn', usage: null }
 }
 
-/** The step that waits on a running job: one mcp__orq__wait call, with no model call. */
+/** The step that waits on a running job: one mcp__cc-orq__wait call, with no model call. */
 async function* waitStep(e: TurnStepInput, jobId: string): AsyncGenerator<TurnStepChunk, TurnStepResult> {
   yield { kind: 'tool', index: 0, id: `wait-${jobId}-${e.index}`, name: WAIT_TOOL }
   yield { kind: 'input', index: 0, json: JSON.stringify({ job: jobId }) }
@@ -296,7 +296,7 @@ function waitScript(dir: string, iterations: number): string {
   )
 }
 
-/** Declares the wait tool and the orq:task agent. Called from the session.start hook, which owns that event. */
+/** Declares the wait tool and the cc-orq:task agent. Called from the session.start hook, which owns that event. */
 export async function registerTaskSurface($: Pick<EngineInterface, 'agent' | 'tool'>): Promise<void> {
   await $.tool.register({ name: 'wait', description: WAIT_DESCRIPTION, inputSchema: WAIT_SCHEMA })
   await $.agent.register({

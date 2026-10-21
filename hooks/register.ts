@@ -40,7 +40,7 @@ export const register: Register = (on, options) => {
     try {
       await registerTaskSurface($)
     } catch (err) {
-      await $.ui.log(`orq: could not register orq:task: ${String(err)}`, { to: 'debug' })
+      await $.ui.log(`orq: could not register cc-orq:task: ${String(err)}`, { to: 'debug' })
     }
     try {
       await declareIntegrateTool($)

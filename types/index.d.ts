@@ -5,6 +5,6 @@ export type OrqCardRow = { id: string; instance: string; model: string; status: 
 
 declare module 'claude-code' {
   interface PluginState {
-    orq: { card: OrqCardRow[] }
+    'cc-orq': { card: OrqCardRow[] }
   }
 }

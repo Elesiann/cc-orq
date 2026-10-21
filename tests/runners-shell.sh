@@ -133,7 +133,7 @@ expect_argv codex-flags codex exec --json -o "$JOB/last.txt" -m m1 -c 'model_rea
 expect_file "$DUMP/codex.stdin" 'do it via codex' codex-stdin-prompt
 expect_file "$JOB/exit" 0 codex-exit
 
-# orq:task passes its policy flags through the flags file, one argv item per line.
+# cc-orq:task passes its policy flags through the flags file, one argv item per line.
 run_job job-codex-approve codex m3 '' '' 'approve via codex' --approve-for-me
 expect_argv codex-approve-flags codex exec --json -o "$JOB/last.txt" -m m3 -C "$T/work" --skip-git-repo-check --approve-for-me -
 expect_file "$JOB/exit" 0 codex-approve-exit

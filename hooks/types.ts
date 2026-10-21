@@ -32,7 +32,7 @@ export type JobRecord = {
   driver?: DriverKind
   /** The CODEX_HOME the job launched with, when its instance set one; the only env value meta.json keeps. */
   codexHome?: string
-  /** The runtime and interaction modes an orq:task job was resolved to; absent on older and manual jobs. */
+  /** The runtime and interaction modes a cc-orq:task job was resolved to; absent on older and manual jobs. */
   runtimeMode?: RuntimeMode
   interactionMode?: InteractionMode
   /** The checkout the task was launched from. Set only for a worktree task, where cwd is the worktree. */
