@@ -24,6 +24,7 @@ Drivers:
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,8 @@ EFFORT_OPTION = "reasoningEffort"
 TIMEOUT_S = 60
 
 CLAUDE_ALIASES = ("haiku", "sonnet", "opus")
+
+OPENCODE_SLUG = re.compile(r"^\s*[^\s/]+/\S+\s*$")
 
 
 def run(cmd, env, timeout=TIMEOUT_S):
@@ -125,21 +128,14 @@ def probe_opencode(env):
     if shutil.which("opencode", path=env.get("PATH")) is None:
         return False, None, [], "Executable 'opencode' was not found on PATH."
     code, out = run(["opencode", "models"], env)
-    if code != 0:
+    if code not in (0, 127):
         # OpenCode commands share one SQLite database, so a concurrent run can fail it once.
         time.sleep(1)
         code, out = run(["opencode", "models"], env)
     if code != 0:
         return True, None, [], "'opencode models' failed (exit %d)." % code
-    models = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line or "/" not in line:
-            continue
-        name = line.split("/", 1)[1]
-        if not name:
-            continue
-        models.append({"id": line, "label": name})
+    # The label would repeat the id after the slash, and OpenCode can list hundreds of models.
+    models = [{"id": line.strip(), "label": None} for line in out.splitlines() if OPENCODE_SLUG.match(line)]
     if not models:
         return True, None, [], "OpenCode is available, but it did not report any connected upstream providers."
     return True, True, models, None

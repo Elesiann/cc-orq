@@ -40,6 +40,8 @@ const OPENCODE_SAMPLE = [
   'fixture-provider-b/fixture-model-3',
   'fixture-provider-c/fixture-model-4',
   'not-a-model-line',
+  '/no-provider',
+  'a log line with/a slash',
   '',
 ].join('\n')
 
@@ -86,9 +88,9 @@ test('codex parsing is total on garbage', () => {
 
 test('opencode output keeps every listed provider, logged in or not', () => {
   expect(parseOpencodeModels(OPENCODE_SAMPLE)).toEqual([
-    { id: 'fixture-provider-a/fixture-model-2', label: 'fixture-model-2' },
-    { id: 'fixture-provider-b/fixture-model-3', label: 'fixture-model-3' },
-    { id: 'fixture-provider-c/fixture-model-4', label: 'fixture-model-4' },
+    { id: 'fixture-provider-a/fixture-model-2', label: null },
+    { id: 'fixture-provider-b/fixture-model-3', label: null },
+    { id: 'fixture-provider-c/fixture-model-4', label: null },
   ])
 })
 

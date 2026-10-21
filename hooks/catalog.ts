@@ -69,17 +69,18 @@ export function parseCodexModels(text: string): CatalogModel[] {
   return out
 }
 
-/** Parse `opencode models` lines (`provider/model`). OpenCode lists only the providers it can use, so every one is kept. */
+const OPENCODE_SLUG = /^[^\s/]+\/\S+$/
+
+/**
+ * Parse `opencode models` lines (`provider/model`). OpenCode lists only the providers it can use, so every one
+ * is kept. The label would repeat the id after the slash, and OpenCode can list hundreds of models, so it is null.
+ */
 export function parseOpencodeModels(text: string): CatalogModel[] {
-  const out: CatalogModel[] = []
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || !trimmed.includes('/')) continue
-    const name = trimmed.slice(trimmed.indexOf('/') + 1)
-    if (name.length === 0) continue
-    out.push({ id: trimmed, label: name })
-  }
-  return out
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => OPENCODE_SLUG.test(line))
+    .map((id) => ({ id, label: null }))
 }
 
 /** Parse `agy models`: tab-separated id and label; effort stays in the id. */

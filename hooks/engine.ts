@@ -28,9 +28,9 @@ import {
   type JobPlace,
   revParseHeadArgv,
   revParseToplevelArgv,
+  WORKTREE_INCLUDE_DEADLINE_S,
   WORKTREE_INCLUDE_TIMEOUT_MS,
   worktreeAddArgv,
-  worktreeIncludeScript,
   worktreePathFor,
   worktreeRemoveArgv,
 } from './worktree.ts'
@@ -278,7 +278,8 @@ async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
   ]
   for (const [what, argv] of undo) {
     try {
-      const r = await $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
+      // A worktree can hold a copied node_modules, so its removal gets the copy's time.
+      const r = await $.process.run(argv, { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
       if (r.exitCode !== 0) await debugLog($, `orq: could not ${what} after a failed launch${gitDetail(r.stderr)}`)
     } catch (err) {
       await debugLog($, `orq: could not ${what} after a failed launch: ${String(err)}`)
@@ -313,13 +314,23 @@ export async function checkoutBusy($: Engine, jobsDir: string, path: string): Pr
   return busyJob(places, path)
 }
 
-/** Best effort: a copy that fails leaves the worktree as git made it, which is what a checkout without .worktreeinclude gets. */
+/**
+ * Best effort: the copy is all or nothing, so one that fails leaves the worktree as git made it, which is what a
+ * checkout without .worktreeinclude gets.
+ */
 async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: string): Promise<void> {
+  const script = `${$.plugin.root}/scripts/worktree-include.py`
   try {
-    const r = await $.process.run(['bash', '-c', worktreeIncludeScript(toplevel, worktree)], { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
-    const copied = Number(r.stdout.trim())
-    if (r.exitCode !== 0) await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed (exit ${r.exitCode})${gitDetail(r.stderr)}`)
-    else if (copied > 0) await debugLog($, `orq: .worktreeinclude copied ${copied} file(s) into ${worktree}`)
+    const argv = ['python3', script, toplevel, worktree, String(WORKTREE_INCLUDE_DEADLINE_S)]
+    const r = await $.process.run(argv, { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
+    if (r.exitCode !== 0) {
+      await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and was undone (exit ${r.exitCode})${gitDetail(r.stderr)}`)
+      return
+    }
+    const counts = JSON.parse(r.stdout) as { copied?: unknown; skipped?: unknown }
+    if (counts.copied !== 0 || counts.skipped !== 0) {
+      await debugLog($, `orq: .worktreeinclude copied ${String(counts.copied)} and skipped ${String(counts.skipped)} file(s) into ${worktree}`)
+    }
   } catch (err) {
     await debugLog($, `orq: .worktreeinclude copy into ${worktree} did not finish: ${String(err)}`)
   }
