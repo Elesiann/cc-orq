@@ -4,5 +4,15 @@
   "description": "Delegate tasks to external coding agents (Codex, OpenCode, Claude) from Claude Code with T3 Code style orchestration tools: capabilities, status, cancel, integrate.",
   "author": { "name": "Elesiann" },
   "license": "MIT",
-  "keywords": ["claude-code", "plugin", "orchestration", "codex", "opencode", "subagents"]
+  "keywords": ["claude-code", "plugin", "orchestration", "codex", "opencode", "subagents"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cardDisplay": {
+      "type": "string",
+      "title": "Task card",
+      "description": "Where orq shows its background jobs: band (above the prompt), status (the status line) or off.",
+      "options": ["band", "status", "off"],
+      "default": "band"
+    }
+  }
 }
