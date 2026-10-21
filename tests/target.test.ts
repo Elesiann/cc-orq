@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { InstanceConfig } from '../hooks/config.ts'
 import { isFailure, type DriverKind, type InteractionMode, type RuntimeMode } from '../hooks/contract.ts'
 import {
+  appliedEffort,
   effortFlag,
   parentRuntimeModeFromPermissionMode,
   plainArgument,
@@ -293,6 +294,13 @@ test('effortFlag antigravity and claudeAgent pass the effort through --effort', 
 
 test('effortFlag opencode has no flag, since its run command carries effort only inside the model name', () => {
   expect(effortFlag('opencode', EFFORT_HIGH)).toEqual([])
+})
+
+test('appliedEffort names the effort a driver passes on, and nothing for opencode', () => {
+  expect(appliedEffort('codex', EFFORT_HIGH)).toBe('high')
+  expect(appliedEffort('claudeAgent', [{ id: 'reasoningEffort', value: 'low' }])).toBe('low')
+  expect(appliedEffort('opencode', EFFORT_HIGH)).toBeUndefined()
+  expect(appliedEffort('codex', [])).toBeUndefined()
 })
 
 test('effortFlag returns [] without a non-empty reasoningEffort string', () => {

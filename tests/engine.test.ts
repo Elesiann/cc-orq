@@ -429,6 +429,18 @@ test('result of a finished codex job is its last message and a footer with the r
   expect(s.probeScripts[0]).toContain(`${CODEX_HOME}/sessions`)
 })
 
+test('a codex job without a readable rollout falls back to the effort its meta.json recorded', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-norollout', { effort: 'medium' }, 1000000)
+  s.files.set(`${JOBS}/job-norollout/exit`, '0')
+  s.files.set(`${JOBS}/job-norollout/last.txt`, 'Done.')
+  s.mtimes.set(`${JOBS}/job-norollout/exit`, 1125000)
+  s.extractSummary = { tid: 'thread-none', in: 1, out: 1, error: false }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-norollout')).toContain('· effort medium ·')
+})
+
 test('the codex footer probes the CODEX_HOME a job launched with, even when its instance left the config', async ($, on) => {
   const s = fresh({ now: 9000000 })
   seedJob(s, 'job-moved', { instanceId: 'codex-gone', codexHome: CODEX_HOME }, 1000000)
@@ -474,6 +486,20 @@ test('a claude job footer names the model from the stream and skips the codex pr
     'FAKE\n\n— orq · manual · fixture-model-claude · effort n/a · 1m · 11/4 tokens · taskId job-claude · session ses-claude',
   )
   expect(s.probeScripts.length).toBe(0)
+})
+
+test('a claude job footer names the effort its meta.json recorded', async ($, on) => {
+  const s = fresh({ now: 9000000 })
+  seedJob(s, 'job-claude-low', { runner: 'claude', model: 'fixture-model', driver: 'claudeAgent', effort: 'low' }, 1000000)
+  s.files.set(`${JOBS}/job-claude-low/exit`, '0')
+  s.files.set(`${JOBS}/job-claude-low/last.txt`, 'FAKE')
+  s.mtimes.set(`${JOBS}/job-claude-low/exit`, 1060000)
+  s.extractSummary = { tid: 'ses-claude', in: 11, out: 4, error: false, model: 'fixture-model-claude' }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, 'result job-claude-low')).toBe(
+    'FAKE\n\n— orq · manual · fixture-model-claude · effort low · 1m · 11/4 tokens · taskId job-claude-low · session ses-claude',
+  )
 })
 
 test('a job without runner takes it from its driver, so the extractor still decides its outcome', async ($, on) => {

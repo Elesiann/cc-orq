@@ -52,6 +52,8 @@ export type LaunchSpec = {
   flags?: string[]
   runtimeMode?: RuntimeMode
   interactionMode?: InteractionMode
+  /** The reasoning effort `flags` give the CLI, recorded for the answer's footer. */
+  effort?: string
   /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
   isolation?: 'worktree'
   /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
@@ -67,6 +69,7 @@ export type TaskLaunchSpec = {
   flags: string[]
   runtimeMode: RuntimeMode
   interactionMode: InteractionMode
+  effort?: string
   isolation: TaskIsolation
   /** The session directory and the allowed roots that scoped `cwd`. */
   scopeRoots: string[]
@@ -420,6 +423,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
       ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
+      ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
       ...worktreeFields,
     }
     try {
@@ -475,6 +479,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       instanceId: spec.instanceId,
       driver: spec.driver,
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
+      ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
       ...worktreeFields,
     }
     if (pgid) job.pgid = pgid
@@ -507,6 +512,7 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     flags: spec.flags,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
+    ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
     ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const, worktreeScope: spec.scopeRoots } : {}),
   })
   if (!('refusal' in launched)) return launched
@@ -630,11 +636,11 @@ export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord
   const durationMs = Math.max(0, (view.endedAt ?? now) - job.startedAt)
   const runner = job.runner
   let model = summary?.model || job.model || 'n/a'
-  let effort = 'n/a'
+  let effort = job.effort || 'n/a'
   if (runner === 'codex') {
     const rollout = await codexModelEffort($, config, job, summary?.tid ?? '')
     model = rollout.model || 'n/a'
-    effort = rollout.effort || 'n/a'
+    effort = rollout.effort || effort
   }
   const footer = buildFooter({
     kind: job.kind,

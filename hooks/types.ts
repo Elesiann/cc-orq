@@ -35,6 +35,8 @@ export type JobRecord = {
   /** The runtime and interaction modes a cc-orq:task job was resolved to; absent on older and manual jobs. */
   runtimeMode?: RuntimeMode
   interactionMode?: InteractionMode
+  /** The reasoning effort the job's CLI was given; absent when it got none, as for an OpenCode job. */
+  effort?: string
   /** The checkout the task was launched from. Set only for a worktree task, where cwd is the worktree. */
   repo?: string
   /** The commit the task branch was cut from. */
@@ -81,6 +83,7 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (runtimeMode) job.runtimeMode = runtimeMode
   const interactionMode = INTERACTION_MODES.find((mode) => mode === raw.interactionMode)
   if (interactionMode) job.interactionMode = interactionMode
+  if (typeof raw.effort === 'string' && raw.effort !== '') job.effort = raw.effort
   // Worktree fields are optional and tolerated: a value of the wrong type is ignored, never a reason to drop the job.
   if (typeof raw.repo === 'string' && raw.repo !== '') job.repo = raw.repo
   if (typeof raw.baseSha === 'string' && raw.baseSha !== '') job.baseSha = raw.baseSha

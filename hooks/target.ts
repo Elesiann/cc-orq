@@ -178,6 +178,13 @@ export function runnerPolicy(driver: DriverKind, runtimeMode: RuntimeMode, inter
   }
 }
 
+/** The effort the driver passes to its CLI, so the job can record it; undefined when effortFlag passes none. */
+export function appliedEffort(driver: DriverKind, options: readonly OptionSelection[]): string | undefined {
+  if (effortFlag(driver, options).length === 0) return undefined
+  const effort = options.find((selection) => selection.id === EFFORT_OPTION)?.value
+  return typeof effort === 'string' ? effort : undefined
+}
+
 /** The effort flag a driver takes for the reasoning-effort selection; none when the selection is absent or empty. */
 export function effortFlag(driver: DriverKind, options: readonly OptionSelection[]): string[] {
   const effort = options.find((selection) => selection.id === EFFORT_OPTION)?.value
