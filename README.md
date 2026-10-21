@@ -418,6 +418,64 @@ has ended, or is `interrupted`, answers `task_not_cancellable` and nothing is wr
 At session start orq logs one debug line for each job in the jobs directory
 that has no exit file, with its id, kind and age.
 
+## Task card
+
+While jobs run, orq shows them in a card above the prompt. Each job takes one
+line with five fields:
+
+```
+codex · my-model · running · msg Reading the test files · 2m15s
+```
+
+1. INSTANCE: the job's instance id. A job without one shows its runner, or its kind.
+2. MODEL: the model the job was launched with, or `?` when none was recorded.
+3. STATUS: the job's status, as `/orq list` shows it.
+4. LAST_ACTION: the last event in the job's `events.jsonl` that orq can render. It reads `—` while there is none.
+5. DURATION: the time since the job started. For a job that has ended, it is the time up to its `exit` file.
+
+The card looks at the 50 newest jobs, as `/orq list` does. It lists a job while
+the job has no `exit` file, so an `interrupted` job stays on the card. A job whose
+`exit` file was written less than 60 seconds ago also stays. It leaves the card
+once its `exit` file is 60 seconds old.
+
+The card refreshes every 2 seconds. A refresh that is still running makes the
+next tick skip.
+
+The card draws nothing when a survey holds the band, when the band gives it no
+rows, when the surface is neither the terminal nor the desktop, and when no job
+is listed. When the rows do not fit the band, the card draws the newest rows and
+a last row, `+N more`, that counts the rest.
+
+`/clear` and a resume keep the card running. Any other end of the session, such
+as `/exit`, a logout, or a `-p` run that finishes, stops it.
+
+### Setting `cardDisplay`
+
+`cardDisplay` takes one of three values:
+
+- `band`: the card draws above the prompt. This is the default.
+- `status`: the card goes to the status line under the prompt. It shows the newest
+  job's line, followed by ` (+N more)` when more jobs are listed.
+- `off`: no card is drawn, and no refresh timer runs.
+
+An unknown value counts as `band`. Set it in `/config`, or in `settings.json`
+under `pluginConfigs.orq.options.cardDisplay`.
+
+### `/orq-panel`
+
+`/orq-panel [show <id> | cancel <id>]` opens a pane with the 50 newest jobs. Each
+job is one row, with its status, elapsed time, kind and model. The pane redraws
+every 2 seconds.
+
+- A running or waiting job has a `cancel` button. It asks the supervisor to stop
+  the job, as `/orq cancel` does.
+- Pressing a job's row selects it. The pane then shows the last 30 rendered lines
+  of that job's `events.jsonl`, read from its last 32 KB.
+- `show <id>` selects a job and opens the pane. `cancel <id>` cancels a running
+  or waiting job without opening the pane.
+
+The pane also has `refresh` and `close` buttons.
+
 ## Configuration
 
 orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
