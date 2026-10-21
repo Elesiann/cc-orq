@@ -19,7 +19,8 @@ The files are first copied into a staging directory beside WORKTREE, then each n
 top-level path is renamed into place, so a failure, a signal or the deadline
 leaves the worktree as git made it. `--discard` removes a staging directory that a
 killed run left behind. Prints one JSON line, {"copied": N, "skipped": M}, and
-exits 0, or prints the reason on stderr and exits 1 once the copy is undone.
+exits 0, or prints the reason on stderr and exits 1 once the copy is undone, or 3
+when part of it could not be removed from the worktree.
 """
 import errno
 import json
@@ -40,6 +41,10 @@ SKIP_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
 
 class Stop(Exception):
     pass
+
+
+class Stuck(Exception):
+    """A rollback that could not remove what it placed in the worktree."""
 
 
 def on_signal(signum, _frame):
@@ -127,7 +132,12 @@ def stage_one(root_fd, staging, path, modes, deadline):
             return False
         raise
     try:
-        st = os.lstat(parts[-1], dir_fd=parent_fd)
+        try:
+            st = os.lstat(parts[-1], dir_fd=parent_fd)
+        except OSError as e:
+            if e.errno in SKIP_ERRNOS:
+                return False
+            raise
         if not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
             return False
         for depth in range(1, len(parts)):
@@ -141,7 +151,12 @@ def stage_one(root_fd, staging, path, modes, deadline):
         if stat.S_ISLNK(st.st_mode):
             os.symlink(os.readlink(parts[-1], dir_fd=parent_fd), dst)
             return True
-        src_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        try:
+            src_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        except OSError as e:
+            if e.errno in SKIP_ERRNOS:
+                return False
+            raise
         try:
             st = os.fstat(src_fd)
             if not stat.S_ISREG(st.st_mode):
@@ -166,6 +181,8 @@ def place(worktree, staging, copied, modes, deadline):
                     roots.append(prefix)
                 break
     placed = []
+    # A signal between a rename and its record would leave a root the rollback cannot see.
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
     try:
         for root in roots:
             if time.monotonic() > deadline:
@@ -173,22 +190,37 @@ def place(worktree, staging, copied, modes, deadline):
             target = os.path.join(worktree, root)
             if crosses_symlink(worktree, root) or os.path.lexists(target):
                 raise RuntimeError("the worktree changed during the copy")
+            placed.append(root)
             os.rename(os.path.join(staging, root), target)
-            placed.append(target)
-        # The directories the copy created take their source modes, deepest first, once nothing more goes in.
-        for rel in sorted(modes, key=len, reverse=True):
-            if any(rel == r or rel.startswith(r + b"/") for r in roots):
-                os.chmod(os.path.join(worktree, rel), modes[rel])
     except BaseException:
-        for target in reversed(placed):
-            if os.path.isdir(target) and not os.path.islink(target):
-                shutil.rmtree(target, ignore_errors=True)
-            else:
-                try:
-                    os.unlink(target)
-                except OSError:
-                    pass
+        undo(worktree, staging, placed)
         raise
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    # Modes come last, once nothing can fail and need undoing; a mode that cannot be set is not worth one.
+    for rel in sorted(modes, key=len, reverse=True):
+        if any(rel == r or rel.startswith(r + b"/") for r in roots):
+            try:
+                os.chmod(os.path.join(worktree, rel), modes[rel])
+            except OSError:
+                pass
+
+
+def undo(worktree, staging, placed):
+    """Remove the roots already renamed into the worktree; a root still in staging was never moved."""
+    for root in reversed(placed):
+        target = os.path.join(worktree, root)
+        if os.path.lexists(os.path.join(staging, root)) or not os.path.lexists(target):
+            continue
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            try:
+                os.unlink(target)
+            except OSError:
+                pass
+        if os.path.lexists(target):
+            raise Stuck("could not remove %s from the worktree" % os.fsdecode(target))
 
 
 def copy(checkout, worktree, deadline):
@@ -232,7 +264,10 @@ def main():
     checkout, worktree, seconds = args[0], args[1], float(args[2])
     try:
         copied, skipped = copy(checkout, worktree, time.monotonic() + seconds)
-    except (Exception, Stop) as e:
+    except Stuck as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    except Exception as e:
         print(str(e), file=sys.stderr)
         return 1
     print(json.dumps({"copied": copied, "skipped": skipped}))

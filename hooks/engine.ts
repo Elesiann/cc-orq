@@ -327,6 +327,10 @@ async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: strin
       await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and was undone${gitDetail(r.stderr)}`)
       return
     }
+    if (r.exitCode === 3) {
+      await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and part of it is still there${gitDetail(r.stderr)}`)
+      return
+    }
     if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
     const counts = JSON.parse(r.stdout) as { copied?: unknown; skipped?: unknown }
     if (typeof counts.copied === 'number' && typeof counts.skipped === 'number' && counts.copied + counts.skipped > 0) {

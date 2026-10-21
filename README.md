@@ -356,7 +356,8 @@ rules differ from a plain copy:
 - A path below a symlink, in the checkout or in the worktree, and an untracked
   nested repository, are skipped.
 - Files keep their mode and modification time, and new directories keep their
-  mode.
+  mode. A directory copied without write permission for its owner makes
+  `git worktree remove` fail on that worktree until you `chmod -R u+w` it.
 - orq uses git's own matching, so the special case Claude Code makes for a
   `**/` pattern inside an ignored directory does not apply: name the directory
   instead.

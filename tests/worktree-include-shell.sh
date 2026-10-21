@@ -148,13 +148,13 @@ spawnSync('bash', ['-c', `printf 'x*.cfg\\n' >> '${repo}/.gitignore' && git -C '
 writeFileSync(`${repo}/x[0-9].cfg`, 'glob name\n')
 mkdirSync(`${repo}/priv`, { recursive: true })
 writeFileSync(`${repo}/priv/key.txt`, 'k\n')
-spawnSync('chmod', ['700', `${repo}/priv`])
+spawnSync('chmod', ['750', `${repo}/priv`])
 spawnSync('bash', ['-c', `printf 'priv/\\n' >> '${repo}/.gitignore' && git -C '${repo}' commit -q -am priv`])
 writeFileSync(`${repo}/.worktreeinclude`, 'x[[]0-9].cfg\npriv/\n')
 const globbed = plainWorktree()
 const globRun = run(`exec python3 '${script}' '${repo}' '${globbed}' 60`)
 check('a name with glob characters is judged as itself, not as a pattern over tracked files', globRun.status === 0 && existsSync(`${globbed}/x[0-9].cfg`) && readFileSync(`${globbed}/x[0-9].cfg`, 'utf8') === 'glob name\n')
-check('a copied directory keeps its source mode', (statSync(`${globbed}/priv`).mode & 0o777) === 0o700)
+check('a copied directory keeps its source mode', (statSync(`${globbed}/priv`).mode & 0o777) === 0o750 && readFileSync(`${globbed}/priv/key.txt`, 'utf8') === 'k\n')
 
 // An unreadable file fails the copy midway; root reads it anyway, so the case needs another user.
 if (process.getuid() !== 0) {
@@ -164,6 +164,18 @@ if (process.getuid() !== 0) {
   check('a copy that fails still gives the task its worktree', !('failure' in broken) && existsSync(`${broken.plan.worktree}/tracked.txt`))
   check('a copy that fails is undone, so no partial node_modules is left', !existsSync(`${broken.plan.worktree}/node_modules`))
   check('a copy that fails is logged as undone', logs.some((l) => l.includes('failed and was undone')))
+  rmSync(`${repo}/node_modules/pkg/zz-unreadable.js`)
+
+  mkdirSync(`${repo}/sub`, { recursive: true })
+  writeFileSync(`${repo}/sub/keep.txt`, 'tracked\n')
+  writeFileSync(`${repo}/sub/x.local`, 'late\n')
+  run(`printf '*.local\\n' >> '${repo}/.gitignore' && git -C '${repo}' add sub/keep.txt && git -C '${repo}' commit -q -am sub`)
+  writeFileSync(`${repo}/.worktreeinclude`, '.local.cfg\nsub/x.local\n')
+  const placing = plainWorktree()
+  spawnSync('chmod', ['555', `${placing}/sub`])
+  const refused = run(`exec python3 '${script}' '${repo}' '${placing}' 60`)
+  spawnSync('chmod', ['755', `${placing}/sub`])
+  check('a move into the worktree that fails takes back the paths already moved', refused.status === 1 && !existsSync(`${placing}/.local.cfg`) && !existsSync(`${placing}/sub/x.local`) && !staged(placing))
 }
 
 console.log(`pass=${passed} fail=${failed}`)
