@@ -8,7 +8,6 @@ import {
   parseAgyModels,
   parseCatalogInstances,
   parseCodexModels,
-  parseOpencodeAuthIds,
   parseOpencodeModels,
   providerConstraints,
   toProviderCapability,
@@ -35,11 +34,6 @@ const CODEX_SAMPLE = JSON.stringify({
     { slug: 'fixture-broken-levels', visibility: 'list', supported_reasoning_levels: [null, { effort: 7 }] },
   ],
 })
-
-const AUTH_SAMPLE = JSON.stringify([
-  { id: 'fixture-provider-a', name: 'Provider A', connections: [{ type: 'env' }] },
-  { id: 'fixture-provider-b', name: 'Provider B', connections: [{ type: 'credential' }] },
-])
 
 const OPENCODE_SAMPLE = [
   'fixture-provider-a/fixture-model-2',
@@ -90,15 +84,12 @@ test('codex parsing is total on garbage', () => {
   expect(parseCodexModels('null')).toEqual([])
 })
 
-test('opencode output keeps only the models of logged-in providers', () => {
-  const ids = parseOpencodeAuthIds(AUTH_SAMPLE)
-  expect(ids).toEqual(['fixture-provider-a', 'fixture-provider-b'])
-  expect(parseOpencodeModels(OPENCODE_SAMPLE, ids)).toEqual([
+test('opencode output keeps every listed provider, logged in or not', () => {
+  expect(parseOpencodeModels(OPENCODE_SAMPLE)).toEqual([
     { id: 'fixture-provider-a/fixture-model-2', label: 'fixture-model-2' },
     { id: 'fixture-provider-b/fixture-model-3', label: 'fixture-model-3' },
+    { id: 'fixture-provider-c/fixture-model-4', label: 'fixture-model-4' },
   ])
-  expect(parseOpencodeAuthIds('garbage')).toEqual([])
-  expect(parseOpencodeAuthIds('[1, {"id": 2}, {"id": "ok"}]')).toEqual(['ok'])
 })
 
 test('antigravity output keeps the effort in the id and tolerates bare lines', () => {

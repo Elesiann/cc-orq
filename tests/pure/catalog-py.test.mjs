@@ -18,7 +18,7 @@ function fakeBin(dir) {
   const cat = (name) => `cat '${join(fixtures, name)}'`
   const fakes = {
     codex: `if [ "$1" = debug ] && [ "$2" = models ]; then ${cat('codex-models.json')}; exit 0; fi\nif [ "$1" = login ]; then exit 0; fi\nexit 1`,
-    opencode: `if [ "$1" = auth ]; then ${cat('opencode-auth.json')}; exit 0; fi\nif [ "$1" = models ]; then ${cat('opencode-models.txt')}; exit 0; fi\nexit 1`,
+    opencode: `if [ "$1" = models ]; then ${cat('opencode-models.txt')}; exit 0; fi\nexit 1`,
     agy: `if [ "$1" = models ]; then ${cat('agy-models.txt')}; exit 0; fi\nexit 1`,
     claude: 'exit 0',
   }
@@ -56,7 +56,10 @@ test('catalog.py probes each configured driver and reports models, auth and unkn
       'fixture-provider-1/fixture-model-4',
       'fixture-provider-1/fixture-model-5',
       'fixture-provider-2/fixture-model-6',
+      'fixture-provider-4/fixture-model-7',
     ])
+    assert.equal(byId.opencode.authenticated, true)
+    assert.equal(byId.opencode.unavailableReason, null)
     assert.deepEqual(byId.antigravity.models.map((m) => m.id), ['fixture-model-8-high', 'fixture-model-8-low', 'fixture-model-9'])
     assert.deepEqual(byId.claudeAgent.models.map((m) => m.id), ['haiku', 'sonnet', 'opus'])
     assert.equal(byId.odd.installed, false)
@@ -71,4 +74,37 @@ test('catalog.py refuses input that is not a JSON list', () => {
   const run = spawnSync('python3', [join(root, 'scripts', 'catalog.py')], { input: '{"not": "a list"}', encoding: 'utf8' })
   assert.equal(run.status, 2)
   assert.deepEqual(JSON.parse(run.stdout), { error: 'instances config must be a JSON list.' })
+})
+
+function runProbe(opencodeBody) {
+  const dir = mkdtempSync(join(tmpdir(), 'orq-catalog-'))
+  try {
+    const bin = join(dir, 'bin')
+    mkdirSync(bin)
+    writeFileSync(join(bin, 'opencode'), `#!/bin/bash\n${opencodeBody}\n`)
+    chmodSync(join(bin, 'opencode'), 0o755)
+    const run = spawnSync('python3', [join(root, 'scripts', 'catalog.py')], {
+      input: JSON.stringify([{ instanceId: 'opencode', driver: 'opencode' }]),
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ORQ_TEST_STATE: join(dir, 'state') },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    return JSON.parse(run.stdout)[0]
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('catalog.py retries opencode models once after a failed run', () => {
+  const flaky = `if [ "$1" = models ]; then\n  if [ ! -e "$ORQ_TEST_STATE" ]; then : > "$ORQ_TEST_STATE"; exit 1; fi\n  echo fixture-provider-1/fixture-model-4; exit 0\nfi\nexit 1`
+  const instance = runProbe(flaky)
+  assert.deepEqual(instance.models.map((m) => m.id), ['fixture-provider-1/fixture-model-4'])
+  assert.equal(instance.unavailableReason, null)
+})
+
+test('catalog.py reports an opencode that lists no models as unavailable, not as logged out', () => {
+  const instance = runProbe('if [ "$1" = models ]; then exit 0; fi\nexit 1')
+  assert.deepEqual(instance.models, [])
+  assert.equal(instance.authenticated, null)
+  assert.equal(instance.unavailableReason, 'OpenCode is available, but it did not report any connected upstream providers.')
 })

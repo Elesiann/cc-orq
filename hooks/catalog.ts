@@ -69,29 +69,14 @@ export function parseCodexModels(text: string): CatalogModel[] {
   return out
 }
 
-/** Provider ids from `opencode auth list --format json`. Only the ids are read. */
-export function parseOpencodeAuthIds(text: string): string[] {
-  let doc: unknown
-  try {
-    doc = JSON.parse(text)
-  } catch {
-    return []
-  }
-  if (!Array.isArray(doc)) return []
-  return doc.flatMap((e) => (isRecord(e) && typeof e.id === 'string' ? [e.id] : []))
-}
-
-/** Parse `opencode models` lines (`provider/model`), keeping the logged-in providers. */
-export function parseOpencodeModels(text: string, loggedIn: readonly string[]): CatalogModel[] {
-  const allowed = new Set(loggedIn)
+/** Parse `opencode models` lines (`provider/model`). OpenCode lists only the providers it can use, so every one is kept. */
+export function parseOpencodeModels(text: string): CatalogModel[] {
   const out: CatalogModel[] = []
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed || !trimmed.includes('/')) continue
-    const slash = trimmed.indexOf('/')
-    const provider = trimmed.slice(0, slash)
-    const name = trimmed.slice(slash + 1)
-    if (!allowed.has(provider) || name.length === 0) continue
+    const name = trimmed.slice(trimmed.indexOf('/') + 1)
+    if (name.length === 0) continue
     out.push({ id: trimmed, label: name })
   }
   return out

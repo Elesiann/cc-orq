@@ -14,21 +14,20 @@ Drivers:
   codex       `codex debug models` (visibility == "list" only, as T3 does),
               reasoning effort from supported_reasoning_levels, auth via
               `codex login status`. One instance per CODEX_HOME.
-  opencode    `opencode models` (one provider/model per line) filtered to
-              provider ids from `opencode auth list --format json`.
+  opencode    `opencode models` (one provider/model per line). OpenCode lists
+              only the providers it can use, logged in or configured through
+              the environment, so every listed model is kept, as T3 does.
   antigravity `agy models` (tab-separated id and label; effort is in the id).
   claudeAgent the `claude` CLI; models are the haiku/sonnet/opus aliases
               accepted by `claude -p --model`, mirroring T3's
               ClaudeModelCatalog user-facing aliases.
-
-Only provider ids are read from the opencode auth list; nothing else from
-it is printed or stored.
 """
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 
 EFFORT_OPTION = "reasoningEffort"
 TIMEOUT_S = 60
@@ -125,20 +124,11 @@ def probe_codex(env):
 def probe_opencode(env):
     if shutil.which("opencode", path=env.get("PATH")) is None:
         return False, None, [], "Executable 'opencode' was not found on PATH."
-    code, out = run(["opencode", "auth", "list", "--format", "json"], env)
-    if code != 0:
-        return True, None, [], "'opencode auth list' failed (exit %d)." % code
-    try:
-        entries = json.loads(out)
-    except ValueError:
-        return True, None, [], "'opencode auth list' printed unparseable JSON."
-    if not isinstance(entries, list):
-        return True, None, [], "'opencode auth list' printed unparseable JSON."
-    logged_in = {
-        e["id"] for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
     code, out = run(["opencode", "models"], env)
+    if code != 0:
+        # OpenCode commands share one SQLite database, so a concurrent run can fail it once.
+        time.sleep(1)
+        code, out = run(["opencode", "models"], env)
     if code != 0:
         return True, None, [], "'opencode models' failed (exit %d)." % code
     models = []
@@ -146,11 +136,13 @@ def probe_opencode(env):
         line = line.strip()
         if not line or "/" not in line:
             continue
-        provider, name = line.split("/", 1)
-        if provider not in logged_in or not name:
+        name = line.split("/", 1)[1]
+        if not name:
             continue
         models.append({"id": line, "label": name})
-    return True, len(logged_in) > 0, models, None
+    if not models:
+        return True, None, [], "OpenCode is available, but it did not report any connected upstream providers."
+    return True, True, models, None
 
 
 def probe_antigravity(env):
