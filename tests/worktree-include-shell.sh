@@ -41,7 +41,8 @@ printf 'out\n' > "$REPO/build/out.txt"
 printf 'notes\n' > "$REPO/notes.txt"
 
 cat > "$T/driver.mjs" <<'JS'
-import { existsSync, lstatSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
@@ -107,11 +108,53 @@ check('an untracked nested repository is not copied', !existsSync(`${wt}/nested`
 check('the worktree shows no untracked file after the copy', spawnSync('git', ['-C', wt, 'status', '--porcelain'], { encoding: 'utf8' }).stdout === '')
 check('the copy is logged with its counts', logs.some((l) => l.includes('copied 6 and skipped')))
 
-// A plain git worktree, so the copy under test is the only one that runs into it.
-const fresh = `${repo}-wt/plain-deadline`
-spawnSync('git', ['-C', repo, 'worktree', 'add', '-q', fresh, '-b', 'plain-deadline'])
-const late = spawnSync('python3', [`${ROOT}/scripts/worktree-include.py`, repo, fresh, '-1'], { encoding: 'utf8' })
-check('a copy past its deadline fails and leaves nothing behind', late.status === 1 && late.stderr.includes('ran out of time') && !existsSync(`${fresh}/node_modules`) && !existsSync(`${fresh}/.local.cfg`))
+// Direct runs of the script against plain git worktrees, so its own behavior is what is checked.
+const script = `${ROOT}/scripts/worktree-include.py`
+let plainCount = 0
+function plainWorktree() {
+  plainCount += 1
+  const path = `${repo}-wt/plain-${plainCount}`
+  spawnSync('git', ['-C', repo, 'worktree', 'add', '-q', path, '-b', `plain-${plainCount}`])
+  return path
+}
+const staged = (wt) => existsSync(`${dirname(wt)}/.orq-include-${basename(wt)}`)
+const run = (cmd) => spawnSync('bash', ['-c', cmd], { encoding: 'utf8' })
+
+run(`printf 'big/\\n' >> '${repo}/.gitignore' && git -C '${repo}' commit -q -am big`)
+writeFileSync(`${repo}/.worktreeinclude`, 'big/\n')
+mkdirSync(`${repo}/big/deep`, { recursive: true })
+writeFileSync(`${repo}/big/a.js`, 'a\n')
+writeFileSync(`${repo}/big/deep/big.bin`, Buffer.alloc(300 * 1024, 1))
+const full = plainWorktree()
+const limited = run(`ulimit -f 100; exec python3 '${script}' '${repo}' '${full}' 60`)
+check('a write that fails midway leaves no partial file and no staging directory', limited.status === 1 && !existsSync(`${full}/big`) && !staged(full))
+
+for (let i = 0; i < 20000; i += 1) {
+  if (i % 1000 === 0) mkdirSync(`${repo}/big/many/${i / 1000}`, { recursive: true })
+  writeFileSync(`${repo}/big/many/${Math.floor(i / 1000)}/${i}.js`, 'x\n')
+}
+const timed = plainWorktree()
+const overdue = run(`exec python3 '${script}' '${repo}' '${timed}' 0.2`)
+check('a copy past its deadline midway is undone', overdue.status === 1 && overdue.stderr.includes('ran out of time') && !existsSync(`${timed}/big`) && !staged(timed))
+const termed = plainWorktree()
+const term = run(`timeout --preserve-status -s TERM 0.2 python3 '${script}' '${repo}' '${termed}' 60`)
+check('a copy stopped by SIGTERM is undone', term.status === 1 && term.stderr.includes('signal') && !existsSync(`${termed}/big`) && !staged(termed))
+rmSync(`${repo}/big`, { recursive: true, force: true })
+
+writeFileSync(`${repo}/x1.cfg`, 'tracked\n')
+spawnSync('git', ['-C', repo, 'add', 'x1.cfg'])
+spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'x1'])
+spawnSync('bash', ['-c', `printf 'x*.cfg\\n' >> '${repo}/.gitignore' && git -C '${repo}' commit -q -am glob`])
+writeFileSync(`${repo}/x[0-9].cfg`, 'glob name\n')
+mkdirSync(`${repo}/priv`, { recursive: true })
+writeFileSync(`${repo}/priv/key.txt`, 'k\n')
+spawnSync('chmod', ['700', `${repo}/priv`])
+spawnSync('bash', ['-c', `printf 'priv/\\n' >> '${repo}/.gitignore' && git -C '${repo}' commit -q -am priv`])
+writeFileSync(`${repo}/.worktreeinclude`, 'x[[]0-9].cfg\npriv/\n')
+const globbed = plainWorktree()
+const globRun = run(`exec python3 '${script}' '${repo}' '${globbed}' 60`)
+check('a name with glob characters is judged as itself, not as a pattern over tracked files', globRun.status === 0 && existsSync(`${globbed}/x[0-9].cfg`) && readFileSync(`${globbed}/x[0-9].cfg`, 'utf8') === 'glob name\n')
+check('a copied directory keeps its source mode', (statSync(`${globbed}/priv`).mode & 0o777) === 0o700)
 
 // An unreadable file fails the copy midway; root reads it anyway, so the case needs another user.
 if (process.getuid() !== 0) {

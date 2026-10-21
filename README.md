@@ -342,17 +342,21 @@ node_modules/
 ```
 
 orq copies the files before the task starts, and the copy is all or nothing:
-one that fails, or that is still running after about 4.5 minutes, removes what
-it copied, and the debug log says why. A few rules differ from a plain copy:
+it stages the files beside the worktree and moves them in only once the copy is
+complete, so one that fails, is stopped, or is still running after about 4.5
+minutes leaves the worktree as git made it, and the debug log says why. A few
+rules differ from a plain copy:
 
 - A file counts as ignored when the `.gitignore` files of the commit the
   worktree holds ignore it, so a line you have not committed yet does not make
   it eligible, and nothing copied shows up as untracked in the worktree.
-- A symlink is copied as a symlink. An absolute link, such as one `npm link`
-  made, still points where it pointed, so a worker writing through it writes
-  there.
-- A path below a symlink the worktree holds, and an untracked nested
-  repository, are skipped.
+- A symlink is copied as a symlink, never followed. An absolute link, such as
+  one `npm link` made, still points where it pointed, so a worker writing
+  through it writes there.
+- A path below a symlink, in the checkout or in the worktree, and an untracked
+  nested repository, are skipped.
+- Files keep their mode and modification time, and new directories keep their
+  mode.
 - orq uses git's own matching, so the special case Claude Code makes for a
   `**/` pattern inside an ignored directory does not apply: name the directory
   instead.

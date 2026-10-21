@@ -315,24 +315,31 @@ export async function checkoutBusy($: Engine, jobsDir: string, path: string): Pr
 }
 
 /**
- * Best effort: the copy is all or nothing, so one that fails leaves the worktree as git made it, which is what a
- * checkout without .worktreeinclude gets.
+ * Best effort: the script stages the copy beside the worktree and renames it in only when it is complete, so a
+ * copy that fails leaves the worktree as git made it, which is what a checkout without .worktreeinclude gets.
  */
 async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: string): Promise<void> {
   const script = `${$.plugin.root}/scripts/worktree-include.py`
   try {
     const argv = ['python3', script, toplevel, worktree, String(WORKTREE_INCLUDE_DEADLINE_S)]
     const r = await $.process.run(argv, { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
-    if (r.exitCode !== 0) {
-      await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and was undone (exit ${r.exitCode})${gitDetail(r.stderr)}`)
+    if (r.exitCode === 1) {
+      await debugLog($, `orq: .worktreeinclude copy into ${worktree} failed and was undone${gitDetail(r.stderr)}`)
       return
     }
+    if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}`)
     const counts = JSON.parse(r.stdout) as { copied?: unknown; skipped?: unknown }
-    if (counts.copied !== 0 || counts.skipped !== 0) {
-      await debugLog($, `orq: .worktreeinclude copied ${String(counts.copied)} and skipped ${String(counts.skipped)} file(s) into ${worktree}`)
+    if (typeof counts.copied === 'number' && typeof counts.skipped === 'number' && counts.copied + counts.skipped > 0) {
+      await debugLog($, `orq: .worktreeinclude copied ${counts.copied} and skipped ${counts.skipped} file(s) into ${worktree}`)
     }
   } catch (err) {
+    // A killed copy can leave its staging directory beside the worktree, never a partial tree inside it.
     await debugLog($, `orq: .worktreeinclude copy into ${worktree} did not finish: ${String(err)}`)
+    try {
+      await $.process.run(['python3', script, '--discard', worktree], { timeoutMs: WORKTREE_INCLUDE_TIMEOUT_MS })
+    } catch {
+      /* the staging directory stays beside the worktree, outside it */
+    }
   }
 }
 
