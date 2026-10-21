@@ -13,18 +13,18 @@ and `/orq-panel`, and so do its directories, `~/.config/orq` and `~/.cache/orq`.
 
 ## Status
 
-Early. This version loads and reads its configuration, runs detached jobs, and
-lets you list, show, cancel and launch them with `/orq`. The `cc-orq:task` agent
-runs a task as a job for the parent session, under the parent's permission
-ceiling; see "Delegating with cc-orq:task". A task can run in its own git
-worktree, and the `integrate` tool merges that work back. The `capabilities`,
-`status` and `cancel` tools are described under Tools.
+Version 0.1.0, the first public release. The parent session delegates through
+the `cc-orq:task` agent (see "Delegating with cc-orq:task"), follows its jobs
+on the task card and in `/orq-panel`, and reads, cancels and integrates them
+through the tools under "Tools" and "Worktrees and integrate". `/orq` lists,
+shows, cancels and launches jobs by hand. See `CHANGELOG.md` for the release
+notes and "Known limitations" for what does not work yet.
 
 ## Requirements
 
 - Claude Code with function hooks enabled: add
   `"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"` to the `env` block of
-  `~/.claude/settings.json`. Tested on Claude Code 2.1.303.
+  `~/.claude/settings.json`. Tested on Claude Code 2.1.306.
 - Linux only, with `bash`, `python3` and `git`. macOS is not supported yet: the job start script
   needs `systemd-run` or `setsid` to give each job its own session, and macOS has neither by
   default.
@@ -33,12 +33,22 @@ worktree, and the `integrate` tool merges that work back. The `capabilities`,
 
 ## Install
 
+From GitHub:
+
+```bash
+claude plugin marketplace add Elesiann/cc-orq
+claude plugin install cc-orq@cc-orq
+```
+
 From a local clone:
 
 ```bash
 claude plugin marketplace add /path/to/cc-orq
 claude plugin install cc-orq@cc-orq
 ```
+
+`claude plugin install` reports that the `cardDisplay` option is not set yet.
+Until you set it, the task card uses `band`; see "Setting `cardDisplay`".
 
 For one session only, without installing:
 
@@ -105,7 +115,7 @@ with a model your provider CLI accepts.
 With `--worktree` before the instance, the job runs in its own git worktree.
 See [Worktrees and integrate](#worktrees-and-integrate).
 
-Until the `cc-orq:task` agent brings the permission policy, a manual launch uses
+A manual launch is not under the permission ceiling of `cc-orq:task`: it uses
 each provider CLI's own defaults for sandbox, permissions and reasoning effort.
 
 ## Delegating with cc-orq:task
@@ -449,7 +459,7 @@ is listed. When the rows do not fit the band, the card draws the newest rows and
 a last row, `+N more`, that counts the rest. A band of one row shows the newest
 job with the count in front, `(+N more) codex · …`, so a long line keeps it.
 
-Each refresh writes the rows to the session state `orq.card`, and the band draws
+Each refresh writes the rows to the session state `cc-orq.card`, and the band draws
 from there without reading a file. The state outlives a reload of the plugin, so
 the card stays on screen until the next refresh.
 
@@ -603,6 +613,58 @@ shell tool, and the paragraph works the same way.
 Limit: when a job's supervisor dies after it wrote a question, no `exit` file
 follows, so the job is `interrupted`. `/orq result` reports the interruption and
 does not show the question, although the question stays in `question.txt`.
+
+## How it works
+
+`hooks/register.ts` wires the modules to the engine's events. On
+`session.start` it reads the configuration, registers `/orq` and `/orq-panel`,
+the `cc-orq:task` agent type and the MCP tools, and starts the task card; on
+`session.end` it stops the card and the pane.
+
+A delegated task takes this path:
+
+1. The parent calls `Agent` with `subagent_type: "cc-orq:task"`. On
+   `agent.spawn`, `hooks/task.ts` records the permission mode of that call,
+   which sets the task's ceiling.
+2. The subagent's first `turn.step` parses the header (`hooks/task-header.ts`),
+   resolves the target and the CLI flags under the ceiling (`hooks/target.ts`),
+   and starts a job through the engine. No model call happens for the
+   subagent: the mod answers each of its steps itself.
+3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
+   task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
+   detached under `systemd-run` or `setsid`. The supervisor runs the provider
+   CLI, writes its events and final message, and stops the process group when
+   a `cancel` file appears.
+4. Each following step calls `mcp__cc-orq__wait`, which blocks for up to
+   `waitSeconds` and answers whether the job has finished.
+5. When the job ends, the engine reads its final message from `last.txt` and
+   its token counts and errors from the event stream (`scripts/extract.py`),
+   and the subagent hands the answer back to the parent.
+
+Beside that path, `hooks/tools.ts` serves `capabilities`, `status` and `cancel`
+(the provider probe is `scripts/catalog.py`), `hooks/integrate.ts` merges a
+task's branch, `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane
+from the job directories, and `scripts/session-start.sh` gives the parent
+`instructions.md`.
+
+## Known limitations
+
+- Linux only. macOS has neither `systemd-run` nor `setsid` by default.
+- A task cannot be resumed or sent a follow-up message. A review round or an
+  answer to a child's question is a new task that carries the earlier brief.
+- Cancelling a job stops its process group. A process that leaves the group
+  keeps running, and so do the tools of an `opencode run` job, which execute
+  in the shared OpenCode server.
+- `capabilities` lists only the OpenCode providers that `opencode auth list`
+  reports as logged in, so models offered without a login are missing.
+- The handback footer reads the effort only from a Codex job's rollout, so it
+  shows `effort n/a` for the other drivers, even when the task named one.
+- A task's worktree is a fresh checkout: it has no `node_modules` or other
+  ignored files, so a worker that needs them has to install them first.
+- In `claude -p`, Claude Code stops background agents after about 11 minutes,
+  so a longer task loses its subagent. The job itself keeps running and its
+  result stays readable through `/orq result` and `status`.
+- The task card and `/orq-panel` draw only in the terminal and the desktop app.
 
 ## Development
 

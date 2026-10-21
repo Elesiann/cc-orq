@@ -1,13 +1,48 @@
-orq
+cc-orq
 Copyright (c) 2026 Giovanni Correa
 
-This project is inspired by the orchestrator of T3 Code
-(https://github.com/pingdotgg/t3code, MIT License, Copyright (c) Ping Labs).
-The tool surface (delegate a task, read its status, cancel it, list
-capabilities), the task status vocabulary, the privilege ceiling between a
-parent and its child tasks, and the orchestration instructions given to the
-parent agent are adapted from T3 Code's "Orchestrator V2" design. No T3 Code
-source code is included; orq reimplements the surface for Claude Code.
+cc-orq reimplements, for Claude Code, the orchestrator surface of T3 Code
+(https://github.com/pingdotgg/t3code). The tool surface (delegate a task, read
+its status, cancel it, list capabilities), the task status vocabulary and the
+privilege ceiling between a parent and its child tasks follow T3 Code's
+"Orchestrator V2" design. These parts are adapted from T3 Code's source:
+
+- hooks/contract.ts: the shapes of the orchestrator contract
+  (packages/contracts/src/orchestratorMcp.ts) that the capabilities, status
+  and cancel tools answer with, and its typed failure, reduced to what cc-orq
+  uses.
+- hooks/catalog.ts and scripts/catalog.py: how a provider instance becomes a
+  capability entry, the availability rule, the constraint wording, the Codex
+  model filter and the Claude model aliases.
+- hooks/tools.ts and hooks/target.ts: the mapping from a Claude Code
+  permission mode to the modes a child task may run in.
+- hooks/instructions.ts and instructions.md: the orchestration instructions
+  given to the parent agent, rewritten for cc-orq's tools.
+
+T3 Code is distributed under this license:
+
+  MIT License
+
+  Copyright (c) 2026 T3 Tools Inc.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 
 The detached job engine (supervisor script, event extraction, job directory
-layout) derives from the author's earlier plugin "lanes" (MIT License).
+layout), the provider probe in scripts/catalog.py and the job pane derive from the author's earlier plugin "lanes" (MIT License,
+Copyright (c) 2026 Elesiann).
