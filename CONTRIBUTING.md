@@ -38,9 +38,10 @@ Claude Code CLI, so run them locally.
 
 ## Rules
 
-- No model is pinned in the code. The parent session names the instance and the
-  model in every task, and `capabilities` reports what each CLI offers. Tests
-  use fixture model ids.
+- No model id is pinned in the code. The parent session names the instance and
+  the model in every task, and `capabilities` reports what each CLI offers. The
+  only fixed names are the `claude` CLI's aliases `haiku`, `sonnet` and `opus`.
+  Tests use fixture model ids.
 - A new provider driver must refuse every runtime mode it cannot enforce with a
   CLI flag, so a task never runs broader than its parent.
 - `instructions.md` and `ORCHESTRATION_INSTRUCTIONS` in `hooks/instructions.ts`

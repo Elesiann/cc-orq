@@ -115,7 +115,6 @@ async function resolvePath($: TaskEngine, path: string, mode: '-e' | '-m'): Prom
   }
 }
 
-/** True when `path` is `root` or lies beneath it, on whole path segments: "/a/bc" is not inside "/a/b". */
 /** The session's directory and each allowedRoots entry, resolved through symlinks. An entry that cannot be resolved is left out. */
 async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
   let session = ''

@@ -115,7 +115,7 @@ with a model your provider CLI accepts.
 With `--worktree` before the instance, the job runs in its own git worktree.
 See [Worktrees and integrate](#worktrees-and-integrate).
 
-Until the `cc-orq:task` agent brings the permission policy, a manual launch uses
+A manual launch is not under the permission ceiling of `cc-orq:task`: it uses
 each provider CLI's own defaults for sandbox, permissions and reasoning effort.
 
 ## Delegating with cc-orq:task
@@ -459,7 +459,7 @@ is listed. When the rows do not fit the band, the card draws the newest rows and
 a last row, `+N more`, that counts the rest. A band of one row shows the newest
 job with the count in front, `(+N more) codex · …`, so a long line keeps it.
 
-Each refresh writes the rows to the session state `orq.card`, and the band draws
+Each refresh writes the rows to the session state `cc-orq.card`, and the band draws
 from there without reading a file. The state outlives a reload of the plugin, so
 the card stays on screen until the next refresh.
 
@@ -631,14 +631,15 @@ A delegated task takes this path:
    and starts a job through the engine. No model call happens for the
    subagent: the mod answers each of its steps itself.
 3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
-   task asks for one (`hooks/worktree.ts`), and runs `scripts/supervise.sh`
+   task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
    detached under `systemd-run` or `setsid`. The supervisor runs the provider
    CLI, writes its events and final message, and stops the process group when
    a `cancel` file appears.
 4. Each following step calls `mcp__cc-orq__wait`, which blocks for up to
    `waitSeconds` and answers whether the job has finished.
-5. When the job ends, the engine reads its final message and token counts
-   (`scripts/extract.py`) and the subagent hands the answer back to the parent.
+5. When the job ends, the engine reads its final message from `last.txt` and
+   its token counts and errors from the event stream (`scripts/extract.py`),
+   and the subagent hands the answer back to the parent.
 
 Beside that path, `hooks/tools.ts` serves `capabilities`, `status` and `cancel`
 (the provider probe is `scripts/catalog.py`), `hooks/integrate.ts` merges a

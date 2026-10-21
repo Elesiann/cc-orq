@@ -21,8 +21,9 @@ First public release.
   runs as a job, and returns its answer to the parent session when the job
   ends. The parent's permission mode caps what a task may do, and a driver
   refuses a mode it cannot enforce.
-- The MCP tools `capabilities`, `status`, `cancel`, `integrate` and `wait`,
-  with the shapes of T3 Code's orchestrator contract.
+- The MCP tools `capabilities`, `status` and `cancel`, with the shapes of
+  T3 Code's orchestrator contract, and `integrate`. The subagent of a task
+  waits on its job through a fifth tool, `wait`.
 - Worktree isolation: a task runs in its own git worktree on a new branch by
   default, and `integrate` merges that branch back with `ff-only` or `merge`.
 - Child questions: a blocked job writes its question to `question.txt` and
@@ -37,4 +38,5 @@ First public release.
   `~/.config/orq/config.json` for the jobs directory, wait slice, allowed roots
   and provider instances.
 
+[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Elesiann/cc-orq/releases/tag/v0.1.0
