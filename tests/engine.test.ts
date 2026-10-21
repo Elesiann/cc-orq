@@ -172,7 +172,7 @@ test('session.start declares /orq in the typeahead', async ($, on) => {
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect(s.commands.map((c) => c.name)).toEqual(['orq'])
+  expect(s.commands.map((c) => c.name)).toEqual(['orq', 'orq-panel'])
 })
 
 test('launch prints the job id, writes meta.json and prompt.txt, and creates the directory atomically', async ($, on) => {

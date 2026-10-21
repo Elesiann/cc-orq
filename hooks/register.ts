@@ -1,12 +1,14 @@
 import type { Register } from 'claude-code'
 import { registerEngine, registerOrqCommand } from './commands.ts'
 import { loadConfig } from './config.ts'
+import { registerPanel, registerPanelCommand } from './panel.ts'
 import { registerTask, registerTaskSurface } from './task.ts'
 import { declareIntegrateTool, registerIntegrate } from './integrate.ts'
 import { registerTools, startTools } from './tools.ts'
 
 export const register: Register = (on) => {
   registerEngine(on)
+  registerPanel(on)
   registerTask(on)
   registerIntegrate(on)
   registerTools(on)
@@ -22,6 +24,11 @@ export const register: Register = (on) => {
       await registerOrqCommand($)
     } catch (err) {
       await $.ui.log(`orq: could not register /orq: ${String(err)}`, { to: 'debug' })
+    }
+    try {
+      await registerPanelCommand($)
+    } catch (err) {
+      await $.ui.log(`orq: could not register /orq-panel: ${String(err)}`, { to: 'debug' })
     }
     try {
       await registerTaskSurface($)
