@@ -413,7 +413,8 @@ if [ "$(res cancel-opencode-ignores-sigint straggler_term)" = yes ]; then ok can
 expect_file "$T/job-near-tick/exit" 0 near-tick-exit
 expect_file "$T/job-near-tick/child.log" '' near-tick-child-log-empty
 # The main flow stops the watcher first now, so a clean job rarely finds it gone; a watcher that is already collected must still be silent.
-GONE=$(bash -c 'eval "$(sed -n "/^stop_watcher() {/,/^}/p" "$1")"; watcher=2147483000; stop_watcher' _ "$ROOT/scripts/supervise.sh" 2>&1 || true)
+STOP_WATCHER=$(sed -n '/^stop_watcher() {/,/^}/p' "$ROOT/scripts/supervise.sh")
+GONE=$(bash -c 'eval "$1"; watcher=2147483000; stop_watcher' _ "$STOP_WATCHER" 2>&1 || true)
 if [ -z "$GONE" ]; then ok stop-watcher-silent-when-watcher-gone; else bad "stop-watcher-silent-when-watcher-gone ($GONE)"; fi
 
 BURST="$T/burst"
@@ -473,7 +474,7 @@ PY
 if [ -z "$(find "$BURST" -name 'exit.*.tmp')" ]; then ok exit-tmp-clean; else bad "exit-tmp-clean (exit.*.tmp left in a job dir)"; fi
 
 NOISY=$( (grep -lE 'Killed|Terminated|No such file or directory|/proc/' "$T"/*/child.log "$ROOT/$RELJOB/child.log" 2>/dev/null || true) | sed "s#$T/##" | tr '\n' ' ')
-if [ -z "$NOISY" ]; then ok "child-logs-free-of-bash-noise ($(ls "$T"/*/child.log | wc -l) logs)"; else bad "child-logs-free-of-bash-noise (bash printed into: $NOISY)"; fi
+if [ -z "$NOISY" ]; then ok "child-logs-free-of-bash-noise ($(ls "$T"/*/child.log | wc -l | tr -d ' ') logs)"; else bad "child-logs-free-of-bash-noise (bash printed into: $NOISY)"; fi
 
 echo "---"
 echo "pass=$PASS fail=$FAIL scratch-cleaned"
