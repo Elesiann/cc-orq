@@ -448,34 +448,56 @@ its last 20 lines:
 ```
 
 When a merge fails, or git's 60 second limit kills it, `integrate` undoes the
-merge itself only when it can tell that the changes in the checkout are the
-merge's. Before the merge, it records the paths that the task branch changes
-since it left HEAD, with `git diff --name-only HEAD...BRANCH`. After the failure,
-it reads `git status --porcelain`.
+merge itself only when it can read the whole state and tell that the changes in
+the checkout are the merge's. Before the merge, it records the paths that the
+task branch changes since it left HEAD, with `git diff --name-only HEAD...BRANCH`.
+After the failure, it reads `git status --porcelain`. Both reads pass
+`--ignore-submodules=none`, so a setting such as `diff.ignoreSubmodules` cannot
+hide a submodule path from one list.
 
 - If every changed tracked file is one of those paths, staged or not, it runs
   `git merge --abort` when a merge is pending, and `git reset --merge` when a
   killed git left a half-made merge with no `MERGE_HEAD`.
-- If any changed tracked file is not one of those paths, it changes nothing. The
-  answer names those files as probably your own change, lists the rest, and names
-  the command to run after you have checked them. That command drops staged
-  changes of your own too.
+- If any changed tracked file is not one of those paths, it changes nothing, and
+  a pending merge stays pending. The answer keeps its code, such as `hook_failed`
+  or `merge_conflict`, names those files as probably your own change, lists the
+  rest, and names the command to run after you have checked them. That command
+  drops staged changes of your own too.
+- If either list is incomplete, it changes nothing either. The answer says why,
+  lists what it read, and names the command. A list is incomplete when git
+  printed more than the 4 MiB that the engine reads, which could have dropped a
+  path of yours, or when a path in either list is not valid UTF-8, because two
+  different paths can read as the same text.
 - A file that git does not track never stops the cleanup, and it stays.
 
-The check goes by path. A change of yours to a file that the task branch also
-changes counts as the merge's, and the cleanup discards it. A hook that changes a
-tracked file outside those paths, such as a formatter or a version bump, stops
-the cleanup the same way, and the answer calls that file probably yours. Commit
-or stash your own work before you integrate, and leave the checkout alone while
-`integrate` runs.
+The check goes by path, and it has these limits:
 
-Neither command removes a file that a hook made. After every failed merge,
-`integrate` reads `git status --porcelain` once more. When the checkout keeps
-changes, the answer lists up to 10 paths, for example
+- A change of yours to a file that the task branch also changes counts as the
+  merge's, and the cleanup discards it.
+- `integrate` reads the status, and then runs the abort or the reset. A change
+  you stage in the instant between the two goes with the merge. git has no
+  conditional abort, so this window stays. Leave the checkout alone while
+  `integrate` runs.
+- A merge can write a path that the list of the task branch does not hold. When
+  HEAD renamed a file that the task branch changed, git follows the rename and
+  writes the new name. That path reads as yours, so the cleanup stops and the
+  merge stays pending.
+- A hook that changes a tracked file outside those paths, such as a formatter or
+  a version bump, stops the cleanup the same way, and the answer calls that file
+  probably yours.
+
+Commit or stash your own work before you integrate.
+
+Neither command removes a file that a hook made. After a failed merge,
+`integrate` reads `git status --porcelain`, and once more when it undid the
+merge, so that the answer lists what stays. When the checkout keeps changes, the
+answer lists up to 10 paths, for example
 `; CHECKOUT keeps changes the hook made: generated.txt`. That includes a hook that
-refuses before any merge is pending, such as a `reference-transaction` hook.
-`integrate` refuses a checkout with changes, so remove those files before you
-integrate again.
+refuses before any merge is pending, such as a `reference-transaction` hook. One
+case skips the read: after a kill, if the check whether the branch is already in
+HEAD fails because git exits 128, `integrate` stops there and answers `git_failed`
+with the checkout as it is. `integrate` refuses a checkout with changes, so remove
+those files before you integrate again.
 
 A merge that outlives git's 60 second limit is killed, and `integrate` answers
 `git_failed` with the reason, after it applies the rule above. A

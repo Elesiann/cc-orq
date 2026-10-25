@@ -20,24 +20,33 @@ All notable changes to cc-orq are recorded here. The format follows
   running on the task branch or inside its worktree, a shared job included. A
   job that has not written its process group yet counts as running for its
   first 10 seconds. It runs no git command before that answer.
-- After a merge fails, `integrate` undoes the merge itself only when every
-  changed tracked path, staged or not, is one that the task branch changes, which
-  it records before the merge. It then aborts a pending merge, or resets a
-  half-made one that a killed git left with no `MERGE_HEAD`. A tracked change
-  outside those paths is probably yours, so it changes nothing, names those
-  paths, lists the rest, and names `git merge --abort` or `git reset --merge` for
-  you to run after you check; either drops staged changes of your own too. A
-  change of yours to a path that the task also changes counts as the merge's. The
-  answer lists up to 10 paths that stay, such as a file a hook made, a
-  `reference-transaction` refusal included. A merge that git's 60 second limit
-  kills answers `git_failed` and names the timeout.
+- After a merge fails, `integrate` undoes the merge itself only when it can read
+  the whole state and every changed tracked path, staged or not, is one that the
+  task branch changes, which it records before the merge. It then aborts a
+  pending merge, or resets a half-made one that a killed git left with no
+  `MERGE_HEAD`. Otherwise it changes nothing and leaves a pending merge pending.
+  A tracked change outside those paths is probably yours. A list that git printed
+  beyond the 4 MiB the engine reads, or a path that is not valid UTF-8, cannot be
+  compared. The answer names the paths or the reason, lists the rest, and names
+  `git merge --abort` or `git reset --merge` for you to run after you check;
+  either drops staged changes of your own too. Both reads pass
+  `--ignore-submodules=none`. The check goes by path, so these cases are
+  limits: a change of yours to a path that the task also changes counts as the
+  merge's, a change you stage between the status read and the abort goes with the
+  merge, and a rename that git follows during the merge writes a path outside the
+  list and stops the cleanup.
+- After a failed merge, `integrate` reads the checkout and lists up to 10 paths
+  that stay, such as a file a hook made, a `reference-transaction` refusal
+  included. It skips that read only when the check whether the branch is already
+  in HEAD fails with exit 128, and then answers `git_failed`. A merge that git's
+  60 second limit kills answers `git_failed` and names the timeout.
 - The config key `integrate.gitHooks`. With `"run"`, `integrate` runs the git
   hooks of the checkout as they are, and a hook that refuses the merge, such as
-  a failing `pre-merge-commit`, makes it abort the merge and answer `hook_failed`
-  with the hook's output from stdout and stderr. The README says what the opt-in
-  risks: a worker that can write the checkout's shared git directory, or a hooks
-  path in the work tree, decides what runs. Any other value, and the default,
-  run no hook.
+  a failing `pre-merge-commit`, makes it abort the merge, when the cleanup rule
+  allows it, and answer `hook_failed` with the hook's output from stdout and
+  stderr. The README says what the opt-in risks: a worker that can write the
+  checkout's shared git directory, or a hooks path in the work tree, decides what
+  runs. Any other value, and the default, run no hook.
 
 ### Changed
 
