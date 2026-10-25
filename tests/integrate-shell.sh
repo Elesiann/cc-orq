@@ -1,7 +1,7 @@
 #!/bin/bash
 # integrate against real git: a temporary checkout under .ref/tmp, worktrees cut from it by the real
-# prepareWorktree, and the real integrate tool run over a process.run that calls git. Git reads no
-# global or system config here, so the host's merge settings cannot change the result.
+# prepareWorktree, and the real integrate function, the one the MCP server serves, run over a process.run that
+# calls git. Git reads no global or system config here, so the host's merge settings cannot change the result.
 # Usage: bash tests/integrate-shell.sh
 set -e -o pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,13 +27,8 @@ import { pathToFileURL } from 'node:url'
 const [repo, home] = process.argv.slice(2)
 const ROOT = process.env.ORQ_ROOT
 const { prepareWorktree } = await import(pathToFileURL(`${ROOT}/hooks/engine.ts`).href)
-const { registerIntegrate } = await import(pathToFileURL(`${ROOT}/hooks/integrate.ts`).href)
+const { integrate: integrateTask, integratePayload, parseIntegrateInput } = await import(pathToFileURL(`${ROOT}/hooks/integrate.ts`).href)
 const jobsDir = `${home}/.cache/orq/jobs`
-
-let handler = null
-registerIntegrate((event, ...rest) => {
-  if (event === 'tool.call') handler = rest[rest.length - 1]
-})
 
 const dollar = {
   process: {
@@ -78,13 +73,11 @@ const check = (label, ok) => {
   }
 }
 
-// The answer of the tool for one task, as the model reads its structured content.
+// The answer of the tool for one task, as the server sends it to the model: the payload of the outcome as JSON.
 async function integrate(taskId, strategy) {
-  const input = strategy === undefined ? { taskId } : { taskId, strategy }
-  const r = await handler(dollar, { tool: 'mcp__cc-orq__integrate', tool_use_id: `use-${taskId}`, ...input }, async () => {
-    throw new Error('the integrate tool answers every call itself')
-  })
-  return JSON.parse(r.result)
+  const parsed = parseIntegrateInput(strategy === undefined ? { taskId } : { taskId, strategy })
+  const outcome = 'failure' in parsed ? parsed : await integrateTask(dollar, jobsDir, parsed.input)
+  return JSON.parse(JSON.stringify(integratePayload(outcome)))
 }
 
 // A task as the launch writes it: the worktree from prepareWorktree, and the meta.json beside it.

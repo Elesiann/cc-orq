@@ -65,10 +65,20 @@ function setup() {
   return { root, session, engine, config }
 }
 
-function headerFor(cwd, isolation) {
-  const header = parseTaskHeader(`target: claudeAgent haiku\ncwd: ${cwd}\nisolation: ${isolation}\n\nsay PONG`)
+function headerFor(cwd, isolation, { target = 'claudeAgent haiku', role } = {}) {
+  const roleLine = role === undefined ? '' : `role: ${role}\n`
+  const header = parseTaskHeader(`target: ${target}\n${roleLine}cwd: ${cwd}\nisolation: ${isolation}\n\nsay PONG`)
   assert.equal(isFailure(header), false, JSON.stringify(header))
   return header
+}
+
+function readJobDir(job) {
+  const read = (name) => readFileSync(join(job.dir, name), 'utf8')
+  return {
+    meta: JSON.parse(read('meta.json')),
+    flags: existsSync(join(job.dir, 'flags')) ? read('flags') : null,
+    prompt: read('prompt.txt'),
+  }
 }
 
 function git(cwd, args) {
@@ -124,7 +134,62 @@ test('a shared task launches with no session host and reads back as completed', 
   }
 })
 
-test('a worktree task runs on its own branch under REPO-wt, and git runs with repository hooks off', async () => {
+test('the job directory holds the model, instance, modes, flags, role and task that the header and the ceiling resolve to', async () => {
+  const { root, session, engine, config } = setup()
+  try {
+    const work = join(session, 'work')
+    mkdirSync(work)
+    const launched = await launchTaskFromHeader(engine, config, {
+      agentId: 'agent-resolved',
+      header: headerFor(work, 'shared', { target: 'claudeAgent fixture-model-7 effort=high runtime=approval-required', role: 'review' }),
+      ceiling: CEILING,
+      sessionDir: session,
+    })
+    assert.ok('job' in launched, JSON.stringify(launched))
+    await untilEnded(engine, launched.job)
+
+    const { meta, flags, prompt } = readJobDir(launched.job)
+    assert.equal(meta.model, 'fixture-model-7')
+    assert.equal(meta.instanceId, 'claudeAgent')
+    assert.equal(meta.runtimeMode, 'approval-required')
+    assert.equal(meta.interactionMode, 'default')
+    assert.equal(meta.effort, 'high')
+    assert.equal(flags, '--permission-mode\nmanual\n--effort\nhigh\n')
+    assert.ok(prompt.startsWith('Act as the review sub-agent for this task.\n\nsay PONG'), prompt)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+for (const { permissionMode, runtimeMode, interactionMode, flags } of [
+  { permissionMode: 'acceptEdits', runtimeMode: 'auto-accept-edits', interactionMode: 'default', flags: '--permission-mode\nacceptEdits\n' },
+  { permissionMode: 'plan', runtimeMode: 'approval-required', interactionMode: 'plan', flags: '--permission-mode\nplan\n' },
+]) {
+  test(`a header that sets no mode runs under the ceiling of a parent in ${permissionMode} mode`, async () => {
+    const { root, session, engine, config } = setup()
+    try {
+      const work = join(session, 'work')
+      mkdirSync(work)
+      const launched = await launchTaskFromHeader(engine, config, {
+        agentId: 'agent-inherits',
+        header: headerFor(work, 'shared'),
+        ceiling: parentRuntimeModeFromPermissionMode(permissionMode),
+        sessionDir: session,
+      })
+      assert.ok('job' in launched, JSON.stringify(launched))
+      await untilEnded(engine, launched.job)
+
+      const job = readJobDir(launched.job)
+      assert.equal(job.meta.runtimeMode, runtimeMode)
+      assert.equal(job.meta.interactionMode, interactionMode)
+      assert.equal(job.flags, flags)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test('a worktree task runs on its own branch under REPO-wt, and its launch runs no repository hook', async () => {
   const { root, session, engine, config } = setup()
   const repo = join(session, 'repo')
   let worktree = null
@@ -186,6 +251,28 @@ test('a cwd outside the session directory is refused as text, and no job directo
     assert.equal(
       launched.refusal,
       `orq: task refused (taskId none): cwd_out_of_scope: cwd ${outside} is outside the session directory and the allowed roots (${session}).`,
+    )
+    assert.deepEqual(existsSync(config.jobsDir) ? readdirSync(config.jobsDir) : [], [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a header that asks for more than the ceiling allows is refused as text, and no job directory is made', async () => {
+  const { root, session, engine, config } = setup()
+  try {
+    const work = join(session, 'work')
+    mkdirSync(work)
+    const launched = await launchTaskFromHeader(engine, config, {
+      agentId: 'agent-escalates',
+      header: headerFor(work, 'shared', { target: 'claudeAgent haiku runtime=full-access' }),
+      ceiling: CEILING,
+      sessionDir: session,
+    })
+    assert.ok('refusal' in launched, JSON.stringify(launched))
+    assert.equal(
+      launched.refusal,
+      'orq: task refused (taskId none): runtime_mode_escalation_denied: Child runtime mode full-access is broader than parent mode auto-accept-edits.',
     )
     assert.deepEqual(existsSync(config.jobsDir) ? readdirSync(config.jobsDir) : [], [])
   } finally {

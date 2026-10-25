@@ -1,4 +1,4 @@
-// Provider catalog behind `mcp__cc-orq__capabilities`: parsing and assembly.
+// Provider catalog behind `mcp__plugin_cc-orq_orq__capabilities`: parsing and assembly.
 //
 // Pure module: no `$` here. `scripts/catalog.py` runs the CLIs and prints `ProviderInstance[]`.
 // This module parses each source format, so the parsers stay unit-testable, and turns instances

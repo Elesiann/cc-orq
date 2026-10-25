@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Elesiann/cc-orq/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-orq/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Claude Code 2.1.306](https://img.shields.io/badge/Claude%20Code-2.1.306-d97757)
+![Claude Code 2.1.310](https://img.shields.io/badge/Claude%20Code-2.1.310-d97757)
 ![Linux](https://img.shields.io/badge/platform-Linux-555)
 
 **Hand tasks from Claude Code to Codex, OpenCode or another Claude, and watch
@@ -57,8 +57,10 @@ ceiling, and its answer comes back to the conversation when it ends.
   it back with a fast-forward or a merge commit.
 - **A live view.** A card above the prompt shows each job's model, status, last
   action and timer, and `/orq-panel` lists the jobs, tails one, and cancels it.
-- **T3 Code's tool surface.** `capabilities`, `status` and `cancel` answer in
-  the shapes of T3 Code's orchestrator contract.
+- **An MCP server with five tools.** `capabilities`, `status`, `list`, `cancel`
+  and `integrate` come from a stdio MCP server that the plugin starts, so they
+  work whether or not the mod loads. `capabilities`, `status` and `cancel`
+  answer in the shapes of T3 Code's orchestrator contract.
 - **Questions instead of guesses.** A blocked worker writes a question and
   stops, and the parent answers it in a new task.
 
@@ -70,18 +72,16 @@ ceiling, and its answer comes back to the conversation when it ends.
 
 | | Version | Why |
 | --- | --- | --- |
-| [Claude Code](https://code.claude.com) | 2.1.306 (tested) | Function hooks and session state, with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` |
+| [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
+| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `status`, `list`, `cancel` and `integrate` are gone |
 | Linux | | Jobs run under `systemd-run` or `setsid` |
 | `bash`, `python3`, `git` | | The supervisor, the event extractor and worktrees |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
 
-Turn function hooks on in the `env` block of `~/.claude/settings.json`:
-
-```json
-{
-  "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" }
-}
-```
+The five tools of the MCP server work in every session. The `cc-orq:task`
+agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
+default from 2.1.287 on, and an organization can turn them off, which leaves
+only the server's tools.
 
 macOS is not supported yet: the job start script needs `systemd-run` or
 `setsid` to give each job its own session, and macOS has neither by default.
@@ -121,11 +121,12 @@ cwd: /path/to/repo
 Add a retry with exponential backoff to the S3 uploader and cover it with tests.
 ```
 
-The session gets the orchestration instructions at start, so it reads
-`mcp__cc-orq__capabilities` for the live model ids before it names a target.
-The job appears on the card. When it ends, the answer comes back with a footer
-that carries its `taskId`, and `mcp__cc-orq__integrate` merges the task's
-branch into your checkout.
+The MCP server sends the session its instructions, so the session reads
+`mcp__plugin_cc-orq_orq__capabilities` for the live model ids before it names a
+target, and the description of the `cc-orq:task` agent tells it how to write the
+prompt. The job appears on the card. When it ends, the answer comes back with a
+footer that carries its `taskId`, and `mcp__plugin_cc-orq_orq__integrate` merges
+the task's branch into your checkout.
 
 ## Commands
 
@@ -408,7 +409,7 @@ records it, and the refusal still names the launch's own failure. Remove the
 leftovers by hand with `git worktree remove --force PATH` and
 `git branch -D orq/JOB_ID`.
 
-### `mcp__cc-orq__integrate`
+### `mcp__plugin_cc-orq_orq__integrate`
 
 Merges a finished task's branch into the checkout the task was launched from.
 The input is `taskId`, the job id, and an optional `strategy`:
@@ -450,24 +451,33 @@ conflict for you.
 
 ## Tools
 
-Beside `mcp__cc-orq__integrate`, the mod serves three MCP tools for the parent
-session, named `mcp__cc-orq__capabilities`, `mcp__cc-orq__status` and
-`mcp__cc-orq__cancel`. Each answers with a JSON text. A
-refusal has the shape `{"error": {"code": "...", "message": "..."}}`, and the
+The plugin starts a stdio MCP server, `plugin:cc-orq:orq`, that serves five
+tools to the parent session, named `mcp__plugin_cc-orq_orq__capabilities`,
+`mcp__plugin_cc-orq_orq__status`, `mcp__plugin_cc-orq_orq__list`,
+`mcp__plugin_cc-orq_orq__cancel` and `mcp__plugin_cc-orq_orq__integrate`. They
+are there whether or not the mod loads, and `/mcp` shows the server.
+Each answers with a JSON text. A refusal has the shape
+`{"error": {"code": "...", "message": "..."}}` and comes with `isError`, and the
 codes orq answers with are `task_not_found`, `task_not_cancellable` and
 `invalid_request`. A task is one job: its `taskId` is the job id that
-`/orq list` shows.
+`/orq list` shows. `integrate` is described under
+[Worktrees and integrate](#worktrees-and-integrate).
 
-The parent session gets the orchestration instructions through the session-start
-context: a `SessionStart` hook runs `scripts/session-start.sh`, which prints
-`instructions.md` as `additionalContext` on startup, resume, clear and compact.
-A test keeps `instructions.md` equal to the `ORCHESTRATION_INSTRUCTIONS` constant
-in `hooks/instructions.ts`, so change the constant and the file together.
+The server sends its own instructions to the session, which tell it how to use
+the five tools (`server/instructions.md`, under 4,000 bytes). The guidance for
+starting a task is the description of the `cc-orq:task` agent, which the mod
+registers (`TASK_AGENT_DESCRIPTION` in `hooks/task.ts`), so it is in the session
+exactly when the mod loads. No hook injects text at session start.
 
-### `mcp__cc-orq__capabilities`
+The server uses the MCP SDK from `server/vendor/mcp-sdk.mjs`, a bundle that is
+committed, so a user never has to install a package. `npm run build:vendor`
+rebuilds it, and `node scripts/build-vendor.mjs --check` fails when the
+committed file or `NOTICE` is out of date.
+
+### `mcp__plugin_cc-orq_orq__capabilities`
 
 Takes no input. Answers the provider instances of the configured `instances`
-and the permission mode the parent session runs under. Each provider has its
+and the modes a task may run in. Each provider has its
 `providerInstanceId`, its `driverKind`, its `models` (each with the `options`
 the CLI reports, such as `reasoningEffort` and its allowed values),
 `canRunChildTask` and `constraints`, the reasons it cannot run now. An
@@ -511,14 +521,14 @@ providers OpenCode can use, logged in or configured through the environment.
 </details>
 
 The probe runs `scripts/catalog.py` over the configured instances and is cached
-for ten minutes. A probe that fails answers no providers, logs the reason, and
-is run again on the next call. The permission mode is the one the session
-records, else the `defaultMode` of the settings. `plan` gives `approval-required`
-with `plan`; `acceptEdits` gives `auto-accept-edits`; `auto` gives `auto`;
-`bypassPermissions` gives `full-access`; `default`, `dontAsk` and any other value
-give `approval-required`.
+for ten minutes. A probe that fails answers no providers, logs the reason on
+stderr, and is run again on the next call. The server does not know the
+permission mode of the session yet, so `runtimeMode` and `interactionMode` are
+what an unknown mode gives, `approval-required` and `default`. They do not
+follow the session, and the ceiling of a `cc-orq:task` is still its parent's
+mode (see [Permission ceiling](#permission-ceiling)).
 
-### `mcp__cc-orq__status`
+### `mcp__plugin_cc-orq_orq__status`
 
 Takes `{"taskId": "<id>"}` and reads that job's directory, so it also answers for
 jobs of earlier sessions. An unknown or unsafe id answers `task_not_found`.
@@ -561,7 +571,38 @@ recorded them.
 `result_available` once the task has ended. orq does not produce
 `waiting_for_children`, since a task has no children of its own.
 
-### `mcp__cc-orq__cancel`
+### `mcp__plugin_cc-orq_orq__list`
+
+Takes `{"limit": N}`, an optional whole number from 1 to 50 that defaults to
+20, and answers `{"jobs": [...]}`: the newest jobs first, whatever started them,
+read from the jobs directory. A `limit` that is not a whole number from 1 to 50
+answers `invalid_request`. Each job is one row:
+
+```json
+{
+  "taskId": "task-1760000000000-a1b2c3d4-k3j9x2",
+  "status": "completed",
+  "kind": "task",
+  "instanceId": "codex",
+  "model": "<model-id>",
+  "startedAt": "2026-10-19T12:00:00.000Z",
+  "durationMs": 125000,
+  "cwd": "/path/to/repo-wt/task-1760000000000-a1b2c3d4-k3j9x2",
+  "branch": "orq/task-1760000000000-a1b2c3d4-k3j9x2",
+  "parent": null,
+  "question": false
+}
+```
+
+`status` is the one of the `status` tool. `durationMs` runs to the job's `exit`
+file, or to now while the job runs, and is `null` for an interrupted job.
+`instanceId`, `model` and `branch` are `null` when the job did not record them,
+and `branch` is set only for a worktree job. `parent` is `null` for now.
+`question` is `true` when the job ended blocked on a question. The server reads
+every job's metadata, and checks whether a job is alive only for the rows it
+returns.
+
+### `mcp__plugin_cc-orq_orq__cancel`
 
 Takes `{"taskId": "<id>", "reason": "<optional text>"}`. The reason is up to 200
 characters; a longer one, or one that is not text, answers `invalid_request` and
@@ -770,8 +811,10 @@ does not show the question, although the question stays in `question.txt`.
 
 `hooks/register.ts` wires the modules to the engine's events. On
 `session.start` it reads the configuration, registers `/orq` and `/orq-panel`,
-the `cc-orq:task` agent type and the MCP tools, and starts the task card; on
-`session.end` it stops the card and the pane.
+the `cc-orq:task` agent type and the `wait` tool, and starts the task card; on
+`session.end` it stops the card and the pane. The five other tools are served by
+the MCP server in `server/`, which Claude Code starts from the `mcpServers` entry
+of `.claude-plugin/plugin.json`.
 
 A delegated task takes this path:
 
@@ -783,7 +826,7 @@ flowchart LR
   task -- "mcp__cc-orq__wait" --> job
   job -- "final message" --> task
   task -- "handback" --> parent
-  parent -- "status · cancel · integrate" --> job
+  parent -- "MCP server: status · cancel · integrate" --> job
   job -. "rows" .-> card["Task card<br/>/orq-panel"]
 ```
 
@@ -805,17 +848,20 @@ flowchart LR
    its token counts and errors from the event stream (`scripts/extract.py`),
    and the subagent hands the answer back to the parent.
 
-Beside that path, `hooks/tools.ts` serves `capabilities`, `status` and `cancel`
-(the provider probe is `scripts/catalog.py`), `hooks/integrate.ts` merges a
-task's branch, `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane
-from the job directories, and `scripts/session-start.sh` gives the parent
-`instructions.md`.
+Beside that path, `server/main.mjs` starts the MCP server, which serves
+`capabilities`, `status`, `list`, `cancel` and `integrate` (`server/tools.ts`)
+over stdio on the same job core: `hooks/tools.ts` answers three of them (the
+provider probe is `scripts/catalog.py`), `hooks/integrate.ts` merges a task's
+branch, and `server/node-engine.ts` gives them the engine's `$` in plain Node.
+`hooks/card.ts` and `hooks/panel.ts` draw the card and the pane from the job
+directories.
 
 ## Troubleshooting
 
 | You see | Do this |
 | --- | --- |
-| `/orq` and the `mcp__cc-orq__*` tools are missing | Check that `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is `1`, that `cc-orq` is enabled in `/plugin`, then run `/reload-plugins` |
+| `/orq`, the task card or `mcp__cc-orq__wait` are missing | Check that your Claude Code is 2.1.287 or newer, that your organization has not turned mods off, and that `cc-orq` is enabled in `/plugin`, then run `/reload-plugins` |
+| The `mcp__plugin_cc-orq_orq__*` tools are missing, or `/mcp` shows `plugin:cc-orq:orq` as failed | Check that `cc-orq` is enabled in `/plugin`. The server writes the reason for a failed start to stderr: `the orq server needs Node 22.18 or newer` means the `node` on your PATH is older; `node --version` shows which one Claude Code finds |
 | `capabilities` lists no providers, or misses one | Run the provider CLI once in a shell and log in. The debug log (`claude --debug-file`) gives the probe's reason |
 | `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |

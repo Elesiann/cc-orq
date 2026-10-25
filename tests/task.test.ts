@@ -120,7 +120,7 @@ function stubs(on: any, s: State) {
   })
   on('tool.register', (_$: unknown, e: any) => {
     s.tools.push(e)
-    return { value: { tool: `mcp__cc-orq__${e.name}` } }
+    return { value: { tool: 'mcp__cc-orq__wait' } }
   })
   on('agent.register', (_$: unknown, e: any) => {
     s.agents.push(e)
@@ -239,11 +239,16 @@ test('session start registers the wait tool and the cc-orq:task agent, which run
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate', 'capabilities', 'status', 'cancel'])
+  expect(s.tools.map((t) => t.name)).toEqual(['wait'])
   expect(s.agents.map((a) => a.name)).toEqual(['task'])
   expect(s.agents[0].tools).toEqual(['mcp__cc-orq__wait'])
   expect(s.agents[0].background).toBe(true)
   expect(s.agents[0].permissionMode).toBeUndefined()
+  // The guidance for the parent is the agent's description, since nothing injects text at session start.
+  const description: string = s.agents[0].description
+  for (const term of ['run_in_background: true', '`target: <instance> <model>', '`cwd: /absolute/path`', "Never pass the Agent tool's own `isolation` option", '`BLOCKED on a question`', 'a different model family']) {
+    expect(description.includes(term)).toBe(true)
+  }
 })
 
 test('a header launches one task job on the named instance and the step waits through mcp__cc-orq__wait', async ($, on) => {
