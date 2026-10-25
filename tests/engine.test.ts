@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { parseLaunch } from '../hooks/engine.ts'
-import { sha256Hex } from '../hooks/lock.ts'
+import { LAUNCH_GRACE_MS, sha256Hex } from '../hooks/lock.ts'
 import { QUESTION_PROTOCOL } from '../hooks/question.ts'
 import {
   buildFooter,
@@ -62,6 +62,8 @@ type State = {
   /** Runs when the start script does, or when a mutex is taken: another launcher acting in that window. */
   onStart: (() => void) | null
   onMutex: (() => void) | null
+  /** Runs when a file is read, with its path: a slow disk, or another launcher acting during the scan. */
+  onRead: ((path: string) => void) | null
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -93,6 +95,7 @@ function fresh(o: Partial<State> = {}): State {
     events: [],
     onStart: null,
     onMutex: null,
+    onRead: null,
     ...o,
   }
 }
@@ -113,6 +116,7 @@ function stubs(on: any, s: State) {
   on('clock.now', () => ({ value: s.now }))
   on('fs.exists', (_$: unknown, e: any) => ({ value: s.files.has(e.path) || s.locks.has(e.path) }))
   on('fs.read', (_$: unknown, e: any) => {
+    s.onRead?.(String(e.path))
     if (s.files.has(e.path)) return { value: s.files.get(e.path) }
     if (String(e.path).endsWith('/pgid') && !s.noPgid.has(String(e.path).slice(JOBS.length + 1, -'/pgid'.length))) {
       return { value: '4242\n' }
@@ -186,6 +190,12 @@ function runLockScript(s: State, script: string): number {
     s.mtimes.set(dir, s.now)
   }
   if (action === 'mutex') s.onMutex?.()
+  if (action === 'touch') {
+    const dir = /touch -c (\S+) /.exec(script)?.[1] ?? ''
+    const owner = /= (\S+) \] \|\| exit/.exec(script)?.[1] ?? ''
+    if (s.locks.get(dir) !== owner) return 3
+    s.mtimes.set(dir, s.now)
+  }
   if (action === 'aside') {
     if (s.asideExit !== 0) return s.asideExit
     const dir = /^mv (\S+) /m.exec(script)?.[1] ?? ''
@@ -814,6 +824,42 @@ test('a job in a subdirectory of the launch\'s own spelling of a symlinked check
   stubs(on, s)
   await start($)
   expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-deep')
+})
+
+test('a launch that scans for a long time keeps its lock younger than the grace, and touches it once more before meta.json', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.dirEntries = Array.from({ length: 12 }, (_, i) => ({ name: `job-${i}`, kind: 'dir' }))
+  for (const entry of s.dirEntries) seedJob(s, entry.name, { cwd: '/elsewhere' })
+  const lockAges: number[] = []
+  s.onRead = (path) => {
+    if (!path.endsWith('/meta.json')) return
+    lockAges.push(s.now - (s.mtimes.get(WORK_LOCK) ?? s.now))
+    s.now += 2000
+  }
+  stubs(on, s)
+  await start($)
+  launchedId(await orq($, LAUNCH))
+  expect(lockAges.length).toBe(12)
+  expect(Math.max(...lockAges)).toBeLessThan(LAUNCH_GRACE_MS)
+  const lastSteps = s.events.filter((step) => step === 'lock touch' || step === 'write meta.json')
+  expect(lastSteps.slice(-2)).toEqual(['lock touch', 'write meta.json'])
+})
+
+test('a launch whose lock was broken and taken during its scan refuses before it writes a job, and leaves the new lock', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.dirEntries = [{ name: 'job-0', kind: 'dir' }]
+  seedJob(s, 'job-0', { cwd: '/elsewhere' })
+  s.onRead = (path) => {
+    if (path.endsWith('/job-0/meta.json')) takeLock(s, 'job-taker')
+  }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.events.includes('write meta.json')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
+  expect(s.locks.get(WORK_LOCK)).toBe('job-taker')
+  expect(s.events.includes('lock aside')).toBe(false)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
 })
 
 test('a launch that finds a live job in its directory gives its lock back before it refuses', async ($, on) => {

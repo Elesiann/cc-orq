@@ -31,6 +31,9 @@ export type LockVerdict = { kind: 'busy'; owner: string | null } | { kind: 'dead
 /** The supervisor takes up to 5 s to write its pid, so a launch younger than this may still be starting. */
 export const LAUNCH_GRACE_MS = 10_000
 
+/** A launch that is still working touches its lock this often, so the lock never ages toward LAUNCH_GRACE_MS. */
+export const REARM_EVERY_MS = 3_000
+
 export function judgeLock(facts: LockFacts): LockVerdict {
   if (facts.owner === null) return facts.ageMs < LAUNCH_GRACE_MS ? { kind: 'busy', owner: null } : { kind: 'dead' }
   switch (facts.state) {
@@ -111,8 +114,8 @@ export function sha256Hex(text: string): string {
 
 type LockPaths = { locks: string; dir: string }
 
-/** A lock a launch holds: give it back with `releaseLock` when the launch fails. */
-export type HeldLock = { paths: LockPaths; owner: string }
+/** A lock a launch holds: give it back with `releaseLock` when the launch fails. `touchedAt` is when its age last started over. */
+export type HeldLock = { paths: LockPaths; owner: string; touchedAt: number }
 
 export type Claim =
   | { kind: 'held'; held: HeldLock; checkout: Checkout }
@@ -176,6 +179,15 @@ function mutexScript(mutex: string): string {
 
 function unmutexScript(mutex: string): string {
   return `# orq:lock unmutex\nrmdir ${quoted(mutex)} 2>/dev/null\nexit 0`
+}
+
+function touchScript(dir: string, owner: string): string {
+  return (
+    `# orq:lock touch\n` +
+    `[ "$(cat ${quoted(`${dir}/owner`)} 2>/dev/null)" = ${quoted(owner)} ] || exit ${EXIT_LOST}\n` +
+    `touch -c ${quoted(dir)} 2>/dev/null\n` +
+    `exit 0`
+  )
 }
 
 /** One rename, so a lock is gone or whole, never half removed; `$$` keeps the tombstone's name unique. */
@@ -284,8 +296,9 @@ export async function claimCheckout(
     const checkout = await checkoutOf($, cwd)
     const paths = lockPathsFor(jobsDir, checkout)
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const touchedAt = await $.clock.now()
       const code = await exitCodeOf($, claimScript(paths, owner, checkout.key))
-      if (code === EXIT_TAKEN) return { kind: 'held', held: { paths, owner }, checkout }
+      if (code === EXIT_TAKEN) return { kind: 'held', held: { paths, owner, touchedAt }, checkout }
       if (code !== EXIT_HELD && code !== EXIT_LOST) return { kind: 'failed', detail: `exit ${code}` }
       const facts = await inspect($, paths, ownerState)
       if (facts === null) continue
@@ -300,6 +313,23 @@ export async function claimCheckout(
     return { kind: 'busy', owner: null }
   } catch (err) {
     return { kind: 'failed', detail: String(err) }
+  }
+}
+
+/**
+ * Starts the age of the lock over, so a launch that works longer than LAUNCH_GRACE_MS still reads as a launch in
+ * progress. It does nothing until REARM_EVERY_MS have passed since the last touch, unless `force` is set. It answers
+ * false when the lock is no longer this launch's, because another launcher broke it, and the launch must not go on.
+ * Never throws; a touch that cannot be made leaves the answer true.
+ */
+export async function rearmLock($: LockEngine, held: HeldLock, { force = false }: { force?: boolean } = {}): Promise<boolean> {
+  try {
+    const now = await $.clock.now()
+    if (!force && now - held.touchedAt < REARM_EVERY_MS) return true
+    held.touchedAt = now
+    return (await exitCodeOf($, touchScript(held.paths.dir, held.owner))) !== EXIT_LOST
+  } catch {
+    return true
   }
 }
 

@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -9,15 +10,19 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { fileURLToPath } from 'node:url'
 
-import { LAUNCH_GRACE_MS, checkoutOf, claimCheckout, judgeLock, releaseLock, sha256Hex } from '../../hooks/lock.ts'
+import { defaultConfig } from '../../hooks/config.ts'
+import { launchJob } from '../../hooks/engine.ts'
+import { LAUNCH_GRACE_MS, REARM_EVERY_MS, checkoutOf, claimCheckout, judgeLock, rearmLock, releaseLock, sha256Hex } from '../../hooks/lock.ts'
 import { shellWord } from '../../hooks/types.ts'
 import { nodeEngine } from '../../server/node-engine.ts'
 
@@ -328,6 +333,106 @@ test('a dead lock that cannot be moved aside is answered as a failure to lock, a
     assert.equal(claim.kind, 'failed', JSON.stringify(claim))
     assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-dead\n')
     assert.equal((await claimCheckout(engine, jobsDir, 'job-b', repo, probe)).kind, 'held')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('rearming starts the age of the lock over, answers false once the lock is not the launch\'s, and never creates one', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const claim = await claimCheckout(engine, jobsDir, 'job-a', repo, probeOf({}))
+    assert.equal(claim.kind, 'held')
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    const ageSeconds = () => (Date.now() - statSync(lock).mtimeMs) / 1000
+    backdate(lock, 20)
+    assert.equal(await rearmLock(engine, claim.held, { force: true }), true)
+    assert.ok(ageSeconds() < 5, `${ageSeconds()} s`)
+    writeFileSync(join(lock, 'owner'), 'job-taker\n')
+    backdate(lock, 20)
+    assert.equal(await rearmLock(engine, claim.held, { force: true }), false)
+    assert.ok(ageSeconds() > 15, `${ageSeconds()} s`)
+    rmSync(lock, { recursive: true })
+    assert.equal(await rearmLock(engine, claim.held, { force: true }), false)
+    assert.equal(existsSync(lock), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('rearming runs no script until REARM_EVERY_MS have passed since the last touch, and always when forced', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const clock = { now: 1_000_000 }
+    const touches = []
+    const timed = {
+      ...engine,
+      clock: { now: async () => clock.now },
+      process: {
+        ...engine.process,
+        run: (argv, init) => {
+          if (argv[2].startsWith('# orq:lock touch')) touches.push(clock.now)
+          return engine.process.run(argv, init)
+        },
+      },
+    }
+    const claim = await claimCheckout(timed, jobsDir, 'job-a', repo, probeOf({}))
+    assert.equal(claim.kind, 'held')
+    clock.now += REARM_EVERY_MS - 1
+    await rearmLock(timed, claim.held)
+    assert.deepEqual(touches, [])
+    clock.now += 1
+    await rearmLock(timed, claim.held)
+    assert.deepEqual(touches, [clock.now])
+    clock.now += REARM_EVERY_MS - 1
+    await rearmLock(timed, claim.held)
+    assert.equal(touches.length, 1)
+    await rearmLock(timed, claim.held, { force: true })
+    assert.equal(touches.length, 2)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a launch whose scan outlasts the grace while a second launcher breaks its lock and starts a job refuses, so one job runs', async () => {
+  const { root, jobsDir } = scratch()
+  try {
+    const bin = join(root, 'bin')
+    mkdirSync(bin)
+    writeFileSync(
+      join(bin, 'claude'),
+      `#!/bin/bash\nprintf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"X","usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"m":{}}}'\n`,
+    )
+    chmodSync(join(bin, 'claude'), 0o755)
+    const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+    const real = nodeEngine({ env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, pluginRoot })
+    const repo = checkoutWithSubdirectory(root)
+    const config = { ...defaultConfig(root), jobsDir }
+    const spec = (agentId) => ({
+      kind: 'task', agentId, runner: 'claude', model: 'haiku', cwd: repo, prompt: 'x', env: {}, instanceId: 'claudeAgent', driver: 'claudeAgent', flags: [],
+    })
+    let second
+    const slowList = {
+      ...real,
+      fs: {
+        ...real.fs,
+        list: async (path) => {
+          const entries = await real.fs.list(path)
+          backdate(join(jobsDir, '.locks', sha256Hex(repo)), 30)
+          second = await launchJob(real, config, spec('agent-second'))
+          return entries
+        },
+      },
+    }
+    const first = await launchJob(slowList, config, spec('agent-first'))
+    assert.ok('job' in second, JSON.stringify(second))
+    assert.equal('refusal' in first, true, JSON.stringify(first))
+    assert.match(first.refusal, /worktree_busy/)
+    const metas = readdirSync(jobsDir).filter((name) => existsSync(join(jobsDir, name, 'meta.json')))
+    assert.deepEqual(metas, [second.job.id])
+    for (let waited = 0; !existsSync(join(jobsDir, second.job.id, 'exit')) && waited < 100; waited += 1) await sleep(100)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

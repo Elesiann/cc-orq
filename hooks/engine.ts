@@ -4,7 +4,7 @@ import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
 import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
 import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
-import { claimCheckout, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
+import { claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
 import { scopedCwd } from './scope.ts'
 import type { TaskHeader } from './task-header.ts'
 import {
@@ -304,13 +304,14 @@ async function unwindWorktree($: CoreEngine, plan: WorktreePlan): Promise<void> 
  * supervisor runs. The lock covers the jobs that claimed one; this covers the rest, the jobs 0.1 launched and
  * the worktree jobs, and it reads the job directory rather than memory, so it holds across sessions. A job
  * stores the path its launch was given, so `spelling`, the path of this launch, finds a job stored under a
- * symlink that leads to the checkout, as 0.1 did.
+ * symlink that leads to the checkout, as 0.1 did. `rearm` runs before each job is read, so a scan of a large
+ * jobs directory can keep the launch's lock young.
  */
 export async function checkoutBusy(
   $: CoreEngine,
   jobsDir: string,
   checkout: Checkout,
-  launch: { spelling?: string } = {},
+  launch: { spelling?: string; rearm?: () => Promise<unknown> } = {},
 ): Promise<string | null> {
   let entries: { name: string; kind: string }[]
   try {
@@ -324,6 +325,7 @@ export async function checkoutBusy(
   const inside = (path: string | undefined): boolean => path !== undefined && roots.some((root) => holds(path, root))
   for (const entry of entries) {
     if (entry.kind !== 'dir') continue
+    await launch.rearm?.()
     const job = await readMeta($, jobsDir, entry.name)
     if (job === null || !(inside(job.cwd) || inside(job.repo))) continue
     if ((await jobLiveness($, job)) === 'running') return job.id
@@ -477,9 +479,12 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       const claim = await claimCheckout($, config.jobsDir, id, spec.cwd, ownerOf)
       if (claim.kind === 'failed') return abandon(`orq: ${spec.kind} could not lock its checkout (${claim.detail})`)
       if (claim.kind === 'busy') return abandon(busyRefusal(spec.kind, spec.cwd, claim.owner))
-      held = claim.held
-      const busy = await checkoutBusy($, config.jobsDir, claim.checkout, { spelling: spec.cwd })
+      const lock = claim.held
+      held = lock
+      const busy = await checkoutBusy($, config.jobsDir, claim.checkout, { spelling: spec.cwd, rearm: () => rearmLock($, lock) })
       if (busy !== null) return abandon(busyRefusal(spec.kind, spec.cwd, busy))
+      // A scan that outlasted the grace may have let another launcher break this lock and start its job.
+      if (!(await rearmLock($, lock, { force: true }))) return abandon(busyRefusal(spec.kind, spec.cwd, null))
     }
     const worktreeFields = plan
       ? { repo: plan.repo, baseSha: plan.baseSha, branch: plan.branch, worktree: plan.worktree }
