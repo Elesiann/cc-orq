@@ -399,9 +399,13 @@ On success the answer gives the merged commit, the branch and the worktree. The
 worktree and the branch stay. Remove them with `git worktree remove` and
 `git branch -d` when you no longer need them.
 
-`integrate` refuses while a job is still running on the task branch, whether it
-is the task's own job or another job on the same branch. It answers
-`task_running` and names that job, before it runs any git command.
+`integrate` refuses while a job is still running on the task branch or inside
+its worktree, whether it is the task's own job or another one. A shared launch
+records no branch, so a job also counts when its working directory is the
+worktree or a directory in it. It answers `task_running` and names that job,
+before it runs any git command. A job whose supervisor has not written its
+process group yet counts as running during its first 10 seconds, and so does a
+job whose liveness check cannot run. After those 10 seconds both count as gone.
 
 The model reads one JSON string. A merge answers
 `{"ok": true, "taskId": "...", "mergedSha": "...", "branch": "...", "worktree": "..."}`.
@@ -412,12 +416,27 @@ and `error` also carries `files` when the code is `merge_conflict`:
 {"ok": false, "error": {"code": "merge_conflict", "message": "orq/JOB_ID conflicts with CHECKOUT in 1 file(s); the merge was aborted", "files": ["a.txt"]}}
 ```
 
-With the opt-in, a refused merge carries the hook's output in the message, with
-secrets redacted and cut to its last 20 lines:
+With the opt-in, a refused merge carries the hook's output in the message, what
+git printed on stdout and on stderr together, with secrets redacted and cut to
+its last 20 lines:
 
 ```json
 {"ok": false, "error": {"code": "hook_failed", "message": "a git hook refused the merge of orq/JOB_ID into CHECKOUT; the merge was aborted. A hook has to pass before the task can merge: fix what it checks, then integrate again.\nOutput of the checkout's hook:\nlint: a.txt has a trailing space"}}
 ```
+
+`git merge --abort` puts back what the merge changed, but not a file that a hook
+made. After an abort, `integrate` reads `git status --porcelain`, and when the
+checkout keeps changes the answer says so and lists up to 10 paths, for example
+`; CHECKOUT keeps changes the hook made: generated.txt`. `integrate` refuses a
+checkout with changes, so remove those files before you integrate again.
+
+A merge that outlives git's 60 second limit is killed, and `integrate` answers
+`git_failed` with the reason. It then restores the checkout the same way: it
+runs `git merge --abort` when a merge is pending, and `git reset --merge` when
+the killed merge left its half-made index behind with no merge pending, which a
+`pre-merge-commit` hook that runs long does. When a `post-merge` hook is what
+ran long, the merge had already landed, and the answer says the branch is
+already part of HEAD.
 
 A refusal names one of these codes:
 
@@ -425,19 +444,28 @@ A refusal names one of these codes:
 | --- | --- |
 | `task_not_found` | No job has that id. |
 | `no_worktree` | The job ran without a worktree, so it has no branch to merge. |
-| `task_running` | A job is still running on the task branch, and the answer names it. Wait for it to finish, or cancel it, then integrate again. |
+| `task_running` | A job is still running on the task branch or in its worktree, and the answer names it. Wait for it to finish, or cancel it, then integrate again. |
 | `not_a_repository` | The checkout the job was launched from is not a git checkout. |
 | `dirty_worktree` | The checkout has uncommitted or untracked files. Commit or stash them, then integrate again. |
 | `already_integrated` | The task branch is already in the checkout's HEAD, so there is nothing to merge. |
 | `not_fast_forward` | `ff-only` cannot move HEAD, because the checkout has commits the task lacks. Integrate with `merge`, or rebase the task first. |
 | `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort`, and the answer lists the conflicted files. |
-| `hook_failed` | Only with the opt-in. A git hook of the checkout refused the merge, or the merge stopped before its commit with no conflict, for example when signing the commit fails. orq ran `git merge --abort` if a merge was pending. The answer carries what git printed, which includes the hook's output, with secrets redacted and cut to its last 20 lines. Fix what the hook checks, then integrate again. |
+| `hook_failed` | Only with the opt-in. A git hook of the checkout refused the merge, or the merge stopped before its commit with no conflict, for example when signing the commit fails. orq ran `git merge --abort` if a merge was pending. The answer carries what git printed on stdout and stderr, which includes the hook's output, with secrets redacted and cut to its last 20 lines, and it lists up to 10 files that the hook left in the checkout. Fix what the hook checks, then integrate again. |
 | `invalid_request` | The input does not match the schema. |
-| `git_failed` | git failed in a way no other code names. The answer carries its message. |
+| `git_failed` | git failed in a way no other code names, or a merge outlived git's 60 second limit and was killed. The answer carries its message, and says whether the merge was aborted or reset and what the checkout keeps. |
 
 When a merge conflicts, redelegate a rebase of the task branch to the same
 worker, then integrate again. orq never forces a merge, and it never resolves a
 conflict for you.
+
+#### What a worktree shares with your checkout
+
+A worktree task shares the repository's `.git` directory with your checkout. A
+worker that can write it, which is any worker in `auto` or `full-access` and any
+CLI whose sandbox allows the git directory, can change git config or hooks that
+run programs in any later git command in that checkout: `integrate`, and your
+own `git` commands too. Keep untrusted workers in modes that cannot write outside
+their worktree (see [Permission ceiling](#permission-ceiling)).
 
 #### Git hooks on integrate
 
@@ -457,8 +485,8 @@ as `git merge` does in your shell. A fast-forward makes no commit, so `ff-only`
 runs no `pre-merge-commit`, `prepare-commit-msg` or `commit-msg` hook, and
 `merge` runs all three. `post-merge` runs after either strategy, and git ignores
 its exit code. When a hook refuses the merge, `integrate` runs `git merge
---abort`, which restores your checkout, and answers `hook_failed` with the
-hook's output.
+--abort`, which restores your checkout except for files the hook made, and
+answers `hook_failed` with the hook's output and those files.
 
 The opt-in runs whatever hooks the checkout has when you integrate, including
 hook files that a worker changed or added. A worker that can write the checkout's

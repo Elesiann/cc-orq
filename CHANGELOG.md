@@ -17,13 +17,20 @@ All notable changes to cc-orq are recorded here. The format follows
   job's status, instance, model, duration, working directory, branch and
   whether it ended on a question.
 - `integrate` answers `task_running`, and names the job, while a job is still
-  running on the task branch. It runs no git command before that answer.
+  running on the task branch or inside its worktree, a shared job included. A
+  job that has not written its process group yet counts as running for its
+  first 10 seconds. It runs no git command before that answer.
+- `integrate` puts the checkout back after any merge that fails, one that git's
+  60 second limit kills included, and its answer says what stays in the
+  checkout, such as a file a hook made. A killed merge answers `git_failed`
+  and names the timeout.
 - The config key `integrate.gitHooks`. With `"run"`, `integrate` runs the git
   hooks of the checkout as they are, and a hook that refuses the merge, such as
   a failing `pre-merge-commit`, makes it abort the merge and answer `hook_failed`
-  with the hook's output. The README says what the opt-in risks: a worker that
-  can write the checkout's shared git directory, or a hooks path in the work
-  tree, decides what runs. Any other value, and the default, run no hook.
+  with the hook's output from stdout and stderr. The README says what the opt-in
+  risks: a worker that can write the checkout's shared git directory, or a hooks
+  path in the work tree, decides what runs. Any other value, and the default,
+  run no hook.
 
 ### Changed
 
@@ -41,6 +48,11 @@ All notable changes to cc-orq are recorded here. The format follows
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
+- The README says what a worktree task shares with your checkout: the `.git`
+  directory. A worker that can write it can change git config or hooks that
+  run programs in any later git command there, `integrate` and your own `git`
+  commands included, so untrusted workers belong in modes that cannot write
+  outside their worktree.
 
 ### Fixed
 
