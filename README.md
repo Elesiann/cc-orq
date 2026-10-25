@@ -390,9 +390,8 @@ of it. A worktree launch is never refused for that, and it does not take the
 lock.
 
 The lock is a directory under `.locks` in the jobs directory. It stays after
-its job ends, and the next shared launch takes it over, as it does the lock of
-a job that was killed or of a launch that died before its job started. It never
-needs removing by hand.
+its job ends. The next shared launch takes it over, as it does the lock of a
+job that was killed or of a launch that died before its job started.
 
 A launch that fails after git created its worktree removes that worktree and
 its branch again, on a best-effort basis. When that removal fails, the debug log
