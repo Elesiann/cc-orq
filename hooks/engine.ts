@@ -4,7 +4,7 @@ import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
 import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
 import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
-import { claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
+import { LAUNCH_GRACE_MS, claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
 import { scopedCwd } from './scope.ts'
 import type { TaskHeader } from './task-header.ts'
 import {
@@ -52,6 +52,9 @@ export type CoreEngine = {
 export const LIST_LIMIT = 50
 const PROCESS_TIMEOUT_MS = 30000
 
+/** Who answers a question the worker asks: the parent session, or the human through a form. */
+export type QuestionMode = 'parent' | 'human'
+
 export type LaunchSpec = {
   kind: string
   agentId: string
@@ -68,6 +71,8 @@ export type LaunchSpec = {
   interactionMode?: InteractionMode
   /** The reasoning effort `flags` give the CLI, recorded for the answer's footer. */
   effort?: string
+  /** Recorded in meta.json for a job the server launches. */
+  questions?: QuestionMode
   /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
   isolation?: 'worktree'
   /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
@@ -75,6 +80,9 @@ export type LaunchSpec = {
 }
 
 export type TaskLaunchSpec = {
+  /** The job kind: `task` for the cc-orq:task agent, which is the default, and `mcp` for the server's delegate. */
+  kind?: string
+  questions?: QuestionMode
   agentId: string
   instance: InstanceConfig
   model: string
@@ -505,6 +513,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
       ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+      ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
       ...worktreeFields,
     }
     try {
@@ -525,6 +534,8 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       model: spec.model,
       env: spec.env,
     })
+    // The job files above may have taken longer than the grace, so another launcher may have broken this lock since the last touch.
+    if (held && !(await rearmLock($, held, { force: true }))) return abandon(busyRefusal(spec.kind, spec.cwd, null))
     let startCode: number
     try {
       const r = await $.process.run(['bash', '-c', script], { timeoutMs: PROCESS_TIMEOUT_MS })
@@ -573,8 +584,9 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
   if (spec.flags.some((flag) => flag === '' || hasControlCharacters(flag))) {
     return { refusal: `${TASK_REFUSAL}: a runner flag is empty or contains a control character.` }
   }
+  const kind = spec.kind ?? 'task'
   const launched = await launchJob($, config, {
-    kind: 'task',
+    kind,
     agentId: spec.agentId,
     runner: DRIVER_RUNNER[spec.instance.driver],
     model: spec.model,
@@ -587,11 +599,15 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
     ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+    ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
     ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const, worktreeScope: spec.scopeRoots } : {}),
   })
   if (!('refusal' in launched)) return launched
   // launchJob words its refusals for any kind; a task's are answered as task refusals.
-  const refusal = launched.refusal.replace(/^orq: task (refused: )?/, `${TASK_REFUSAL}: `)
+  const own = `orq: ${kind} `
+  const refusal = launched.refusal.startsWith(own)
+    ? `${TASK_REFUSAL}: ${launched.refusal.slice(own.length).replace(/^refused: /, '')}`
+    : launched.refusal
   const hint = spec.isolation === 'worktree' && refusal.includes('not_a_repository')
     ? '. Pass `isolation: shared` to run the task in this directory as it is.'
     : ''
@@ -607,9 +623,11 @@ export async function launchTaskFromHeader(
     header: TaskHeader
     ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
     sessionDir: string
+    kind?: string
+    questions?: QuestionMode
   },
 ): Promise<LaunchResult> {
-  const { agentId, header, ceiling, sessionDir } = args
+  const { agentId, header, ceiling, sessionDir, kind, questions } = args
   const resolved = resolveTarget({
     target: header.target,
     instances: config.instances,
@@ -625,6 +643,8 @@ export async function launchTaskFromHeader(
   if ('refusal' in scoped) return scoped
   const effort = appliedEffort(resolved.instance.driver, resolved.options)
   return launchTaskJob($, config, {
+    ...(kind !== undefined ? { kind } : {}),
+    ...(questions !== undefined ? { questions } : {}),
     agentId,
     instance: resolved.instance,
     model: resolved.model,
@@ -639,21 +659,43 @@ export async function launchTaskFromHeader(
   })
 }
 
-/** finished | running | gone: the exit file, else the supervisor's process group. */
-export async function jobLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
+/** finished | running | gone: the exit file, else the supervisor's process group. Rejects when the probe cannot run. */
+async function probeLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   if (await exists($, `${job.dir}/exit`)) return 'finished'
   const script =
     `# orq:liveness\npgid=$(cat ${shellWord(`${job.dir}/pgid`)} 2>/dev/null | tr -d ' \\t\\n')\n` +
     `case "$pgid" in ''|*[!0-9]*) exit 12 ;; esac\n` +
     `kill -0 -"$pgid" 2>/dev/null && exit 11\n` +
     `[ -e ${shellWord(`${job.dir}/exit`)} ] && exit 0 || exit 12`
+  const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
+  if (r.exitCode === 0) return 'finished'
+  if (r.exitCode === 11) return 'running'
+  return 'gone'
+}
+
+/** finished | running | gone: the exit file, else the supervisor's process group. A probe that cannot run counts as running. */
+export async function jobLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   try {
-    const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
-    if (r.exitCode === 0) return 'finished'
-    if (r.exitCode === 11) return 'running'
-    return 'gone'
+    return await probeLiveness($, job)
   } catch {
     return 'running'
+  }
+}
+
+/**
+ * Whether a job may still be working, for a caller that must not act under a live job. jobLiveness reads a job
+ * with no pgid yet as gone, though its supervisor is about to write one, and a probe that cannot run as running
+ * for good. Here a job younger than LAUNCH_GRACE_MS counts as running in both states, and an older one as gone.
+ */
+export async function jobIsLive($: CoreEngine, job: JobRecord): Promise<boolean> {
+  if (await exists($, `${job.dir}/exit`)) return false
+  const starting = (await $.clock.now()) - job.startedAt < LAUNCH_GRACE_MS
+  const pgid = ((await readText($, `${job.dir}/pgid`)) ?? '').trim()
+  if (!/^\d+$/.test(pgid)) return starting
+  try {
+    return (await probeLiveness($, job)) === 'running'
+  } catch {
+    return starting
   }
 }
 

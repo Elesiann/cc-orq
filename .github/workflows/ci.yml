@@ -22,4 +22,6 @@ jobs:
       - run: bash tests/question-shell.sh
       - run: bash tests/worktree-include-shell.sh
       - run: bash tests/lock-shell.sh
+      - run: bash tests/hook-shell.sh
       - run: bash tests/allowlist-shell.sh
+      - run: shellcheck tests/live/*.sh tests/live/scenarios/*.sh

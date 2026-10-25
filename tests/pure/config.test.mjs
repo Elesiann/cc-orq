@@ -165,3 +165,29 @@ test('allowedRoots defaults to none, and a non-array keeps none with a warning',
   assert.deepEqual(r.config.allowedRoots, [])
   assert.match(r.warning, /allowedRoots must be an array of absolute paths, keeping none/)
 })
+
+test('integrate.gitHooks is off by default and when the file says off, and run turns the hooks on', () => {
+  assert.deepEqual(defaultConfig(HOME).integrate, { gitHooks: 'off' })
+  for (const text of [j({}), j({ integrate: {} }), j({ integrate: { gitHooks: 'off' } })]) {
+    const r = parseConfig(text, HOME)
+    assert.equal(r.config.integrate.gitHooks, 'off', text)
+    assert.equal(r.warning, undefined, text)
+  }
+  const run = parseConfig(j({ integrate: { gitHooks: 'run' } }), HOME)
+  assert.deepEqual(run.config.integrate, { gitHooks: 'run' })
+  assert.equal(run.warning, undefined)
+})
+
+test('any other integrate value keeps the git hooks off and warns, and the rest of the file still reads', () => {
+  const bad = [{ gitHooks: 'RUN' }, { gitHooks: 'on' }, { gitHooks: true }, { gitHooks: 1 }, { gitHooks: null }, { gitHooks: ['run'] }, 'run', true, null, ['run'], 5]
+  for (const integrate of bad) {
+    const r = parseConfig(j({ integrate, waitSeconds: 30 }), HOME)
+    assert.equal(r.config.integrate.gitHooks, 'off', JSON.stringify(integrate))
+    assert.match(r.warning, /integrate/, JSON.stringify(integrate))
+    assert.equal(r.config.waitSeconds, 30, JSON.stringify(integrate))
+  }
+})
+
+test('an invalid file, or a root that is not an object, never turns the hooks on', () => {
+  for (const text of ['{not json', '[]', 'null']) assert.equal(parseConfig(text, HOME).config.integrate.gitHooks, 'off', text)
+})

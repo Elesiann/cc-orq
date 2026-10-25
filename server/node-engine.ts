@@ -19,6 +19,8 @@ type StatOptions = Parameters<CoreEngine['fs']['stat']>[1]
 type Entry = Awaited<ReturnType<CoreEngine['fs']['list']>>[number]
 type Kind = Stat['kind']
 
+export type GitHooks = 'off' | 'repository'
+
 export type NodeEngineOptions = {
   /** The base environment; a copy of process.env when absent. */
   env?: Env
@@ -26,6 +28,11 @@ export type NodeEngineOptions = {
   cwd?: string
   /** plugin.root. Defaults to the base environment's CLAUDE_PLUGIN_ROOT when set, otherwise the repository root. */
   pluginRoot?: string
+  /**
+   * `off`, the default, turns the checkout's git hooks off for every git call, so a hook a worker wrote never runs
+   * with orq's rights. `repository` leaves them on. Fsmonitor is off either way.
+   */
+  gitHooks?: GitHooks
 }
 
 const READ_LIMIT_BYTES = 4 * 1024 * 1024
@@ -39,6 +46,7 @@ export function nodeEngine(options: NodeEngineOptions = {}): CoreEngine {
   const base: Env = { ...(options.env ?? process.env) }
   const cwd = resolve(options.cwd ?? process.cwd())
   const pluginRoot = options.pluginRoot ?? (base.CLAUDE_PLUGIN_ROOT || REPO_ROOT)
+  const gitHooks = options.gitHooks ?? 'off'
   const at = (path: string): string => resolve(cwd, path)
   return {
     clock: { now: async () => Date.now() },
@@ -51,7 +59,7 @@ export function nodeEngine(options: NodeEngineOptions = {}): CoreEngine {
       stat: (path, statOptions) => statOf(at(path), statOptions),
     },
     plugin: { root: pluginRoot },
-    process: { run: (argv, init) => runChild(argv, init, cwd, base) },
+    process: { run: (argv, init) => runChild(argv, init, cwd, base, gitHooks) },
     ui: {
       // stdout carries the MCP stdio channel, so a log line never goes there.
       log: (text) => {
@@ -131,13 +139,13 @@ function kindOf(info: Stats): Kind {
   return info.isFile() ? 'file' : 'other'
 }
 
-async function runChild(argv: readonly string[], init: RunInit, cwd: string, base: Env): Promise<RunResult> {
+async function runChild(argv: readonly string[], init: RunInit, cwd: string, base: Env, gitHooks: GitHooks): Promise<RunResult> {
   const [file, ...args] = argv
   if (file === undefined) throw new Error('process.run needs argv[0], the command to run')
   const timeoutMs = Math.min(init?.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS)
   if (!(timeoutMs > 0)) throw new RangeError(`process.run timeoutMs must be above 0, got ${init?.timeoutMs}`)
 
-  const env = withoutGitHooks(file, childEnv(base, init?.env))
+  const env = withGitSafety(file, childEnv(base, init?.env), gitHooks)
   // detached makes the child a process group leader, so a timeout can kill its grandchildren too.
   const child = spawn(file, args, { cwd: resolve(cwd, init?.cwd ?? '.'), env, stdio: 'pipe', detached: true })
   const out = capture(child.stdout)
@@ -188,19 +196,19 @@ function childEnv(base: Env, extra: Record<string, string> | undefined): Record<
   return { ...env, ...extra }
 }
 
-// Git runs a checkout's core.fsmonitor program, so fsmonitor is turned off along with the hooks.
-function withoutGitHooks(file: string, env: Record<string, string>): Record<string, string> {
+// Git runs a checkout's core.fsmonitor program, so fsmonitor is off for every git call, whether its hooks run or not.
+function withGitSafety(file: string, env: Record<string, string>, gitHooks: GitHooks): Record<string, string> {
   if (basename(file) !== 'git') return env
+  const pairs: [key: string, value: string][] = [['core.fsmonitor', 'false']]
+  if (gitHooks === 'off') pairs.unshift(['core.hooksPath', '/dev/null'])
   const raw = env.GIT_CONFIG_COUNT ?? '0'
   const n = /^\d+$/.test(raw) ? Number(raw) : 0
-  return {
-    ...env,
-    GIT_CONFIG_COUNT: String(n + 2),
-    [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath',
-    [`GIT_CONFIG_VALUE_${n}`]: '/dev/null',
-    [`GIT_CONFIG_KEY_${n + 1}`]: 'core.fsmonitor',
-    [`GIT_CONFIG_VALUE_${n + 1}`]: 'false',
-  }
+  const config: Record<string, string> = { GIT_CONFIG_COUNT: String(n + pairs.length) }
+  pairs.forEach(([key, value], i) => {
+    config[`GIT_CONFIG_KEY_${n + i}`] = key
+    config[`GIT_CONFIG_VALUE_${n + i}`] = value
+  })
+  return { ...env, ...config }
 }
 
 // Keeps the first `STREAM_LIMIT_BYTES` of a stream as text and reads, then drops, the rest. After a cut,

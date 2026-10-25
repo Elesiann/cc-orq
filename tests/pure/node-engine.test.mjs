@@ -282,6 +282,87 @@ test('git through the shim does not run a checkout\'s core.fsmonitor program, an
   assert.equal(hooks.stdout, '/dev/null\n')
 })
 
+function checkoutWithHookAndMonitor(dir) {
+  const repo = join(dir, 'repo')
+  const hookMarker = join(dir, 'hook-ran')
+  const monitorMarker = join(dir, 'fsmonitor-ran')
+  git(['init', '-q', '-b', 'main', repo])
+  writeFileSync(join(repo, 'shared.txt'), 'base\n')
+  git(['-C', repo, 'add', 'shared.txt'])
+  git(['-C', repo, 'commit', '-q', '-m', 'base'])
+  const hook = join(repo, '.git', 'hooks', 'post-checkout')
+  writeFileSync(hook, `#!/bin/sh\ntouch "${hookMarker}"\n`)
+  chmodSync(hook, 0o755)
+  const monitor = join(dir, 'monitor.sh')
+  writeFileSync(monitor, `#!/bin/sh\ntouch "${monitorMarker}"\n`)
+  chmodSync(monitor, 0o755)
+  git(['-C', repo, 'config', 'core.fsmonitor', monitor])
+  return { repo, hookMarker, monitorMarker }
+}
+
+for (const [label, options, hookRuns] of [
+  ['by default', {}, false],
+  ["with gitHooks 'off'", { gitHooks: 'off' }, false],
+  ["with gitHooks 'repository'", { gitHooks: 'repository' }, true],
+]) {
+  test(`git ${label} ${hookRuns ? 'runs' : 'does not run'} the checkout's post-checkout hook, and never its core.fsmonitor program`, async (t) => {
+    const dir = tempDir(t)
+    const { repo, hookMarker, monitorMarker } = checkoutWithHookAndMonitor(dir)
+
+    git(['-C', repo, 'worktree', 'add', '-q', join(dir, 'control'), '-b', 'control'])
+    git(['-C', repo, 'status', '--porcelain'])
+    assert.equal(existsSync(hookMarker), true, 'plain git runs the post-checkout hook')
+    assert.equal(existsSync(monitorMarker), true, 'plain git runs the core.fsmonitor program')
+    rmSync(hookMarker)
+    rmSync(monitorMarker)
+
+    const $ = nodeEngine({ cwd: repo, env: GIT_ENV, ...options })
+    const add = await $.process.run(['git', 'worktree', 'add', '-q', join(dir, 'shim'), '-b', 'shim'])
+    assert.equal(add.exitCode, 0, add.stderr)
+    assert.equal(existsSync(hookMarker), hookRuns, `the hook ${hookRuns ? 'ran' : 'stayed unrun'} through the shim`)
+    const status = await $.process.run(['git', 'status', '--porcelain'])
+    assert.equal(status.exitCode, 0, status.stderr)
+    assert.equal(existsSync(monitorMarker), false, 'git through the shim left the core.fsmonitor program unrun')
+    assert.equal((await $.process.run(['git', 'config', '--get', 'core.fsmonitor'])).stdout, 'false\n')
+    const hooksPath = await $.process.run(['git', 'config', '--get', 'core.hooksPath'])
+    assert.equal(hooksPath.stdout, hookRuns ? '' : '/dev/null\n', hookRuns ? 'the shim leaves core.hooksPath to the checkout' : 'the shim points core.hooksPath at /dev/null')
+  })
+}
+
+test("with gitHooks 'repository', the hooks directory the checkout configures is the one git uses, and by default it is not", async (t) => {
+  const dir = tempDir(t)
+  const { repo, hookMarker } = checkoutWithHookAndMonitor(dir)
+  const custom = join(dir, 'custom-hooks')
+  mkdirSync(custom)
+  writeFileSync(join(custom, 'post-checkout'), `#!/bin/sh\ntouch "${hookMarker}"\n`)
+  chmodSync(join(custom, 'post-checkout'), 0o755)
+  rmSync(join(repo, '.git', 'hooks', 'post-checkout'))
+  git(['-C', repo, 'config', 'core.hooksPath', custom])
+
+  const kept = nodeEngine({ cwd: repo, env: GIT_ENV, gitHooks: 'repository' })
+  assert.equal((await kept.process.run(['git', 'worktree', 'add', '-q', join(dir, 'kept'), '-b', 'kept'])).exitCode, 0)
+  assert.equal(existsSync(hookMarker), true, 'the hook of the configured directory ran')
+  rmSync(hookMarker)
+
+  const off = nodeEngine({ cwd: repo, env: GIT_ENV })
+  assert.equal((await off.process.run(['git', 'worktree', 'add', '-q', join(dir, 'off'), '-b', 'off'])).exitCode, 0)
+  assert.equal(existsSync(hookMarker), false, 'the same directory stayed unrun by default')
+})
+
+test("with gitHooks 'repository', git adds only its fsmonitor pair after the entries the base environment already counts", async (t) => {
+  const dir = tempDir(t)
+  const repo = join(dir, 'repo')
+  git(['init', '-q', '-b', 'main', repo])
+  const $ = nodeEngine({
+    cwd: repo,
+    env: { ...GIT_ENV, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'from-the-base-env' },
+    gitHooks: 'repository',
+  })
+  assert.equal((await $.process.run(['git', 'config', '--get', 'user.name'])).stdout, 'from-the-base-env\n')
+  assert.equal((await $.process.run(['git', 'config', '--get', 'core.fsmonitor'])).stdout, 'false\n')
+  assert.equal((await $.process.run(['git', 'config', '--get', 'core.hooksPath'])).exitCode, 1, 'core.hooksPath is not set')
+})
+
 test('a command that is not git gets no GIT_CONFIG_* variables from the shim', async () => {
   const $ = nodeEngine({ env: baseEnv() })
   const bare = await $.process.run(['env'])

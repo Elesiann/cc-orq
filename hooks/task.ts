@@ -4,12 +4,13 @@
 
 import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
+import { resolveCeiling } from './ceiling.ts'
 import { loadConfig, MAX_WAIT_SECONDS, type OrqConfig } from './config.ts'
 import { isFailure } from './contract.ts'
 import { composeAnswer, jobLiveness, launchTaskFromHeader, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
 import { parentRuntimeModeFromPermissionMode } from './target.ts'
-import { formatDuration, isRecord, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
+import { formatDuration, isRecord, refusalText, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -132,7 +133,7 @@ async function readMessages($: TaskEngine, agentId: string): Promise<{ role: str
   }
 }
 
-/** Read the header and the spawn's permission ceiling, then launch. Every refusal is text. */
+/** Read the header, hold it to the ceiling that the config and the spawn's permission mode set, then launch. Every refusal is text. */
 async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string): Promise<TaskRun> {
   const text = firstUserText(await readMessages($, agentId))
   if (text === undefined) return { refusal: `${TASK_REFUSAL}: its prompt could not be read.` }
@@ -142,12 +143,14 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (spawnMode === undefined) {
     await $.ui.log(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`, { to: 'debug' })
   }
-  const launched = await launchTaskFromHeader($, config, {
-    agentId,
-    header,
-    ceiling: parentRuntimeModeFromPermissionMode(spawnMode),
-    sessionDir: await sessionCwd($),
+  const { effective, refusal } = resolveCeiling({
+    config: config.ceiling,
+    session: parentRuntimeModeFromPermissionMode(spawnMode),
+    isolation: header.isolation,
+    request: { runtimeMode: header.runtimeMode, interactionMode: header.interactionMode },
   })
+  if (refusal !== null) return { refusal: refusalText(refusal) }
+  const launched = await launchTaskFromHeader($, config, { agentId, header, ceiling: effective, sessionDir: await sessionCwd($) })
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }
 

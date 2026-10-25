@@ -53,6 +53,11 @@ type State = {
   lockExit: number
   /** The exit code the aside script answers with; when it is not 0 the lock stays where it is. */
   asideExit: number
+  /** The exit code the mutex script answers with: 1 means another launcher holds the mutex and does not let go in time. */
+  mutexExit: number
+  /** The Nth touch script, counted from 1, answers 7 after its owner check; 0 means none does. */
+  failTouchAt: number
+  touchCount: number
   /** Jobs whose supervisor has not written its pgid yet. */
   noPgid: Set<string>
   /** Paths that are symlinks, each with the real path fs.stat resolves it to. */
@@ -64,6 +69,8 @@ type State = {
   onMutex: (() => void) | null
   /** Runs when a file is read, with its path: a slow disk, or another launcher acting during the scan. */
   onRead: ((path: string) => void) | null
+  /** Runs after a file is written, with its path: a slow disk, or another launcher acting while the job files are written. */
+  onWrite: ((path: string) => void) | null
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -90,12 +97,16 @@ function fresh(o: Partial<State> = {}): State {
     locks: new Map(),
     lockExit: 0,
     asideExit: 0,
+    mutexExit: 0,
+    failTouchAt: 0,
+    touchCount: 0,
     noPgid: new Set(),
     realPaths: new Map(),
     events: [],
     onStart: null,
     onMutex: null,
     onRead: null,
+    onWrite: null,
     ...o,
   }
 }
@@ -128,6 +139,7 @@ function stubs(on: any, s: State) {
     s.events.push(`write ${String(e.path).split('/').pop()}`)
     s.writes.push({ path: e.path, text: e.text })
     s.files.set(e.path, e.text)
+    s.onWrite?.(String(e.path))
     return { value: undefined }
   })
   on('fs.list', (_$: unknown, e: any) => {
@@ -189,11 +201,16 @@ function runLockScript(s: State, script: string): number {
     s.files.set(`${dir}/owner`, `${owner}\n`)
     s.mtimes.set(dir, s.now)
   }
-  if (action === 'mutex') s.onMutex?.()
+  if (action === 'mutex') {
+    s.onMutex?.()
+    if (s.mutexExit !== 0) return s.mutexExit
+  }
   if (action === 'touch') {
     const dir = /touch -c (\S+) /.exec(script)?.[1] ?? ''
     const owner = /= (\S+) \] \|\| exit/.exec(script)?.[1] ?? ''
     if (s.locks.get(dir) !== owner) return 3
+    s.touchCount += 1
+    if (s.failTouchAt === s.touchCount) return 7
     s.mtimes.set(dir, s.now)
   }
   if (action === 'aside') {
@@ -826,7 +843,7 @@ test('a job in a subdirectory of the launch\'s own spelling of a symlinked check
   expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-deep')
 })
 
-test('a launch that scans for a long time keeps its lock younger than the grace, and touches it once more before meta.json', async ($, on) => {
+test('a launch that scans for a long time keeps its lock younger than the grace, and touches it again before meta.json and before the start', async ($, on) => {
   const s = fresh({ now: 2000000, locking: true })
   s.dirEntries = Array.from({ length: 12 }, (_, i) => ({ name: `job-${i}`, kind: 'dir' }))
   for (const entry of s.dirEntries) seedJob(s, entry.name, { cwd: '/elsewhere' })
@@ -841,8 +858,8 @@ test('a launch that scans for a long time keeps its lock younger than the grace,
   launchedId(await orq($, LAUNCH))
   expect(lockAges.length).toBe(12)
   expect(Math.max(...lockAges)).toBeLessThan(LAUNCH_GRACE_MS)
-  const lastSteps = s.events.filter((step) => step === 'lock touch' || step === 'write meta.json')
-  expect(lastSteps.slice(-2)).toEqual(['lock touch', 'write meta.json'])
+  const lastSteps = s.events.filter((step) => step === 'lock touch' || step === 'write meta.json' || step === 'start')
+  expect(lastSteps.slice(-4)).toEqual(['lock touch', 'write meta.json', 'lock touch', 'start'])
 })
 
 test('a launch whose lock was broken and taken during its scan refuses before it writes a job, and leaves the new lock', async ($, on) => {
@@ -860,6 +877,62 @@ test('a launch whose lock was broken and taken during its scan refuses before it
   expect(s.locks.get(WORK_LOCK)).toBe('job-taker')
   expect(s.events.includes('lock aside')).toBe(false)
   expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('a launch whose lock was broken and taken while it wrote its job files refuses before it starts, and leaves the new lock', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.onWrite = (path) => {
+    if (path.endsWith('/prompt.txt')) takeLock(s, 'job-taker')
+  }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.events.includes('start')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
+  expect(s.locks.get(WORK_LOCK)).toBe('job-taker')
+  expect(s.events.includes('lock aside')).toBe(false)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('the two final checks hold the mutex around the touch, so a break cannot come between its owner check and its touch', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  stubs(on, s)
+  await start($)
+  launchedId(await orq($, LAUNCH))
+  const steps = s.events.filter((step) => /^lock (mutex|touch|unmutex)$/.test(step) || step === 'write meta.json' || step === 'start')
+  expect(steps).toEqual(['lock mutex', 'lock touch', 'lock unmutex', 'write meta.json', 'lock mutex', 'lock touch', 'lock unmutex', 'start'])
+})
+
+test('a launch whose check before meta.json does not succeed writes no job and starts nothing, and a refusal says the lock was lost', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, failTouchAt: 1 })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.events.includes('write meta.json')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+  expect(s.locks.size).toBe(0)
+})
+
+test('a launch whose check before the start script does not succeed starts nothing, and gives its lock back', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, failTouchAt: 2 })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.events.includes('write meta.json')).toBe(true)
+  expect(s.events.includes('start')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+  expect(s.locks.size).toBe(0)
+})
+
+test('a launch whose final check cannot take the mutex counts that as a failed check, and starts nothing', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, mutexExit: 1 })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.events.includes('write meta.json')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
 })
 
 test('a launch that finds a live job in its directory gives its lock back before it refuses', async ($, on) => {

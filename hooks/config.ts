@@ -1,3 +1,4 @@
+import { defaultCeilingConfig, parseCeilingConfig, type CeilingConfig } from './ceiling.ts'
 import type { CoreEngine } from './engine.ts'
 
 export type DriverKind = 'codex' | 'opencode' | 'antigravity' | 'claudeAgent'
@@ -11,12 +12,18 @@ export type InstanceConfig = {
 /** The longest a wait call blocks: the engine aborts a subagent silent for 600 s, so each wait stays well under it. */
 export const MAX_WAIT_SECONDS = 240
 
+/** `run` has `integrate` run the checkout's git hooks as they are; `off`, and anything the config says that is not `run`, runs none. */
+export type IntegrateGitHooks = 'off' | 'run'
+
 export type OrqConfig = {
   jobsDir: string
   instances: InstanceConfig[]
   waitSeconds: number
   /** Absolute directories, besides the session's own, that a cc-orq:task may run in. */
   allowedRoots: string[]
+  integrate: { gitHooks: IntegrateGitHooks }
+  /** The most a task may run as. The session's permission mode can lower it, never raise it. */
+  ceiling: CeilingConfig
 }
 
 export const CONFIG_PATH = '.config/orq/config.json'
@@ -35,6 +42,8 @@ export function defaultConfig(home: string): OrqConfig {
     instances: DEFAULT_INSTANCES.map((i) => ({ ...i })),
     waitSeconds: 120,
     allowedRoots: [],
+    integrate: { gitHooks: 'off' },
+    ceiling: defaultCeilingConfig(),
   }
 }
 
@@ -81,6 +90,20 @@ export function parseConfig(text: string | null, home: string): ParsedConfig {
     const w = typeof obj.waitSeconds === 'number' && Number.isFinite(obj.waitSeconds) ? Math.floor(obj.waitSeconds) : Number.NaN
     if (w >= 10 && w <= MAX_WAIT_SECONDS) config.waitSeconds = w
     else warnings.push(`waitSeconds must be a number between 10 and ${MAX_WAIT_SECONDS}, keeping the default`)
+  }
+  if (obj.integrate !== undefined) {
+    if (typeof obj.integrate !== 'object' || obj.integrate === null || Array.isArray(obj.integrate)) {
+      warnings.push('integrate must be an object, keeping git hooks off')
+    } else {
+      const gitHooks = (obj.integrate as Record<string, unknown>).gitHooks
+      if (gitHooks === 'run') config.integrate = { gitHooks: 'run' }
+      else if (gitHooks !== undefined && gitHooks !== 'off') warnings.push('integrate.gitHooks must be "run" or "off", keeping git hooks off')
+    }
+  }
+  if (obj.ceiling !== undefined) {
+    const parsed = parseCeilingConfig(obj.ceiling)
+    config.ceiling = parsed.ceiling
+    warnings.push(...parsed.warnings)
   }
   if (obj.instances !== undefined) {
     if (!Array.isArray(obj.instances)) {

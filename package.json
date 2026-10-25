@@ -12,6 +12,7 @@
     "test:plugin": "claude plugin test .",
     "test:shell": "bash tests/runners-shell.sh",
     "test:integrate": "bash tests/integrate-shell.sh",
+    "test:live": "bash tests/live/run.sh",
     "validate": "claude plugin validate . --strict"
   },
   "devDependencies": {
