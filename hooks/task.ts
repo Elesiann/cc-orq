@@ -4,19 +4,13 @@
 
 import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
+import { resolveCeiling } from './ceiling.ts'
 import { loadConfig, MAX_WAIT_SECONDS, type OrqConfig } from './config.ts'
-import { fail, isFailure, type Failure } from './contract.ts'
-import { composeAnswer, jobLiveness, launchTaskJob, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
+import { isFailure } from './contract.ts'
+import { composeAnswer, jobLiveness, launchTaskFromHeader, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
-import {
-  appliedEffort,
-  effortFlag,
-  parentRuntimeModeFromPermissionMode,
-  resolveTarget,
-  runnerPolicy,
-  taskPrompt,
-} from './target.ts'
-import { formatDuration, isRecord, isWithin, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
+import { parentRuntimeModeFromPermissionMode } from './target.ts'
+import { formatDuration, isRecord, refusalText, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -33,11 +27,19 @@ const WAIT_SCHEMA = {
   required: ['job'],
   additionalProperties: false,
 }
+// Everything the parent needs to start a task and handle its answer. The guidance for the orq tools is the MCP
+// server's instructions (server/instructions.md), so it is not repeated here.
 const TASK_AGENT_DESCRIPTION =
   'Runs one self-contained task on a configured orq instance (Codex, OpenCode, Antigravity or Claude) in the background. ' +
-  'The prompt starts with two required header lines, `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]` and ' +
-  '`cwd: /absolute/path`, then optionally `isolation: worktree | shared` (default worktree: a new branch in its own git worktree, so cwd must be in a git checkout) and `role: implementation | research | review | design | test | general`, ' +
-  'then the task. runtime and interaction can narrow the session, never widen it. The answer arrives when the job ends.'
+  'Spawn it with `run_in_background: true`. The child gets no history, so the prompt carries the whole brief: the goal, the files it may touch, and the check that shows it worked. ' +
+  'The prompt starts with header lines, in any order. Required: `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]` ' +
+  '(runtime and interaction can narrow the session, never widen it) and `cwd: /absolute/path` (inside the session directory or an allowed root). ' +
+  'Optional: `isolation: worktree | shared` (default worktree: a new branch in its own git worktree, so cwd must be in a git checkout; use shared only for a task that edits nothing) ' +
+  'and `role: implementation | research | review | design | test | general`. ' +
+  "Never pass the Agent tool's own `isolation` option. " +
+  'After spawning, end the turn and do not poll: the answer arrives when the job ends, and its footer carries `taskId <id>`. ' +
+  'A handback that starts `BLOCKED on a question` is answered with the `answer` tool, which resumes the same worker in a new job: settle the question yourself when the brief and the conversation do, and ask the user when they do not. ' +
+  'A review round is a new task too, run by a different model family than the implementer.'
 const ONE_LINE_PROMPT =
   'An orq runner: the orq plugin serves your steps and runs your task on the external CLI its target line names. Call mcp__cc-orq__wait with the job id until the job finishes.'
 
@@ -105,54 +107,12 @@ async function handbackPermissionMode($: TaskEngine, agentId: string): Promise<s
   }
 }
 
-/** A path with its symlinks resolved through realpath: -e needs the path to exist, -m does not. Null when refused. */
-async function resolvePath($: TaskEngine, path: string, mode: '-e' | '-m'): Promise<string | null> {
+async function sessionCwd($: TaskEngine): Promise<string> {
   try {
-    const r = await $.process.run(['realpath', mode, '--', path], { timeoutMs: 10000 })
-    const resolved = r.stdout.trim()
-    return r.exitCode === 0 && resolved.startsWith('/') ? resolved : null
+    return await $.session.cwd()
   } catch {
-    return null
+    return ''
   }
-}
-
-/** The session's directory and each allowedRoots entry, resolved through symlinks. An entry that cannot be resolved is left out. */
-async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
-  let session = ''
-  try {
-    session = await $.session.cwd()
-  } catch {
-    session = ''
-  }
-  const roots: string[] = []
-  for (const candidate of [session, ...config.allowedRoots]) {
-    if (candidate === '') continue
-    const resolved = await resolvePath($, candidate, '-m')
-    if (resolved !== null) roots.push(resolved)
-  }
-  return roots
-}
-
-/**
- * The directory a task runs in, resolved through symlinks. It must lie inside the session's directory or an
- * allowedRoots entry; a path that does not exist, or is not a directory, is refused too.
- */
-async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): Promise<{ cwd: string; roots: string[] } | { refusal: string }> {
-  const cwd = await resolvePath($, requested, '-e')
-  if (cwd === null) return { refusal: `${TASK_REFUSAL}: directory does not exist: ${requested}` }
-  const roots = await scopeRoots($, config)
-  if (!roots.some((root) => isWithin(cwd, root))) {
-    const named = roots.length > 0 ? roots.join(', ') : 'none'
-    return {
-      refusal: refusalText(fail('cwd_out_of_scope', `cwd ${cwd} is outside the session directory and the allowed roots (${named}).`)),
-    }
-  }
-  try {
-    if ((await $.fs.stat(cwd)).kind === 'dir') return { cwd, roots }
-  } catch {
-    /* reported below as not a directory */
-  }
-  return { refusal: `${TASK_REFUSAL}: not a directory: ${cwd}` }
 }
 
 function firstUserText(messages: { role: string; text: string }[]): string | undefined {
@@ -164,10 +124,6 @@ async function isTaskAgent($: TaskEngine, agentId: string): Promise<boolean> {
   return (await storeRead($, `task:${agentId}`)) === TASK_SUBAGENT
 }
 
-function refusalText(failure: Failure): string {
-  return `${TASK_REFUSAL}: ${failure.error.code}: ${failure.error.message}`
-}
-
 async function readMessages($: TaskEngine, agentId: string): Promise<{ role: string; text: string }[]> {
   try {
     const messages = await $.session.messages({ agentId })
@@ -177,7 +133,7 @@ async function readMessages($: TaskEngine, agentId: string): Promise<{ role: str
   }
 }
 
-/** Resolve the header against the ceiling and the configured instances, then launch. Every refusal is text. */
+/** Read the header, hold it to the ceiling that the config and the spawn's permission mode set, then launch. Every refusal is text. */
 async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string): Promise<TaskRun> {
   const text = firstUserText(await readMessages($, agentId))
   if (text === undefined) return { refusal: `${TASK_REFUSAL}: its prompt could not be read.` }
@@ -187,34 +143,14 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (spawnMode === undefined) {
     await $.ui.log(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`, { to: 'debug' })
   }
-  const ceiling = parentRuntimeModeFromPermissionMode(spawnMode)
-  const resolved = resolveTarget({
-    target: header.target,
-    instances: config.instances,
-    parentRuntimeMode: ceiling.runtimeMode,
-    parentInteractionMode: ceiling.interactionMode,
-    runtimeMode: header.runtimeMode ?? 'inherit',
-    interactionMode: header.interactionMode ?? 'inherit',
-  })
-  if (isFailure(resolved)) return { refusal: refusalText(resolved) }
-  const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
-  if (isFailure(policy)) return { refusal: refusalText(policy) }
-  const scoped = await scopedCwd($, config, header.cwd)
-  if ('refusal' in scoped) return scoped
-  const effort = appliedEffort(resolved.instance.driver, resolved.options)
-  const launched = await launchTaskJob($, config, {
-    agentId,
-    instance: resolved.instance,
-    model: resolved.model,
-    cwd: scoped.cwd,
-    prompt: taskPrompt(header.prompt, header.role),
-    flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
-    runtimeMode: resolved.runtimeMode,
-    interactionMode: resolved.interactionMode,
-    ...(effort !== undefined ? { effort } : {}),
+  const { effective, refusal } = resolveCeiling({
+    config: config.ceiling,
+    session: parentRuntimeModeFromPermissionMode(spawnMode),
     isolation: header.isolation,
-    scopeRoots: scoped.roots,
+    request: { runtimeMode: header.runtimeMode, interactionMode: header.interactionMode },
   })
+  if (refusal !== null) return { refusal: refusalText(refusal) }
+  const launched = await launchTaskFromHeader($, config, { agentId, header, ceiling: effective, sessionDir: await sessionCwd($) })
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }
 

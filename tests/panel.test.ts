@@ -1,13 +1,12 @@
 import { expect, mock, test, type TestBody } from 'claude-code/testing'
 import type { On, UiPane } from 'claude-code'
 
+import { renderEventLine, renderTail } from '../hooks/event-line.ts'
 import {
   PANEL_COMMAND,
   PANEL_ID,
   PANEL_TITLE,
   clearPanelSelection,
-  renderEventLine,
-  renderTail,
 } from '../hooks/panel.ts'
 
 type Kit = Parameters<TestBody>[0]
@@ -159,7 +158,7 @@ async function drawn($: Kit): Promise<string> {
   return text
 }
 
-function seedJob(s: State, id: string, startedAt: number): void {
+function seedJob(s: State, id: string, startedAt: number, extra: Record<string, unknown> = {}): void {
   s.dirEntries.push({ name: id, kind: 'dir' })
   s.files.set(
     `${JOBS}/${id}/meta.json`,
@@ -174,6 +173,7 @@ function seedJob(s: State, id: string, startedAt: number): void {
       model: 'fixture-model',
       instanceId: 'codex',
       driver: 'codex',
+      ...extra,
     }),
   )
 }
@@ -440,6 +440,24 @@ test('showing a job adds its live tail to the pane', async ($, on) => {
   expect(text.includes('— job-run')).toBe(true)
   expect(text.includes('msg hello there')).toBe(true)
   expect(s.opens.length).toBe(1)
+})
+
+test('the detail of a continuation names its parent, and the detail of any other job does not', async ($, on) => {
+  clearPanelSelection()
+  const s = fresh()
+  stubs(on, s)
+  mock.clock(on, { now: NOW })
+  seedJob(s, 'job-parent', T0)
+  seedJob(s, 'job-child', T0 + 1, { kind: 'mcp', parent: 'job-parent' })
+  await start($)
+  await panel($, 'show job-child')
+  const child = await drawn($)
+  expect(child.includes('— job-child')).toBe(true)
+  expect(child.includes('↳ continues job-parent')).toBe(true)
+  await panel($, 'show job-parent')
+  const parent = await drawn($)
+  expect(parent.includes('— job-parent')).toBe(true)
+  expect(parent.includes('continues')).toBe(false)
 })
 
 test('/orq-panel cancel writes the cancel file through writeCancel, and the job reads back as cancelling', async ($, on) => {

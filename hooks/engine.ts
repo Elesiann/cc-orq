@@ -1,9 +1,12 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation, TaskStatus, TaskStatusResult, WorkState } from './contract.ts'
-import { hasControlCharacters, plainArgument } from './target.ts'
+import { EFFORT_OPTION, fail, isFailure, type Failure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
+import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
+import { LAUNCH_GRACE_MS, claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
+import { scopedCwd } from './scope.ts'
+import type { TaskHeader } from './task-header.ts'
 import {
   DRIVER_RUNNER,
   buildFooter,
@@ -13,6 +16,7 @@ import {
   isSafeJobId,
   parseJobMeta,
   parseRolloutModelEffort,
+  refusalText,
   TASK_REFUSAL,
   rand36,
   shellWord,
@@ -23,9 +27,9 @@ import {
   GIT_TIMEOUT_MS,
   branchDeleteArgv,
   branchFor,
-  busyJob,
+  gitArgv,
   gitDetail,
-  type JobPlace,
+  NO_HOOKS,
   revParseHeadArgv,
   revParseToplevelArgv,
   WORKTREE_INCLUDE_DEADLINE_S,
@@ -37,11 +41,25 @@ import {
 
 export type Engine = Pick<EngineInterface, 'clock' | 'env' | 'fs' | 'plugin' | 'process' | 'session' | 'ui'>
 
+/** The part of `$` the job core calls: the mod passes its `$`, and the MCP server passes `server/node-engine.ts`. */
+export type CoreEngine = {
+  clock: Pick<EngineInterface['clock'], 'now'>
+  env: Pick<EngineInterface['env'], 'get'>
+  fs: Pick<EngineInterface['fs'], 'write' | 'list' | 'exists' | 'stat'> & { read: (path: string) => Promise<string> }
+  plugin: Pick<EngineInterface['plugin'], 'root'>
+  process: Pick<EngineInterface['process'], 'run'>
+  ui: Pick<EngineInterface['ui'], 'log'>
+}
+
 export const LIST_LIMIT = 50
 const PROCESS_TIMEOUT_MS = 30000
 
+/** Who answers a question the worker asks: the parent session, or the human through a form. */
+export type QuestionMode = 'parent' | 'human'
+
 export type LaunchSpec = {
   kind: string
+  reservedId?: string
   agentId: string
   runner: Runner
   model: string
@@ -56,13 +74,30 @@ export type LaunchSpec = {
   interactionMode?: InteractionMode
   /** The reasoning effort `flags` give the CLI, recorded for the answer's footer. */
   effort?: string
+  /** Recorded in meta.json for a job the server launches. */
+  questions?: QuestionMode
   /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
   isolation?: 'worktree'
   /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
   worktreeScope?: string[]
+  /** Set for a job that resumes the worker of another: `cwd` is that job's, and no worktree is made or removed for it. */
+  continuation?: Continuation
+}
+
+/** What a job that answers a question takes over from the job that asked it. */
+export type Continuation = {
+  parent: string
+  /** The session id of the worker, which the supervisor resumes. */
+  session: string
+  /** The worktree of the task, which the job keeps working in; absent for a task that ran in the checkout itself. */
+  worktree?: Pick<WorktreePlan, 'repo' | 'baseSha' | 'branch' | 'worktree'>
 }
 
 export type TaskLaunchSpec = {
+  /** The job kind: `task` for the cc-orq:task agent, which is the default, and `mcp` for the server's delegate. */
+  kind?: string
+  reservedId?: string
+  questions?: QuestionMode
   agentId: string
   instance: InstanceConfig
   model: string
@@ -84,7 +119,7 @@ export type WorktreePlan = { repo: string; toplevel: string; baseSha: string; br
 
 export type WorktreeResult = { plan: WorktreePlan } | { failure: GitFailure }
 
-async function readText($: Engine, path: string): Promise<string | null> {
+async function readText($: CoreEngine, path: string): Promise<string | null> {
   try {
     return await $.fs.read(path)
   } catch {
@@ -92,7 +127,7 @@ async function readText($: Engine, path: string): Promise<string | null> {
   }
 }
 
-async function isDirectory($: Engine, path: string): Promise<boolean> {
+async function isDirectory($: CoreEngine, path: string): Promise<boolean> {
   try {
     return (await $.fs.stat(path)).kind === 'dir'
   } catch {
@@ -101,12 +136,12 @@ async function isDirectory($: Engine, path: string): Promise<boolean> {
 }
 
 /** The question a job wrote to question.txt, trimmed; null when the file is missing or blank. */
-async function readQuestion($: Engine, job: JobRecord): Promise<string | null> {
+export async function readQuestion($: CoreEngine, job: JobRecord): Promise<string | null> {
   const text = ((await readText($, `${job.dir}/${QUESTION_FILE}`)) ?? '').trim()
   return text === '' ? null : text
 }
 
-async function exists($: Engine, path: string): Promise<boolean> {
+async function exists($: CoreEngine, path: string): Promise<boolean> {
   try {
     return await $.fs.exists(path)
   } catch {
@@ -120,12 +155,12 @@ export function cancelText(reason?: string): string {
   return `cancelled at ${new Date().toISOString()}${why ? ` why=${JSON.stringify(why)}` : ''}\n`
 }
 
-export async function writeCancel($: Engine, job: JobRecord, reason?: string): Promise<void> {
+export async function writeCancel($: CoreEngine, job: JobRecord, reason?: string): Promise<void> {
   await $.fs.write(`${job.dir}/cancel`, cancelText(reason))
 }
 
 /** Read one job's meta.json. Unsafe ids and unreadable or incomplete metadata give null. */
-export async function readMeta($: Engine, jobsDir: string, id: string): Promise<JobRecord | null> {
+export async function readMeta($: CoreEngine, jobsDir: string, id: string): Promise<JobRecord | null> {
   if (!isSafeJobId(id)) return null
   const raw = await readText($, `${jobsDir}/${id}/meta.json`)
   if (raw === null) return null
@@ -137,7 +172,7 @@ export async function readMeta($: Engine, jobsDir: string, id: string): Promise<
 }
 
 /** The jobs in the directory, newest first, at most LIST_LIMIT. */
-export async function listJobs($: Engine, jobsDir: string): Promise<JobRecord[]> {
+export async function listJobs($: CoreEngine, jobsDir: string): Promise<JobRecord[]> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
@@ -153,7 +188,7 @@ export async function listJobs($: Engine, jobsDir: string): Promise<JobRecord[]>
     .slice(0, LIST_LIMIT)
 }
 
-async function mtimeMs($: Engine, path: string): Promise<number | null> {
+async function mtimeMs($: CoreEngine, path: string): Promise<number | null> {
   try {
     return (await $.fs.stat(path)).mtimeMs
   } catch {
@@ -182,7 +217,7 @@ export type Finished = {
  * done only when the exit is 0, last.txt holds a non-empty message, and the extractor reports no
  * error; anything else is failed.
  */
-export async function finishedOutcome($: Engine, job: JobRecord, exitText: string | null): Promise<Finished> {
+export async function finishedOutcome($: CoreEngine, job: JobRecord, exitText: string | null): Promise<Finished> {
   const exitCode = parseExit(exitText)
   const endedAt = await mtimeMs($, `${job.dir}/exit`)
   if (exitCode === 124) return { status: 'cancelled', exitCode, endedAt, lastText: '', summary: null, question: null }
@@ -203,7 +238,7 @@ export type JobView =
   | { status: 'running' | 'cancelling' | 'interrupted' | 'waiting'; endedAt: null }
   | Finished
 
-export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
+export async function jobView($: CoreEngine, job: JobRecord): Promise<JobView> {
   const exit = await readText($, `${job.dir}/exit`)
   if (exit !== null) return finishedOutcome($, job, exit)
   const liveness = await jobLiveness($, job)
@@ -220,8 +255,15 @@ function mkdirScript(jobsDir: string, dir: string): string {
 }
 
 /**
+ * Stands in for `setsid` where the binary is missing, as on macOS. Python starts with SIGPIPE and SIGXFSZ
+ * ignored, and an exec keeps an ignored signal ignored, so both go back to their defaults before the exec.
+ */
+const PYTHON_SETSID =
+  'import os, signal, sys; signal.signal(signal.SIGPIPE, signal.SIG_DFL); signal.signal(signal.SIGXFSZ, signal.SIG_DFL); os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])'
+
+/**
  * Start script for one job. The instance env is passed as --setenv for the
- * systemd unit and as `env K=V` for the setsid fallback, so both reach the CLI.
+ * systemd unit and as `env K=V` for the setsid launchers, so both reach the CLI.
  */
 export function startScript(args: {
   id: string
@@ -238,20 +280,23 @@ export function startScript(args: {
   const pairs = Object.entries(env).map(([k, v]) => shellWord(`${k}=${v}`))
   const setenv = pairs.map((pair) => `--setenv=${pair}`).join(' ')
   const envAssign = pairs.join(' ')
+  const scope = shellWord(`${args.dir}/scope`)
   // A job in the caller's cgroup dies with the terminal or session that launched it; a transient user
   // unit gets its own, and stopping it also reaps children that escaped the process group. setsid is
   // the fallback when no user manager is reachable.
   return (
     `# orq:start\n` +
     `if systemd-run --user --quiet --collect --unit=${shellWord(`orq-${args.id}`)} --setenv=PATH="$PATH" --setenv=HOME="$HOME" ${setenv} ` +
-    `bash -c ${shellWord(`exec ${supervisorCmd}`)} 2>/dev/null; then echo systemd > ${shellWord(`${args.dir}/scope`)}; ` +
-    `else echo setsid > ${shellWord(`${args.dir}/scope`)}; setsid env ${envAssign} ${supervisorCmd} & fi\n` +
+    `bash -c ${shellWord(`exec ${supervisorCmd}`)} 2>/dev/null; then echo systemd > ${scope}\n` +
+    `elif command -v setsid >/dev/null 2>&1; then echo setsid > ${scope}; setsid env ${envAssign} ${supervisorCmd} &\n` +
+    `else echo python-setsid > ${scope}; python3 -I -c ${shellWord(PYTHON_SETSID)} env ${envAssign} ${supervisorCmd} &\n` +
+    `fi\n` +
     `for i in $(seq 1 10); do [ -s ${shellWord(`${args.dir}/pgid`)} ] && exit 0; sleep 0.5; done\n` +
     `exit 11`
   )
 }
 
-async function markLaunchFailed($: Engine, dir: string): Promise<void> {
+async function markLaunchFailed($: CoreEngine, dir: string): Promise<void> {
   try {
     await $.fs.write(`${dir}/exit`, '125')
   } catch {
@@ -259,7 +304,7 @@ async function markLaunchFailed($: Engine, dir: string): Promise<void> {
   }
 }
 
-async function debugLog($: Engine, text: string): Promise<void> {
+async function debugLog($: CoreEngine, text: string): Promise<void> {
   try {
     await $.ui.log(text, { to: 'debug' })
   } catch {
@@ -271,7 +316,7 @@ async function debugLog($: Engine, text: string): Promise<void> {
  * Best effort after a launch failed once its worktree existed: remove the worktree, then its branch.
  * A failed undo goes to the debug log, and the refusal still names the launch's own failure.
  */
-async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
+async function unwindWorktree($: CoreEngine, plan: WorktreePlan): Promise<void> {
   const undo: [string, string[]][] = [
     ['remove the worktree', worktreeRemoveArgv(plan.repo, plan.worktree)],
     ['delete the branch', branchDeleteArgv(plan.repo, plan.branch)],
@@ -288,37 +333,58 @@ async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
 }
 
 /**
- * The id of a live job that runs in `path` or is a worktree of the checkout `path`, or null. A job is live
- * while its supervisor runs. Only the jobs that hold the path are asked, so a launch does not check every job
- * in the directory. It reads the job directory rather than memory, so it holds across sessions.
+ * The id of a live job that runs inside `checkout` or is a worktree of it, or null. A job is live while its
+ * supervisor runs. The lock covers the jobs that claimed one; this covers the rest, the jobs 0.1 launched and
+ * the worktree jobs, and it reads the job directory rather than memory, so it holds across sessions. A job
+ * stores the path its launch was given, so `spelling`, the path of this launch, finds a job stored under a
+ * symlink that leads to the checkout, as 0.1 did. `rearm` runs before each job is read, so a scan of a large
+ * jobs directory can keep the launch's lock young.
  */
-export async function checkoutBusy($: Engine, jobsDir: string, path: string): Promise<string | null> {
+export async function checkoutBusy(
+  $: CoreEngine,
+  jobsDir: string,
+  checkout: Checkout,
+  launch: { spelling?: string; rearm?: () => Promise<unknown> } = {},
+): Promise<string | null> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
   } catch {
     return null
   }
-  const places: JobPlace[] = []
+  const roots = launch.spelling === undefined ? [checkout.key] : [checkout.key, launch.spelling]
+  // Outside a repository the directory itself is the checkout, so only a job in that very directory counts.
+  const holds = (path: string, root: string): boolean => (checkout.repository ? isWithin(path, root) : path === root)
+  const inside = (path: string | undefined): boolean => path !== undefined && roots.some((root) => holds(path, root))
   for (const entry of entries) {
     if (entry.kind !== 'dir') continue
+    await launch.rearm?.()
     const job = await readMeta($, jobsDir, entry.name)
-    if (job === null || (job.cwd !== path && job.repo !== path)) continue
-    places.push({
-      id: job.id,
-      cwd: job.cwd,
-      ...(job.repo !== undefined ? { repo: job.repo } : {}),
-      live: (await jobLiveness($, job)) === 'running',
-    })
+    if (job === null || !(inside(job.cwd) || inside(job.repo))) continue
+    if ((await jobLiveness($, job)) === 'running') return job.id
   }
-  return busyJob(places, path)
+  return null
+}
+
+/** Where the job that owns a lock stands: no exit file and no pgid yet is a launch that has not started its supervisor. */
+function ownerStateProbe($: CoreEngine, jobsDir: string): OwnerProbe {
+  return async (id) => {
+    const dir = `${jobsDir}/${id}`
+    if (await exists($, `${dir}/exit`)) return 'finished'
+    const pgid = ((await readText($, `${dir}/pgid`)) ?? '').trim()
+    return /^\d+$/.test(pgid) ? jobLiveness($, { dir }) : 'unstarted'
+  }
+}
+
+function busyRefusal(kind: string, cwd: string, owner: string | null): string {
+  return `orq: ${kind} refused: worktree_busy: ${cwd} is in use by ${owner === null ? 'a launch in progress' : `job ${owner}`}`
 }
 
 /**
  * Best effort: the script stages the copy beside the worktree and renames it in only when it is complete, so a
  * copy that fails leaves the worktree as git made it, which is what a checkout without .worktreeinclude gets.
  */
-async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: string): Promise<void> {
+async function copyWorktreeIncludes($: CoreEngine, toplevel: string, worktree: string): Promise<void> {
   const script = `${$.plugin.root}/scripts/worktree-include.py`
   try {
     const argv = ['python3', script, toplevel, worktree, String(WORKTREE_INCLUDE_DEADLINE_S)]
@@ -352,7 +418,7 @@ async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: strin
  * orq/TASK_ID, cut from the checkout's HEAD. Refuses, and creates nothing, when cwd is not a git
  * checkout. The path names the id the launch has just claimed, so no other job can hold it.
  */
-export async function prepareWorktree($: Engine, cwd: string, taskId: string, scope?: string[]): Promise<WorktreeResult> {
+export async function prepareWorktree($: CoreEngine, cwd: string, taskId: string, scope?: string[]): Promise<WorktreeResult> {
   try {
     const top = await $.process.run(revParseToplevelArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
     if (top.exitCode !== 0) {
@@ -404,13 +470,18 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string, sc
   }
 }
 
+export function newJobId(kind: string, now: number, agentId: string): string {
+  return `${kind}-${now}-${agentId.slice(-8)}-${rand36()}`
+}
+
 /** Create a job directory, write meta.json and prompt.txt, and start the supervisor detached. */
-export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
+export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
+  const resumed = spec.continuation
   const now = await $.clock.now()
   const supervise = `${$.plugin.root}/scripts/supervise.sh`
-  const agentSuffix = spec.agentId.slice(-8)
+  const ownerOf = ownerStateProbe($, config.jobsDir)
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const id = `${spec.kind}-${now}-${agentSuffix}-${rand36()}`
+    const id = spec.reservedId ?? newJobId(spec.kind, now, spec.agentId)
     const dir = `${config.jobsDir}/${id}`
     let mkdirCode: number
     try {
@@ -419,32 +490,44 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
     } catch (err) {
       return { refusal: `orq: ${spec.kind} could not create its job directory: ${String(err)}` }
     }
-    if (mkdirCode === 7 && attempt === 0) continue
+    if (mkdirCode === 7 && attempt === 0 && spec.reservedId === undefined) continue
     if (mkdirCode !== 0) {
       return { refusal: `orq: ${spec.kind} could not create its job directory (exit ${mkdirCode})` }
     }
     // The id is claimed by the mkdir, so the worktree path can name it. Nothing is created before the claim.
     let cwd = spec.cwd
     let plan: WorktreePlan | null = null
-    if (spec.isolation === 'worktree') {
+    let held: HeldLock | null = null
+    const abandon = async (refusal: string): Promise<LaunchResult> => {
+      await markLaunchFailed($, dir)
+      if (plan) await unwindWorktree($, plan)
+      if (held) await releaseLock($, held, ownerOf)
+      return { refusal }
+    }
+    if (resumed?.worktree !== undefined) {
+      // The worktree is the task's, and no other job runs in it, so there is nothing to create, lock or undo.
+    } else if (spec.isolation === 'worktree') {
       const prepared = await prepareWorktree($, spec.cwd, id, spec.worktreeScope)
       if ('failure' in prepared) {
-        await markLaunchFailed($, dir)
-        return { refusal: `orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}` }
+        return abandon(`orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}`)
       }
       plan = prepared.plan
       cwd = plan.workdir
     } else {
-      // A shared launch writes into its checkout, so a live job there, or in a worktree of it, refuses it.
-      const busy = await checkoutBusy($, config.jobsDir, spec.cwd)
-      if (busy !== null) {
-        await markLaunchFailed($, dir)
-        return { refusal: `orq: ${spec.kind} refused: worktree_busy: ${spec.cwd} is in use by job ${busy}` }
-      }
+      // The scan after the claim sees what holds no lock: jobs 0.1 launched, and worktree jobs.
+      const claim = await claimCheckout($, config.jobsDir, id, spec.cwd, ownerOf)
+      if (claim.kind === 'failed') return abandon(`orq: ${spec.kind} could not lock its checkout (${claim.detail})`)
+      if (claim.kind === 'busy') return abandon(busyRefusal(spec.kind, spec.cwd, claim.owner))
+      const lock = claim.held
+      held = lock
+      const busy = await checkoutBusy($, config.jobsDir, claim.checkout, { spelling: spec.cwd, rearm: () => rearmLock($, lock) })
+      if (busy !== null) return abandon(busyRefusal(spec.kind, spec.cwd, busy))
+      // A scan that outlasted the grace may have let another launcher break this lock and start its job.
+      if (!(await rearmLock($, lock, { force: true }))) return abandon(busyRefusal(spec.kind, spec.cwd, null))
     }
     const worktreeFields = plan
       ? { repo: plan.repo, baseSha: plan.baseSha, branch: plan.branch, worktree: plan.worktree }
-      : {}
+      : (resumed?.worktree ?? {})
     const startedAtIso = new Date(now).toISOString()
     const meta = {
       id,
@@ -461,6 +544,8 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
       ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+      ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
+      ...(resumed !== undefined ? { parent: resumed.parent } : {}),
       ...worktreeFields,
     }
     try {
@@ -469,10 +554,9 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       if (spec.flags !== undefined && spec.flags.length > 0) {
         await $.fs.write(`${dir}/flags`, spec.flags.map((flag) => `${flag}\n`).join(''))
       }
+      if (resumed !== undefined) await $.fs.write(`${dir}/resume`, `${resumed.session}\n`)
     } catch (err) {
-      await markLaunchFailed($, dir)
-      if (plan) await unwindWorktree($, plan)
-      return { refusal: `orq: ${spec.kind} could not write its job directory: ${String(err)}` }
+      return abandon(`orq: ${spec.kind} could not write its job directory: ${String(err)}`)
     }
     const script = startScript({
       id,
@@ -483,24 +567,21 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       model: spec.model,
       env: spec.env,
     })
+    // The job files above may have taken longer than the grace, so another launcher may have broken this lock since the last touch.
+    if (held && !(await rearmLock($, held, { force: true }))) return abandon(busyRefusal(spec.kind, spec.cwd, null))
     let startCode: number
     try {
       const r = await $.process.run(['bash', '-c', script], { timeoutMs: PROCESS_TIMEOUT_MS })
       startCode = r.exitCode
     } catch (err) {
-      await markLaunchFailed($, dir)
-      if (plan) await unwindWorktree($, plan)
-      return { refusal: `orq: ${spec.kind} could not start its job: ${String(err)}` }
+      return abandon(`orq: ${spec.kind} could not start its job: ${String(err)}`)
     }
     if (startCode !== 0) {
-      await markLaunchFailed($, dir)
-      if (plan) await unwindWorktree($, plan)
-      return {
-        refusal:
-          startCode === 11
-            ? `orq: ${spec.kind} failed to start (supervisor did not report within 5 s)`
-            : `orq: ${spec.kind} failed to start (exit ${startCode})`,
-      }
+      return abandon(
+        startCode === 11
+          ? `orq: ${spec.kind} failed to start (supervisor did not report within 5 s)`
+          : `orq: ${spec.kind} failed to start (exit ${startCode})`,
+      )
     }
     const pgid = ((await readText($, `${dir}/pgid`)) ?? '').trim()
     const job: JobRecord = {
@@ -517,6 +598,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
       driver: spec.driver,
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
       ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+      ...(resumed !== undefined ? { parent: resumed.parent } : {}),
       ...worktreeFields,
     }
     if (pgid) job.pgid = pgid
@@ -529,15 +611,17 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
  * Launch one cc-orq:task job. The model and each runner flag reach the CLI as one argv item, so a value
  * that could read as an option or span lines is refused before anything is written.
  */
-export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
+export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
   if (!plainArgument(spec.model)) {
     return { refusal: `${TASK_REFUSAL}: the model must be one word that does not start with "-" and has no control characters.` }
   }
   if (spec.flags.some((flag) => flag === '' || hasControlCharacters(flag))) {
     return { refusal: `${TASK_REFUSAL}: a runner flag is empty or contains a control character.` }
   }
+  const kind = spec.kind ?? 'task'
   const launched = await launchJob($, config, {
-    kind: 'task',
+    kind,
+    ...(spec.reservedId !== undefined ? { reservedId: spec.reservedId } : {}),
     agentId: spec.agentId,
     runner: DRIVER_RUNNER[spec.instance.driver],
     model: spec.model,
@@ -550,32 +634,110 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
     ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+    ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
     ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const, worktreeScope: spec.scopeRoots } : {}),
   })
   if (!('refusal' in launched)) return launched
   // launchJob words its refusals for any kind; a task's are answered as task refusals.
-  const refusal = launched.refusal.replace(/^orq: task (refused: )?/, `${TASK_REFUSAL}: `)
+  const own = `orq: ${kind} `
+  const refusal = launched.refusal.startsWith(own)
+    ? `${TASK_REFUSAL}: ${launched.refusal.slice(own.length).replace(/^refused: /, '')}`
+    : launched.refusal
   const hint = spec.isolation === 'worktree' && refusal.includes('not_a_repository')
     ? '. Pass `isolation: shared` to run the task in this directory as it is.'
     : ''
   return { refusal: refusal + hint }
 }
 
-/** finished | running | gone: the exit file, else the supervisor's process group. */
-export async function jobLiveness($: Engine, job: JobRecord): Promise<'finished' | 'running' | 'gone'> {
+export type TaskLaunchArgs = {
+  agentId: string
+  header: TaskHeader
+  ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+  sessionDir: string
+  kind?: string
+  reservedId?: string
+  questions?: QuestionMode
+}
+
+/** A refused header comes back as `{ refusal }`, not as a throw. */
+export async function planTaskLaunch($: CoreEngine, config: OrqConfig, args: TaskLaunchArgs): Promise<{ spec: TaskLaunchSpec } | { refusal: string }> {
+  const { agentId, header, ceiling, sessionDir, kind, reservedId, questions } = args
+  const resolved = resolveTarget({
+    target: header.target,
+    instances: config.instances,
+    parentRuntimeMode: ceiling.runtimeMode,
+    parentInteractionMode: ceiling.interactionMode,
+    runtimeMode: header.runtimeMode ?? 'inherit',
+    interactionMode: header.interactionMode ?? 'inherit',
+  })
+  if (isFailure(resolved)) return { refusal: refusalText(resolved) }
+  const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
+  if (isFailure(policy)) return { refusal: refusalText(policy) }
+  const scoped = await scopedCwd($, config, sessionDir, header.cwd)
+  if ('refusal' in scoped) return scoped
+  const effort = appliedEffort(resolved.instance.driver, resolved.options)
+  return {
+    spec: {
+      ...(kind !== undefined ? { kind } : {}),
+      ...(reservedId !== undefined ? { reservedId } : {}),
+      ...(questions !== undefined ? { questions } : {}),
+      agentId,
+      instance: resolved.instance,
+      model: resolved.model,
+      cwd: scoped.cwd,
+      prompt: taskPrompt(header.prompt, header.role),
+      flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
+      runtimeMode: resolved.runtimeMode,
+      interactionMode: resolved.interactionMode,
+      ...(effort !== undefined ? { effort } : {}),
+      isolation: header.isolation,
+      scopeRoots: scoped.roots,
+    },
+  }
+}
+
+export async function launchTaskFromHeader($: CoreEngine, config: OrqConfig, args: TaskLaunchArgs): Promise<LaunchResult> {
+  const planned = await planTaskLaunch($, config, args)
+  return 'refusal' in planned ? planned : launchTaskJob($, config, planned.spec)
+}
+
+/** finished | running | gone: the exit file, else the supervisor's process group. Rejects when the probe cannot run. */
+async function probeLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   if (await exists($, `${job.dir}/exit`)) return 'finished'
   const script =
     `# orq:liveness\npgid=$(cat ${shellWord(`${job.dir}/pgid`)} 2>/dev/null | tr -d ' \\t\\n')\n` +
     `case "$pgid" in ''|*[!0-9]*) exit 12 ;; esac\n` +
     `kill -0 -"$pgid" 2>/dev/null && exit 11\n` +
     `[ -e ${shellWord(`${job.dir}/exit`)} ] && exit 0 || exit 12`
+  const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
+  if (r.exitCode === 0) return 'finished'
+  if (r.exitCode === 11) return 'running'
+  return 'gone'
+}
+
+/** finished | running | gone: the exit file, else the supervisor's process group. A probe that cannot run counts as running. */
+export async function jobLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   try {
-    const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
-    if (r.exitCode === 0) return 'finished'
-    if (r.exitCode === 11) return 'running'
-    return 'gone'
+    return await probeLiveness($, job)
   } catch {
     return 'running'
+  }
+}
+
+/**
+ * Whether a job may still be working, for a caller that must not act under a live job. jobLiveness reads a job
+ * with no pgid yet as gone, though its supervisor is about to write one, and a probe that cannot run as running
+ * for good. Here a job younger than LAUNCH_GRACE_MS counts as running in both states, and an older one as gone.
+ */
+export async function jobIsLive($: CoreEngine, job: JobRecord): Promise<boolean> {
+  if (await exists($, `${job.dir}/exit`)) return false
+  const starting = (await $.clock.now()) - job.startedAt < LAUNCH_GRACE_MS
+  const pgid = ((await readText($, `${job.dir}/pgid`)) ?? '').trim()
+  if (!/^\d+$/.test(pgid)) return starting
+  try {
+    return (await probeLiveness($, job)) === 'running'
+  } catch {
+    return starting
   }
 }
 
@@ -593,7 +755,7 @@ function parseSummary(raw: unknown): StreamSummary | null {
 }
 
 /** Run scripts/extract.py over the job's events; null when extraction fails. */
-export async function summarizeEvents($: Engine, job: JobRecord, runner: Runner): Promise<StreamSummary | null> {
+export async function summarizeEvents($: CoreEngine, job: JobRecord, runner: Runner): Promise<StreamSummary | null> {
   try {
     const r = await $.process.run(
       ['python3', `${$.plugin.root}/scripts/extract.py`, `${job.dir}/events.jsonl`, runner],
@@ -608,7 +770,7 @@ export async function summarizeEvents($: Engine, job: JobRecord, runner: Runner)
 }
 
 /** The last 20 stderr lines of a job, redacted; empty when none can be read. */
-export async function stderrSnippet($: Engine, job: JobRecord): Promise<string> {
+export async function stderrSnippet($: CoreEngine, job: JobRecord): Promise<string> {
   try {
     const script = `# orq:stderr\ntail -n 20 ${shellWord(`${job.dir}/stderr.txt`)} 2>/dev/null; exit 0`
     const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
@@ -621,7 +783,7 @@ export async function stderrSnippet($: Engine, job: JobRecord): Promise<string> 
 
 /** Model and effort of a Codex job, read from its rollout under the instance's CODEX_HOME. */
 async function codexModelEffort(
-  $: Engine,
+  $: CoreEngine,
   config: OrqConfig,
   job: JobRecord,
   threadId: string,
@@ -654,16 +816,23 @@ export function notEndedText(id: string, status: 'running' | 'cancelling' | 'int
   return `orq: ${id} was interrupted: its supervisor is gone and it left no exit file`
 }
 
-/** The answer for a job that stopped on a question. The parent answers it in a new task, not in this one. */
-export function blockedText(id: string, question: string): string {
-  return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.`
+/**
+ * The answer for a job that stopped on a question. The parent answers it with the answer tool, which resumes the same worker
+ * in a new job, so this job's text stays as it is. A job that recorded no session cannot be resumed, and the old way, a new
+ * task with the brief and the answer, is the one left.
+ */
+export function blockedText(id: string, question: string, resumable: boolean): string {
+  const way = resumable
+    ? 'Answer it with the answer tool; the same worker resumes its session.'
+    : 'This worker cannot be resumed (it recorded no session), so answer it in a new delegate with the original brief plus the answer.'
+  return `BLOCKED on a question (taskId ${id}): ${question}\n\n${way}`
 }
 
-export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord): Promise<string> {
-  const view = await jobView($, job)
+export async function composeAnswer($: CoreEngine, config: OrqConfig, job: JobRecord, knownView?: JobView): Promise<string> {
+  const view = knownView ?? (await jobView($, job))
   if (!('exitCode' in view)) return notEndedText(job.id, view.status)
   if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
-  if (view.question !== null) return blockedText(job.id, view.question)
+  if (view.question !== null) return blockedText(job.id, view.question, (await readSession($, job)) !== null)
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return `orq: ${job.id} failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '')
@@ -741,11 +910,12 @@ function workStateOf(status: TaskStatus): WorkState {
 const INTERRUPTED_ERROR = 'its supervisor is gone and it left no exit file'
 
 /** One job as the task tools answer it, read from its directory alone. Null for an unknown or unsafe id. */
-export async function readJobStatus($: Engine, config: OrqConfig, jobId: string): Promise<TaskStatusResult | null> {
+export async function readJobStatus($: CoreEngine, config: OrqConfig, jobId: string): Promise<TaskStatusResult | null> {
   const job = await readMeta($, config.jobsDir, jobId)
   if (!job) return null
   const view = await jobView($, job)
   const status = taskStatusOf(view)
+  const next = await readNext($, job)
   const answer: TaskStatusResult = {
     taskId: job.id,
     status,
@@ -755,12 +925,273 @@ export async function readJobStatus($: Engine, config: OrqConfig, jobId: string)
     ...(job.instanceId ? { instanceId: job.instanceId } : {}),
     ...(job.model ? { model: job.model } : {}),
     ...(view.endedAt !== null ? { finishedAtIso: new Date(view.endedAt).toISOString() } : {}),
+    ...(job.parent !== undefined ? { parent: job.parent } : {}),
+    ...(next !== null ? { next: next.jobId } : {}),
   }
-  if (view.status === 'done') return { ...answer, result: view.question !== null ? blockedText(job.id, view.question) : view.lastText }
+  if (view.status === 'done') {
+    return { ...answer, result: view.question !== null ? blockedText(job.id, view.question, (await readSession($, job)) !== null) : view.lastText }
+  }
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return { ...answer, error: `failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '') }
   }
   if (view.status === 'interrupted') return { ...answer, error: INTERRUPTED_ERROR }
   return answer
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Answering a question: the same worker resumes its session in a new job, on the same branch.
+
+export type NextVia = 'form' | 'answer'
+
+/** `next` in a job directory: the job that took over the question of this one, and how it was answered. */
+export type Next = { jobId: string; via: NextVia }
+
+const NEXT_FILE = 'next'
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** The continuation that claimed this job's question; null when none did, or when the file cannot be read as one. */
+export async function readNext($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<Next | null> {
+  const raw = await readText($, `${job.dir}/${NEXT_FILE}`)
+  if (raw === null) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!isRecord(parsed) || typeof parsed.jobId !== 'string' || !isSafeJobId(parsed.jobId)) return null
+    const via = parsed.via === 'form' || parsed.via === 'answer' ? parsed.via : null
+    return via === null ? null : { jobId: parsed.jobId, via }
+  } catch {
+    return null
+  }
+}
+
+/** The session id the supervisor recorded for the worker of this job; null when it recorded none. */
+export async function readSession($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<string | null> {
+  const text = ((await readText($, `${job.dir}/session`)) ?? '').trim()
+  return SESSION_ID.test(text) ? text : null
+}
+
+export type Claim = { claimed: true } | { claimed: false; existing: Next | null }
+
+/**
+ * The one answer that may continue a job. `fs.write` cannot create a file only when it is absent, so the claim is a hard
+ * link: the content is written whole to a temporary file, and `ln` fails when `next` exists, so a reader never sees half of
+ * it and two answers at once cannot both win.
+ */
+export async function claimNext($: CoreEngine, job: Pick<JobRecord, 'dir'>, next: Next): Promise<Claim> {
+  const script =
+    `# orq:claim\ntmp=$(mktemp "$1/.next.XXXXXX") || exit 12\n` +
+    `printf '%s' "$2" > "$tmp" || { rm -f "$tmp"; exit 12; }\n` +
+    `if ln "$tmp" "$1/${NEXT_FILE}" 2>/dev/null; then rm -f "$tmp"; exit 0; fi\n` +
+    `rm -f "$tmp"\n[ -e "$1/${NEXT_FILE}" ] && exit 9\nexit 12`
+  const r = await $.process.run(['bash', '-c', script, 'orq-claim', job.dir, JSON.stringify(next)], { timeoutMs: PROCESS_TIMEOUT_MS })
+  if (r.exitCode === 0) return { claimed: true }
+  if (r.exitCode === 9) return { claimed: false, existing: await readNext($, job) }
+  throw new Error(`could not claim the question of ${job.dir} (exit ${r.exitCode})`)
+}
+
+/** Gives the claim back after a launch that did not start, so the question can be answered again. */
+async function releaseNext($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<void> {
+  try {
+    await $.process.run(['rm', '-f', `${job.dir}/${NEXT_FILE}`], { timeoutMs: PROCESS_TIMEOUT_MS })
+  } catch {
+    /* a claim that stays reads as answered; the refusal that follows names the launch's own failure */
+  }
+}
+
+export function alreadyAnswered(jobId: string, existing: Next | null): Failure {
+  return fail(
+    'already_answered',
+    existing === null
+      ? `the question of ${jobId} was answered a moment ago by another call`
+      : `the question of ${jobId} was already answered: its worker continues in taskId ${existing.jobId}, so read that one with status`,
+  )
+}
+
+/** What a continuation needs of the job it resumes, checked against the config as it is now. */
+export type ContinuationPlan = {
+  parent: JobRecord
+  session: string
+  instance: InstanceConfig
+  model: string
+  modes: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+  flags: string[]
+  /** `worktree` only for a worktree that git lists for the task; anything else runs, and is locked, as a shared task. */
+  isolation: TaskIsolation
+  /** The directory the task was asked to work in, resolved: the checkout of a worktree task, the directory itself of a shared one. */
+  requestCwd: string
+  /** Where the worker resumes: the resolved, checked directory, never the one meta.json names. */
+  cwd: string
+  worktree?: NonNullable<Continuation['worktree']>
+}
+
+/** The real path of a path that exists, with every link followed; null when it does not exist. No realpath command: macOS has none with -e. */
+async function realPath($: CoreEngine, path: string): Promise<string | null> {
+  try {
+    return (await $.fs.stat(path, { resolve: true })).realPath ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Whether the `next` claims of the server lead from job `from` to job `to`: the chain of answers that a task is. */
+async function chainReaches($: CoreEngine, jobsDir: string, from: string, to: string): Promise<boolean> {
+  let id = from
+  for (let hops = 0; hops < 64; hops += 1) {
+    if (id === to) return true
+    const next = await readNext($, { dir: `${jobsDir}/${id}` })
+    if (next === null) return false
+    id = next.jobId
+  }
+  return false
+}
+
+/** Whether a live job other than `except` works on this branch, as far as its meta.json says. */
+async function branchHeldByAnother($: CoreEngine, jobsDir: string, branch: string, except: string): Promise<boolean> {
+  let entries: { name: string; kind: string }[]
+  try {
+    entries = await $.fs.list(jobsDir)
+  } catch {
+    return false
+  }
+  for (const entry of entries) {
+    if (entry.kind !== 'dir' || entry.name === except) continue
+    const other = await readMeta($, jobsDir, entry.name)
+    if (other?.branch === branch && (await jobIsLive($, other))) return true
+  }
+  return false
+}
+
+type OwnWorktree = { fields: NonNullable<Continuation['worktree']>; cwd: string }
+
+/**
+ * The worktree of a job, when it is the one the server made for the task, and the directory to resume in. meta.json is the
+ * job's own file, and a worker that can write outside its directory can change it, so nothing in it is taken as it stands: the
+ * branch must be `orq/ID` of a job that does not run and whose `next` claims lead to this job (or of this job itself), the
+ * checkout git reports must lie in scope as a launch requires, the worktree must be the path that a launch computes for that
+ * ID, git must list it on that branch, and the directory must resolve, links followed, to where a launch from the recorded
+ * directory would have put it, inside the worktree. Anything else is not the task's own worktree, and the job runs, is scoped
+ * and is locked as a shared one.
+ */
+async function ownWorktree($: CoreEngine, config: OrqConfig, sessionDir: string, job: JobRecord): Promise<OwnWorktree | null> {
+  const { repo, baseSha, branch } = job
+  if (repo === undefined || baseSha === undefined || branch === undefined || job.worktree === undefined) return null
+  const rootId = branch.startsWith('orq/') ? branch.slice('orq/'.length) : ''
+  if (!isSafeJobId(rootId) || branchFor(rootId) !== branch) return null
+  try {
+    const top = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'rev-parse', '--show-toplevel'), { timeoutMs: GIT_TIMEOUT_MS })
+    if (top.exitCode !== 0) return null
+    const toplevel = await realPath($, top.stdout.trim())
+    const worktree = await realPath($, worktreePathFor(top.stdout.trim(), rootId))
+    if (toplevel === null || worktree === null || (await realPath($, job.worktree)) !== worktree) return null
+    if ('refusal' in (await scopedCwd($, config, sessionDir, toplevel))) return null
+    const listed = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'worktree', 'list', '--porcelain'), { timeoutMs: GIT_TIMEOUT_MS })
+    if (listed.exitCode !== 0) return null
+    let registered = false
+    for (const block of listed.stdout.split('\n\n')) {
+      const lines = block.split('\n')
+      const path = lines.find((line) => line.startsWith('worktree '))?.slice('worktree '.length)
+      if (path !== undefined && lines.includes(`branch refs/heads/${branch}`) && (await realPath($, path)) === worktree) registered = true
+    }
+    if (!registered) return null
+    const asked = await realPath($, repo)
+    if (asked === null) return null
+    const subdir = asked !== toplevel && isWithin(asked, toplevel) ? asked.slice(toplevel.length) : ''
+    const cwd = await realPath($, `${worktree}${subdir}`)
+    if (cwd === null || !isWithin(cwd, worktree) || (await realPath($, job.cwd)) !== cwd) return null
+    if (rootId !== job.id && !(await chainReaches($, config.jobsDir, rootId, job.id))) return null
+    if (await branchHeldByAnother($, config.jobsDir, branch, job.id)) return null
+    return { fields: { repo, baseSha, branch, worktree }, cwd }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether the worker of a job that stopped on a question can be resumed, and with what. The job must have recorded its
+ * session, its worker and its modes, its instance must still be the one it ran on (the session lives in that instance's
+ * CODEX_HOME), and its directory must still be there. The flags are the ones a launch at the same modes would write.
+ */
+export async function continuationPlan(
+  $: CoreEngine,
+  config: OrqConfig,
+  parent: JobRecord,
+  sessionDir: string,
+): Promise<{ plan: ContinuationPlan } | { failure: Failure }> {
+  const unavailable = (why: string): { failure: Failure } => ({
+    failure: fail('resume_unavailable', `${parent.id} cannot be resumed: ${why}. Delegate a new task that carries the brief and the answer instead.`),
+  })
+  const session = await readSession($, parent)
+  if (session === null) return unavailable('its worker left no session id')
+  const { driver, model, runtimeMode, interactionMode } = parent
+  if (driver === undefined || model === undefined || runtimeMode === undefined || interactionMode === undefined) {
+    return unavailable('the job did not record its worker or its permission modes')
+  }
+  const instance = config.instances.find((candidate) => candidate.id === parent.instanceId)
+  if (instance === undefined || instance.driver !== driver) return unavailable(`the instance ${parent.instanceId ?? 'it ran on'} is no longer configured as it was`)
+  if (instance.env?.CODEX_HOME !== parent.codexHome) return unavailable('the CODEX_HOME of its instance changed, so its session is not where the worker left it')
+  if (!plainArgument(model)) return unavailable('its model is not one word')
+  if (!(await isDirectory($, parent.cwd))) return unavailable(`its directory ${parent.cwd} is gone`)
+  const own = await ownWorktree($, config, sessionDir, parent)
+  // The scope is judged as a launch judges it: on the directory the task was asked to work in.
+  const scoped = await scopedCwd($, config, sessionDir, own === null ? parent.cwd : own.fields.repo)
+  if ('refusal' in scoped) {
+    const body = scoped.refusal.slice(`${TASK_REFUSAL}: `.length)
+    const outside = /^cwd_out_of_scope: ([\s\S]*)$/.exec(body)
+    return outside?.[1] !== undefined ? { failure: fail('cwd_out_of_scope', outside[1]) } : unavailable(body)
+  }
+  const policy = runnerPolicy(driver, runtimeMode, interactionMode)
+  if (isFailure(policy)) return unavailable(policy.error.message)
+  const effort = parent.effort === undefined ? [] : effortFlag(driver, [{ id: EFFORT_OPTION, value: parent.effort }])
+  return {
+    plan: {
+      parent,
+      session,
+      instance,
+      model,
+      modes: { runtimeMode, interactionMode },
+      flags: [...policy.flags, ...effort],
+      isolation: own === null ? 'shared' : 'worktree',
+      requestCwd: scoped.cwd,
+      cwd: own === null ? scoped.cwd : own.cwd,
+      ...(own !== null ? { worktree: own.fields } : {}),
+    },
+  }
+}
+
+export type ContinuationInput = { answer: string; via: NextVia; questions: QuestionMode; agentId: string; reservedId?: string }
+
+/**
+ * Claims the question and starts the continuation under the id the claim names: the worker resumes its session on the same
+ * branch, in the same directory, with the answer as its next message. A launch that does not start gives the claim back.
+ */
+export async function launchContinuation(
+  $: CoreEngine,
+  config: OrqConfig,
+  plan: ContinuationPlan,
+  input: ContinuationInput,
+): Promise<{ job: JobRecord } | { refusal: string } | { failure: Failure }> {
+  const { parent, session, instance, model, modes, flags, worktree } = plan
+  const id = input.reservedId ?? newJobId('mcp', await $.clock.now(), input.agentId)
+  const claim = await claimNext($, parent, { jobId: id, via: input.via })
+  if (!claim.claimed) return { failure: alreadyAnswered(parent.id, claim.existing) }
+  const launched = await launchJob($, config, {
+    kind: 'mcp',
+    reservedId: id,
+    agentId: input.agentId,
+    runner: DRIVER_RUNNER[instance.driver],
+    model,
+    cwd: plan.cwd,
+    prompt: taskPrompt(input.answer, undefined),
+    env: instance.env ?? {},
+    instanceId: instance.id,
+    driver: instance.driver,
+    flags,
+    runtimeMode: modes.runtimeMode,
+    interactionMode: modes.interactionMode,
+    ...(parent.effort !== undefined ? { effort: parent.effort } : {}),
+    questions: input.questions,
+    continuation: { parent: parent.id, session, ...(worktree !== undefined ? { worktree } : {}) },
+  })
+  if (!('job' in launched)) await releaseNext($, parent)
+  return launched
 }

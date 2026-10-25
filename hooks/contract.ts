@@ -93,7 +93,7 @@ export type CapabilitiesResult = {
 export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type WorkState = 'working' | 'waiting_for_children' | 'result_available'
 
-/** What `mcp__cc-orq__status` answers for one task, read from its job directory. */
+/** What `mcp__plugin_cc-orq_orq__status` answers for one task, read from its job directory. */
 export type TaskStatusResult = {
   taskId: string
   status: TaskStatus
@@ -107,6 +107,10 @@ export type TaskStatusResult = {
   result?: string
   /** Why a failed or interrupted task ended. */
   error?: string
+  /** The job whose question this one answers. */
+  parent?: string
+  /** The job that took over this job's question, once it was answered. */
+  next?: string
 }
 
 export type TaskCancelResult = { taskId: string; status: 'cancel_requested' }
@@ -133,12 +137,14 @@ export const FAILURE_CODES = [
   'worktree_busy',
   // No meta.json for the task id.
   'task_not_found',
-  // mcp__cc-orq__cancel on a task that has ended or is interrupted.
+  // mcp__plugin_cc-orq_orq__cancel on a task that has ended or is interrupted.
   'task_not_cancellable',
   // The capability probe found the provider unable to run a child task.
   'capability_denied',
   // The task ran without a worktree, so it has no branch to merge.
   'no_worktree',
+  // A live job still works on the task branch, the task's own job or one that took the branch over. Nothing was merged.
+  'task_running',
   // The destination checkout has uncommitted or untracked changes.
   'dirty_worktree',
   // The task branch is already reachable from HEAD.
@@ -147,8 +153,16 @@ export const FAILURE_CODES = [
   'not_fast_forward',
   // The merge stopped on conflicts. It was aborted; the answer lists the files.
   'merge_conflict',
+  // A git hook of the destination checkout refused the merge. A pending merge was aborted; the answer carries the hook's output.
+  'hook_failed',
   // git failed in a way no other code names.
   'git_failed',
+  // The answer tool named a job that already has a continuation; the message names it.
+  'already_answered',
+  // A question of questions: human whose form is still open, so the form is the way to answer it.
+  'awaiting_form',
+  // The job cannot be resumed: it has no recorded session, its instance changed, or its worktree is gone. The message says what to do instead.
+  'resume_unavailable',
 ] as const
 
 export type FailureCode = (typeof FAILURE_CODES)[number]
@@ -169,9 +183,8 @@ export function isFailure(value: unknown): value is Failure {
 /** The failure of a worktree or integrate step; integrate answers it as `{ ok: false, error }`. */
 export type GitFailure = { code: FailureCode; message: string; files?: string[] }
 
-/** The tool names and the input of `integrate`. */
+/** The name and the input of the `integrate` tool. */
 export const INTEGRATE_TOOL = 'integrate'
-export const INTEGRATE_TOOL_NAME = 'mcp__cc-orq__integrate'
 
 export const INTEGRATE_STRATEGIES = ['ff-only', 'merge'] as const
 export type IntegrateStrategy = (typeof INTEGRATE_STRATEGIES)[number]

@@ -79,6 +79,7 @@ function stubs(on: any, s: State) {
     if (argv[0] === 'python3') return result(1)
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) return result(0)
+    if (script.includes('# orq:lock')) return result(0)
     if (script.includes('# orq:start')) {
       s.startScripts.push(script)
       return result(0)
@@ -161,7 +162,7 @@ test('a job that wrote question.txt and has no exit is waiting, and a blank ques
   await start($)
   const lines = (await orq($, 'list')).split('\n')
   const rowOf = (id: string) => lines.find((l) => l.startsWith(id))?.split(/\s+/)
-  expect(rowOf('job-asked')).toEqual(['job-asked', 'manual', 'waiting', '10m', '/work'])
+  expect(rowOf('job-asked')).toEqual(['job-asked', 'manual', 'waiting', '10m', 'manual', '/work'])
   expect(rowOf('job-blank')?.[2]).toBe('running')
   expect(await orq($, 'result job-asked')).toBe('orq: job-asked is waiting for an answer to its question')
   expect(await orq($, 'cancel job-asked')).toBe('orq: cancel requested for job-asked')
@@ -193,13 +194,14 @@ test('a job that exits 0 after asking lists as done and composes the BLOCKED ans
   seedJob(s, 'job-asked', 4000000)
   s.files.set(`${JOBS}/job-asked/question.txt`, 'Use `main` or `release/1.x`? (see $ORQ_JOB_DIR)\n')
   s.files.set(`${JOBS}/job-asked/exit`, '0')
+  s.files.set(`${JOBS}/job-asked/session`, 'ses-asked\n')
   s.files.set(`${JOBS}/job-asked/last.txt`, 'BLOCKED: Use `main` or `release/1.x`?')
   stubs(on, s)
   await start($)
   expect(rowStatus(await orq($, 'list'), 'job-asked')).toBe('done')
   expect(await orq($, 'result job-asked')).toBe(
     'BLOCKED on a question (taskId job-asked): Use `main` or `release/1.x`? (see $ORQ_JOB_DIR)\n\n' +
-      'Answer it in a new cc-orq:task with the original brief plus the answer.',
+      'Answer it with the answer tool; the same worker resumes its session.',
   )
 })
 
@@ -214,7 +216,7 @@ test('a job that exits 0 after asking, with no last.txt, lists as done and answe
   expect(rowStatus(await orq($, 'list'), 'job-quiet')).toBe('done')
   expect(await orq($, 'result job-quiet')).toBe(
     'BLOCKED on a question (taskId job-quiet): Which database?\n\n' +
-      'Answer it in a new cc-orq:task with the original brief plus the answer.',
+      'This worker cannot be resumed (it recorded no session), so answer it in a new delegate with the original brief plus the answer.',
   )
 })
 

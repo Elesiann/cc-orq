@@ -1,19 +1,26 @@
 {
   "name": "cc-orq",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "T3 Code style orchestration surface for Claude Code",
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p .",
+    "typecheck": "tsc -p . && tsc -p server",
     "test": "node --test tests/pure/*.test.mjs",
+    "build:vendor": "node scripts/build-vendor.mjs",
     "test:plugin": "claude plugin test .",
     "test:shell": "bash tests/runners-shell.sh",
     "test:integrate": "bash tests/integrate-shell.sh",
-    "validate": "claude plugin validate . --strict"
+    "test:live": "bash tests/live/run.sh",
+    "validate": "claude plugin validate . --strict",
+    "check:links": "node scripts/check-links.mjs"
   },
   "devDependencies": {
+    "@modelcontextprotocol/ext-tasks": "0.2.2",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@types/node": "^22.20.5",
+    "esbuild": "0.28.2",
     "typescript": "^5.9.3"
   }
 }

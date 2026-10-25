@@ -4,16 +4,13 @@ import { registerEngine, registerOrqCommand } from './commands.ts'
 import { loadConfig } from './config.ts'
 import { registerPanel, registerPanelCommand, stopPanel } from './panel.ts'
 import { registerTask, registerTaskSurface } from './task.ts'
-import { declareIntegrateTool, registerIntegrate } from './integrate.ts'
-import { registerTools, startTools } from './tools.ts'
+import { logUnfinished } from './tools.ts'
 
 export const register: Register = (on, options) => {
   registerEngine(on)
   registerPanel(on)
   registerCard(on, options)
   registerTask(on)
-  registerIntegrate(on)
-  registerTools(on)
   on('session.start', async ($, e, next) => {
     try {
       const { config, source, warning } = await loadConfig($)
@@ -39,18 +36,9 @@ export const register: Register = (on, options) => {
     }
     try {
       await registerTaskSurface($)
+      await logUnfinished($, (await loadConfig($)).config)
     } catch (err) {
-      await $.ui.log(`orq: could not register cc-orq:task: ${String(err)}`, { to: 'debug' })
-    }
-    try {
-      await declareIntegrateTool($)
-    } catch (err) {
-      await $.ui.log(`orq: could not register the integrate tool: ${String(err)}`, { to: 'debug' })
-    }
-    try {
-      await startTools($, (await loadConfig($)).config)
-    } catch (err) {
-      await $.ui.log(`orq: could not declare the tools: ${String(err)}`, { to: 'debug' })
+      await $.ui.log(`orq: could not register cc-orq:task and log the unfinished jobs: ${String(err)}`, { to: 'debug' })
     }
     return next(e)
   })
