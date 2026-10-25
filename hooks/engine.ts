@@ -1025,6 +1025,18 @@ async function realPath($: CoreEngine, path: string): Promise<string | null> {
   }
 }
 
+/** Whether the `next` claims of the server lead from job `from` to job `to`: the chain of answers that a task is. */
+async function chainReaches($: CoreEngine, jobsDir: string, from: string, to: string): Promise<boolean> {
+  let id = from
+  for (let hops = 0; hops < 64; hops += 1) {
+    if (id === to) return true
+    const next = await readNext($, { dir: `${jobsDir}/${id}` })
+    if (next === null) return false
+    id = next.jobId
+  }
+  return false
+}
+
 /** Whether a live job other than `except` works on this branch, as far as its meta.json says. */
 async function branchHeldByAnother($: CoreEngine, jobsDir: string, branch: string, except: string): Promise<boolean> {
   let entries: { name: string; kind: string }[]
@@ -1046,12 +1058,13 @@ type OwnWorktree = { fields: NonNullable<Continuation['worktree']>; cwd: string 
 /**
  * The worktree of a job, when it is the one the server made for the task, and the directory to resume in. meta.json is the
  * job's own file, and a worker that can write outside its directory can change it, so nothing in it is taken as it stands: the
- * branch must be `orq/ID` of a job that exists and does not run, the worktree must be the path that a launch computes for that
- * ID from the checkout git reports, git must list it on that branch, and the directory must resolve, links followed, to where a
- * launch from the recorded directory would have put it. Anything else is not the task's own worktree, and the job runs, is
- * scoped and is locked as a shared one.
+ * branch must be `orq/ID` of a job that does not run and whose `next` claims lead to this job (or of this job itself), the
+ * checkout git reports must lie in scope as a launch requires, the worktree must be the path that a launch computes for that
+ * ID, git must list it on that branch, and the directory must resolve, links followed, to where a launch from the recorded
+ * directory would have put it, inside the worktree. Anything else is not the task's own worktree, and the job runs, is scoped
+ * and is locked as a shared one.
  */
-async function ownWorktree($: CoreEngine, config: OrqConfig, job: JobRecord): Promise<OwnWorktree | null> {
+async function ownWorktree($: CoreEngine, config: OrqConfig, sessionDir: string, job: JobRecord): Promise<OwnWorktree | null> {
   const { repo, baseSha, branch } = job
   if (repo === undefined || baseSha === undefined || branch === undefined || job.worktree === undefined) return null
   const rootId = branch.startsWith('orq/') ? branch.slice('orq/'.length) : ''
@@ -1062,6 +1075,7 @@ async function ownWorktree($: CoreEngine, config: OrqConfig, job: JobRecord): Pr
     const toplevel = await realPath($, top.stdout.trim())
     const worktree = await realPath($, worktreePathFor(top.stdout.trim(), rootId))
     if (toplevel === null || worktree === null || (await realPath($, job.worktree)) !== worktree) return null
+    if ('refusal' in (await scopedCwd($, config, sessionDir, toplevel))) return null
     const listed = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'worktree', 'list', '--porcelain'), { timeoutMs: GIT_TIMEOUT_MS })
     if (listed.exitCode !== 0) return null
     let registered = false
@@ -1075,8 +1089,8 @@ async function ownWorktree($: CoreEngine, config: OrqConfig, job: JobRecord): Pr
     if (asked === null) return null
     const subdir = asked !== toplevel && isWithin(asked, toplevel) ? asked.slice(toplevel.length) : ''
     const cwd = await realPath($, `${worktree}${subdir}`)
-    if (cwd === null || (await realPath($, job.cwd)) !== cwd) return null
-    if (rootId !== job.id && (await readMeta($, config.jobsDir, rootId)) === null) return null
+    if (cwd === null || !isWithin(cwd, worktree) || (await realPath($, job.cwd)) !== cwd) return null
+    if (rootId !== job.id && !(await chainReaches($, config.jobsDir, rootId, job.id))) return null
     if (await branchHeldByAnother($, config.jobsDir, branch, job.id)) return null
     return { fields: { repo, baseSha, branch, worktree }, cwd }
   } catch {
@@ -1109,7 +1123,7 @@ export async function continuationPlan(
   if (instance.env?.CODEX_HOME !== parent.codexHome) return unavailable('the CODEX_HOME of its instance changed, so its session is not where the worker left it')
   if (!plainArgument(model)) return unavailable('its model is not one word')
   if (!(await isDirectory($, parent.cwd))) return unavailable(`its directory ${parent.cwd} is gone`)
-  const own = await ownWorktree($, config, parent)
+  const own = await ownWorktree($, config, sessionDir, parent)
   // The scope is judged as a launch judges it: on the directory the task was asked to work in.
   const scoped = await scopedCwd($, config, sessionDir, own === null ? parent.cwd : own.fields.repo)
   if ('refusal' in scoped) {

@@ -2,7 +2,7 @@
 // the real server over stdio and a fake claude that asks on its first run and quotes what it is told when it is resumed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
@@ -310,6 +310,58 @@ test('a meta.json whose cwd or worktree points elsewhere does not move the worke
   await until(server, own.task.taskId)
   assert.equal(read(s, own.task.taskId, 'cwd.txt').trim(), realpathSync(first.worktree), 'it ran in the worktree the server made for the task')
   assert.equal(spawnSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).stdout, '', 'and the checkout is as it was')
+})
+
+test('a link inside the worktree that leads out of it does not take the resumed worker with it', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  mkdirSync(join(repo, 'sub'))
+  writeFileSync(join(repo, 'sub', 'keep.txt'), 'kept\n')
+  git(repo, ['add', 'sub/keep.txt'])
+  git(repo, ['commit', '-q', '-m', 'a subdirectory'])
+  const server = s.startIn(session)
+  const started = await server.call('delegate', REQUEST(join(repo, 'sub'), { sessionMode: 'acceptEdits' }))
+  const id = started.task.taskId
+  await until(server, id)
+  const first = meta(s, id)
+  assert.equal(first.cwd, join(first.worktree, 'sub'), 'the task ran in the subdirectory of its worktree')
+
+  const outside = join(s.root, 'outside')
+  mkdirSync(outside)
+  rmSync(first.cwd, { recursive: true, force: true })
+  symlinkSync(outside, first.cwd)
+  const escaped = await server.call('answer', { taskId: id, answer: 'Production.', sessionMode: 'acceptEdits' })
+  assert.equal(code(escaped), 'cwd_out_of_scope', 'the directory that the link leads to is outside the session directory')
+  assert.deepEqual(jobDirs(s).filter((dir) => existsSync(join(s.jobsDir, dir, 'argv.txt'))), [id], 'no worker was resumed there')
+  assert.equal(existsSync(join(s.jobsDir, id, 'next')), false)
+})
+
+test('a branch that meta.json names is the task\'s own only when the claims of the server lead from that task to this job', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = s.startIn(session)
+  const { id } = await asked(s, server, repo)
+  const first = meta(s, id)
+
+  const wt = join(session, 'repo-wt', 'job-other')
+  git(repo, ['worktree', 'add', '-q', wt, '-b', 'orq/job-other'])
+  job(s.jobsDir, 'job-other', { meta: { cwd: wt, repo, baseSha: first.baseSha, branch: 'orq/job-other', worktree: wt }, files: { exit: '0', 'last.txt': 'done' }, exitAt: SECOND + 4 })
+  writeFileSync(join(s.jobsDir, id, 'meta.json'), JSON.stringify({ ...first, cwd: wt, branch: 'orq/job-other', worktree: wt, runtimeMode: 'approval-required' }))
+  const forged = await server.call('answer', { taskId: id, answer: 'Production.', sessionMode: 'acceptEdits' })
+  assert.ok(forged.task !== undefined, forged.text)
+  await until(server, forged.task.taskId)
+  assert.equal(meta(s, forged.task.taskId).branch, undefined, 'the worker of another job\'s worktree runs as a shared task, with no branch of its own')
+
+  const again = await asked(s, server, repo)
+  const c1 = (await server.call('answer', { taskId: again.id, answer: 'Production.', sessionMode: 'acceptEdits' })).task.taskId
+  await until(server, c1)
+  writeFileSync(join(s.jobsDir, c1, 'question.txt'), 'Which tag?\n')
+  const c2 = (await server.call('answer', { taskId: c1, answer: 'v2.', sessionMode: 'acceptEdits' })).task.taskId
+  await until(server, c2)
+  assert.equal(meta(s, c2).branch, meta(s, again.id).branch, 'a task whose claims lead to this job keeps its branch through a second answer')
+  assert.equal(meta(s, c2).parent, c1)
 })
 
 test('a client without tasks gets the id of the continuation at once and reads it with status', async (t) => {
