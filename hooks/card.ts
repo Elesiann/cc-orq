@@ -2,7 +2,8 @@ import type { EngineInterface, On, PluginOptions, RenderElement, RenderInput, Se
 
 import { loadConfig } from './config.ts'
 import { listJobs, type Engine } from './engine.ts'
-import { cachedJobView, renderTail, tailEvents } from './panel.ts'
+import { renderTail } from './event-line.ts'
+import { cachedJobView, tailEvents } from './panel.ts'
 import type { OrqCardRow } from '../types/index'
 import { formatDuration, type JobRecord } from './types.ts'
 
