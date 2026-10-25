@@ -193,6 +193,7 @@ function capText(text: string): string {
 }
 
 const WHERE: Record<TaskIsolation, string> = { worktree: 'in its own worktree', shared: 'in your checkout itself (shared, no worktree)' }
+const WHERE_SHORT: Record<TaskIsolation, string> = { worktree: 'in its own worktree', shared: 'in your checkout itself' }
 
 const effectiveOf = (approval: Approval): Modes => (approval.session === null ? approval.config : lowerCeiling(approval.config, approval.session))
 
@@ -220,7 +221,11 @@ function exceeded(approval: Approval): { level: string; limit: string }[] {
   ]
 }
 
-/** Closed lists make the question, apart from three values that the model chose, which `shown` quotes. */
+/**
+ * Claude Code shows the first three lines of the message, collapses the rest, and cuts a field title at about 47
+ * characters, so the levels and the place come first and the limits go in the description. Closed lists make the
+ * question, apart from three values that the model chose, which `shown` quotes.
+ */
 function approvalRequest(approval: Approval): InputRequest {
   const above = exceeded(approval)
   return {
@@ -228,19 +233,17 @@ function approvalRequest(approval: Approval): InputRequest {
     params: {
       mode: 'form',
       message: [
-        'A task asks for more than your ceiling allows.',
-        `Worker: ${shown(approval.target)}, model ${shown(approval.model)}`,
-        `Directory: ${shown(approval.cwd)}`,
-        `Runs: ${WHERE[approval.isolation]}`,
-        `Asks for: ${above.map(({ level, limit }) => `${level}, above ${limit}`).join('; ')}`,
+        `A task asks for more than your ceiling allows: ${above.map(({ level }) => level).join(' and ')}.`,
+        `It runs ${WHERE[approval.isolation]}.`,
+        `Worker ${shown(approval.target)}, model ${shown(approval.model)}, directory ${shown(approval.cwd)}.`,
       ].join('\n'),
       requestedSchema: {
         type: 'object',
         properties: {
           [APPROVE]: {
             type: 'boolean',
-            title: `Allow runtime ${approval.launch.runtimeMode} and interaction ${approval.launch.interactionMode}, ${WHERE[approval.isolation]}, for this task only`,
-            description: `Above ${above.map(({ limit }) => limit).join('; ')}.`,
+            title: `Allow ${WHERE_SHORT[approval.isolation]}, this task only`,
+            description: `${above.map(({ level, limit }) => `${level} is above ${limit}`).join('; ')}.`,
             default: true,
           },
         },

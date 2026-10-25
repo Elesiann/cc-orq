@@ -168,9 +168,10 @@ test('a request above the ceiling opens a form: the task is created working, the
   assert.equal(open.status, 'input_required')
   assert.deepEqual(Object.keys(open.inputRequests), ['approve'])
   const lines = open.inputRequests.approve.params.message.split('\n')
-  assert.deepEqual(lines.slice(1, 4), ['Worker: "claudeAgent", model "haiku"', `Directory: "${repo}"`, 'Runs: in its own worktree'])
-  assert.match(lines[4], /^Asks for: runtime auto, above ceiling\.runtime auto-accept-edits and the session's permission mode approval-required$/)
-  assert.equal(open.inputRequests.approve.params.requestedSchema.properties.approve.title, 'Allow runtime auto and interaction default, in its own worktree, for this task only')
+  assert.deepEqual(lines, ['A task asks for more than your ceiling allows: runtime auto.', 'It runs in its own worktree.', `Worker "claudeAgent", model "haiku", directory "${repo}".`])
+  const field = open.inputRequests.approve.params.requestedSchema.properties.approve
+  assert.equal(field.title, 'Allow in its own worktree, this task only')
+  assert.equal(field.description, "runtime auto is above ceiling.runtime auto-accept-edits and the session's permission mode approval-required.")
   assert.deepEqual((await server.get(taskId)).inputRequests, open.inputRequests, 'the same key shows on the next poll until it is answered')
 
   const ack = await server.update(taskId, { approve: { action: 'accept', content: { approve: true } } })

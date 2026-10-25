@@ -169,25 +169,25 @@ test('a task with an approval and no answer is input_required, with one flat for
   assert.equal(
     params.message,
     [
-      'A task asks for more than your ceiling allows.',
-      'Worker: "codex", model "gpt-x"',
-      'Directory: "/work/repo"',
-      'Runs: in its own worktree',
-      "Asks for: runtime auto, above ceiling.runtime auto-accept-edits and the session's permission mode approval-required",
+      'A task asks for more than your ceiling allows: runtime auto.',
+      'It runs in its own worktree.',
+      'Worker "codex", model "gpt-x", directory "/work/repo".',
     ].join('\n'),
+    'three lines, because Claude Code collapses the rest of a message',
   )
   assert.deepEqual(params.requestedSchema, {
     type: 'object',
     properties: {
       approve: {
         type: 'boolean',
-        title: 'Allow runtime auto and interaction default, in its own worktree, for this task only',
-        description: "Above ceiling.runtime auto-accept-edits and the session's permission mode approval-required.",
+        title: 'Allow in its own worktree, this task only',
+        description: "runtime auto is above ceiling.runtime auto-accept-edits and the session's permission mode approval-required.",
         default: true,
       },
     },
     required: ['approve'],
   })
+  assert.ok(params.requestedSchema.properties.approve.title.length <= 46, 'Claude Code cuts a title at about 47 characters')
   assert.equal(task.statusMessage, 'waiting for your approval to go above the ceiling')
 })
 
@@ -199,13 +199,13 @@ test('the form says where the task runs, in words, and names the limit that a sh
   })
   const { params } = (await tasks.get('task-shared')).inputRequests.approve
   const lines = params.message.split('\n')
-  assert.equal(lines[3], 'Runs: in your checkout itself (shared, no worktree)')
-  assert.equal(lines[4], 'Asks for: runtime auto, above ceiling.sharedRuntime approval-required', 'with no session mode the config alone is named')
-  assert.equal(params.requestedSchema.properties.approve.title, 'Allow runtime auto and interaction default, in your checkout itself (shared, no worktree), for this task only')
-  assert.equal(params.requestedSchema.properties.approve.description, 'Above ceiling.sharedRuntime approval-required.')
+  assert.equal(lines[1], 'It runs in your checkout itself (shared, no worktree).')
+  assert.equal(params.requestedSchema.properties.approve.title, 'Allow in your checkout itself, this task only')
+  assert.ok(params.requestedSchema.properties.approve.title.length <= 46)
+  assert.equal(params.requestedSchema.properties.approve.description, 'runtime auto is above ceiling.sharedRuntime approval-required.', 'with no session mode the config alone is named')
 })
 
-test('a form for a request above both ceilings names both limits, and the levels are in the field the user answers', async (t) => {
+test('a form for a request above both ceilings names both levels and both limits', async (t) => {
   const { s, tasks, record } = setup()
   t.after(() => s.cleanup())
   record('task-both', {
@@ -217,12 +217,11 @@ test('a form for a request above both ceilings names both limits, and the levels
     },
   })
   const { params } = (await tasks.get('task-both')).inputRequests.approve
+  assert.equal(params.message.split('\n')[0], 'A task asks for more than your ceiling allows: runtime full-access and interaction default.')
   assert.equal(
-    params.message.split('\n')[4],
-    'Asks for: runtime full-access, above ceiling.runtime auto; interaction default, above ceiling.interaction plan',
+    params.requestedSchema.properties.approve.description,
+    'runtime full-access is above ceiling.runtime auto; interaction default is above ceiling.interaction plan.',
   )
-  assert.equal(params.requestedSchema.properties.approve.title, 'Allow runtime full-access and interaction default, in its own worktree, for this task only')
-  assert.equal(params.requestedSchema.properties.approve.description, 'Above ceiling.runtime auto; ceiling.interaction plan.')
 })
 
 test('a declined form ends the task as completed with the escalation error that the request got', async (t) => {
@@ -421,7 +420,7 @@ test('the form shows the directory that the scope check resolved, and not the pa
   assert.equal(record.request.cwd, link, 'the request is kept as it was written')
   assert.equal(record.approval.cwd, ctx.repo, 'the approval holds the real directory')
   const { message } = (await ctx.tasks.get(taskId)).inputRequests.approve.params
-  assert.equal(message.split('\n')[2], `Directory: "${ctx.repo}"`)
+  assert.equal(message.split('\n')[2], `Worker "claudeAgent", model "haiku", directory "${ctx.repo}".`)
   assert.equal(message.includes(link), false)
 })
 
@@ -435,18 +434,22 @@ test('a value that the model chose cannot add a line, a sentence or a look-alike
   const taskId = await approval(ctx, { cwd: join(ctx.session, 'innocent'), model })
   const { params } = (await ctx.tasks.get(taskId)).inputRequests.approve
   const lines = params.message.split('\n')
-  assert.equal(lines.length, 5, 'five lines, whatever the values hold')
-  assert.deepEqual(lines.map((line) => line.split(':')[0]), ['A task asks for more than your ceiling allows.', 'Worker', 'Directory', 'Runs', 'Asks for'])
-  assert.equal(lines[1], 'Worker: "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?"', 'the quote is escaped and the invisible characters are written out')
-  assert.equal(lines[2], `Directory: "${evil.replaceAll('\n', '\\n').replaceAll('"', '\\"')}"`, 'the line breaks of a real directory name are written out')
+  assert.equal(lines.length, 3, 'three lines, whatever the values hold')
+  assert.equal(lines[0], 'A task asks for more than your ceiling allows: runtime auto.')
+  assert.equal(lines[1], 'It runs in its own worktree.')
+  const escapedDir = evil.replaceAll('\n', '\\n').replaceAll('"', '\\"')
+  assert.equal(
+    lines[2],
+    `Worker "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?", directory "${escapedDir}".`,
+    'the quote is escaped, the invisible characters are written out, and so are the line breaks of a real directory name',
+  )
   assert.equal(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(params.message.replaceAll('\n', '')), false, 'no control or format character is left in the question')
-  assert.equal(lines[3], 'Runs: in its own worktree')
   const { title, description } = params.requestedSchema.properties.approve
   for (const text of [title, description]) assert.equal(/[\p{Cc}\p{Cf}]/u.test(text), false)
 
   const long = await approval(ctx, { model: `m${'x'.repeat(400)}` })
-  const [, workerLine] = (await ctx.tasks.get(long)).inputRequests.approve.params.message.split('\n')
-  assert.ok(workerLine.length < 200 && workerLine.endsWith('…"'), `a value is cut: ${workerLine.length} characters`)
+  const workerLine = (await ctx.tasks.get(long)).inputRequests.approve.params.message.split('\n')[2]
+  assert.ok(workerLine.includes(`model "m${'x'.repeat(119)}…", directory`) && workerLine.length < 300, `a value is cut: ${workerLine.length} characters`)
 })
 
 test('a request that could not launch is refused at once, and no form asks about it', async (t) => {
