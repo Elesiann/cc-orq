@@ -16,6 +16,14 @@ All notable changes to cc-orq are recorded here. The format follows
 - The tool `list`: the newest jobs first, whatever started them, with each
   job's status, instance, model, duration, working directory, branch and
   whether it ended on a question.
+- `integrate` answers `task_running`, and names the job, while a job is still
+  running on the task branch. It runs no git command before that answer.
+- The config key `integrate.gitHooks`. With `"run"`, `integrate` runs the git
+  hooks of the checkout as they are, and a hook that refuses the merge, such as
+  a failing `pre-merge-commit`, makes it abort the merge and answer `hook_failed`
+  with the hook's output. The README says what the opt-in risks: a worker that
+  can write the checkout's shared git directory, or a hooks path in the work
+  tree, decides what runs. Any other value, and the default, run no hook.
 
 ### Changed
 
@@ -36,6 +44,9 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ### Fixed
 
+- The README said that `integrate` runs the hooks of your checkout. It never
+  did, because the mod's engine runs git with hooks off, and it still runs none
+  unless the config sets `integrate.gitHooks` to `"run"`.
 - A finished job could show as failed in the task card or the `/orq-panel`
   pane when either read its `exit` file while the supervisor was writing it.
   The supervisor now writes the file in one step, so a reader sees either no

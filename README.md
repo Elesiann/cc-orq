@@ -325,8 +325,8 @@ copies all of it; otherwise the task is refused with `cwd_out_of_scope`. A
 `cwd` that is not in the checkout's HEAD, such as an untracked directory, has
 no counterpart in the worktree, so the task is refused and the worktree is
 removed. orq creates the worktree with the checkout's git hooks and fsmonitor
-turned off. `integrate` runs git in your checkout as you would, so the
-checkout's own hooks run there.
+turned off, and `integrate` runs git with them off too, unless your config opts
+in to the checkout's hooks (see [Git hooks](#git-hooks-on-integrate)).
 
 ### Files a worktree needs
 
@@ -399,6 +399,10 @@ On success the answer gives the merged commit, the branch and the worktree. The
 worktree and the branch stay. Remove them with `git worktree remove` and
 `git branch -d` when you no longer need them.
 
+`integrate` refuses while a job is still running on the task branch, whether it
+is the task's own job or another job on the same branch. It answers
+`task_running` and names that job, before it runs any git command.
+
 The model reads one JSON string. A merge answers
 `{"ok": true, "taskId": "...", "mergedSha": "...", "branch": "...", "worktree": "..."}`.
 A refusal answers `{"ok": false, "error": {"code": "...", "message": "..."}}`,
@@ -408,23 +412,61 @@ and `error` also carries `files` when the code is `merge_conflict`:
 {"ok": false, "error": {"code": "merge_conflict", "message": "orq/JOB_ID conflicts with CHECKOUT in 1 file(s); the merge was aborted", "files": ["a.txt"]}}
 ```
 
+With the opt-in, a refused merge carries the hook's output in the message, with
+secrets redacted and cut to its last 20 lines:
+
+```json
+{"ok": false, "error": {"code": "hook_failed", "message": "a git hook refused the merge of orq/JOB_ID into CHECKOUT; the merge was aborted. A hook has to pass before the task can merge: fix what it checks, then integrate again.\nOutput of the checkout's hook:\nlint: a.txt has a trailing space"}}
+```
+
 A refusal names one of these codes:
 
 | Code | Meaning |
 | --- | --- |
 | `task_not_found` | No job has that id. |
 | `no_worktree` | The job ran without a worktree, so it has no branch to merge. |
+| `task_running` | A job is still running on the task branch, and the answer names it. Wait for it to finish, or cancel it, then integrate again. |
 | `not_a_repository` | The checkout the job was launched from is not a git checkout. |
 | `dirty_worktree` | The checkout has uncommitted or untracked files. Commit or stash them, then integrate again. |
 | `already_integrated` | The task branch is already in the checkout's HEAD, so there is nothing to merge. |
 | `not_fast_forward` | `ff-only` cannot move HEAD, because the checkout has commits the task lacks. Integrate with `merge`, or rebase the task first. |
 | `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort`, and the answer lists the conflicted files. |
+| `hook_failed` | Only with the opt-in. A git hook of the checkout refused the merge, or the merge stopped before its commit with no conflict, for example when signing the commit fails. orq ran `git merge --abort` if a merge was pending. The answer carries what git printed, which includes the hook's output, with secrets redacted and cut to its last 20 lines. Fix what the hook checks, then integrate again. |
 | `invalid_request` | The input does not match the schema. |
 | `git_failed` | git failed in a way no other code names. The answer carries its message. |
 
 When a merge conflicts, redelegate a rebase of the task branch to the same
 worker, then integrate again. orq never forces a merge, and it never resolves a
 conflict for you.
+
+#### Git hooks on integrate
+
+By default `integrate` runs no hook of your checkout. It runs git with the
+hooks and fsmonitor turned off, as 0.1 did, so nothing a worker wrote into
+`.git/hooks` or into a hooks path inside the work tree runs when you integrate.
+
+To have `integrate` run them, set this in `~/.config/orq/config.json`. Any other
+value, or a value that is not valid, keeps the hooks off:
+
+```json
+{ "integrate": { "gitHooks": "run" } }
+```
+
+With it, `integrate` runs the checkout's hooks as they are when you integrate,
+as `git merge` does in your shell. A fast-forward makes no commit, so `ff-only`
+runs no `pre-merge-commit`, `prepare-commit-msg` or `commit-msg` hook, and
+`merge` runs all three. `post-merge` runs after either strategy, and git ignores
+its exit code. When a hook refuses the merge, `integrate` runs `git merge
+--abort`, which restores your checkout, and answers `hook_failed` with the
+hook's output.
+
+The opt-in runs whatever hooks the checkout has when you integrate, including
+hook files that a worker changed or added. A worker that can write the checkout's
+shared git directory, or a hooks path that lies in the work tree, such as
+`.husky/`, decides what runs, and it runs on your machine with your rights,
+outside the worker's sandbox. A hook also runs on the merged files, so a hook
+that runs the tests runs the worker's code. Turn the opt-in on only when you
+trust every worker you delegate to.
 
 ## Tools
 
@@ -670,6 +712,7 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
   "jobsDir": "~/.cache/orq/jobs",
   "waitSeconds": 120,
   "allowedRoots": ["~/work/shared"],
+  "integrate": { "gitHooks": "off" },
   "instances": [
     { "id": "codex", "driver": "codex" },
     { "id": "opencode", "driver": "opencode" },
@@ -687,6 +730,10 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
   where an `cc-orq:task` may run besides the session's own working directory. A
   `cwd` must resolve inside one of them. Default: none. Entries that are not
   absolute are dropped with a warning in the debug log.
+- `integrate.gitHooks`: `"run"` has `integrate` run your checkout's git hooks,
+  and carries a risk, which [Git hooks on integrate](#git-hooks-on-integrate)
+  describes. `"off"`, the default, runs none. Any other value keeps them off, with
+  a warning in the debug log.
 - `instances`: the provider instances the parent can target. `id` is the name
   used in a task's `target:` line (letters, digits, `_`, `.`, `-`, up to 64
   characters, unique), `driver` is one of `codex`, `opencode`, `antigravity`,
@@ -844,6 +891,8 @@ directories.
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
 | `integrate` answers `merge_conflict` | Delegate a rebase of the task branch to the same worker, then integrate again |
+| `integrate` answers `task_running` | Wait for the job it names to finish, or cancel that job, then integrate again |
+| `integrate` answers `hook_failed` | Read the hook's output in the answer, fix what the hook checks, then integrate again |
 | A worker's build or tests fail in its worktree for a missing dependency | List the ignored files it needs, such as `node_modules/`, in `.worktreeinclude`. See [Files a worktree needs](#files-a-worktree-needs) |
 | The card does not show | The surface must be the terminal or the desktop app, and `cardDisplay` must not be `off` |
 
