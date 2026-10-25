@@ -6,18 +6,10 @@ import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult 
 
 import { loadConfig, MAX_WAIT_SECONDS, type OrqConfig } from './config.ts'
 import { isFailure } from './contract.ts'
-import { composeAnswer, jobLiveness, launchTaskJob, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
+import { composeAnswer, jobLiveness, launchTaskFromHeader, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
-import {
-  appliedEffort,
-  effortFlag,
-  parentRuntimeModeFromPermissionMode,
-  resolveTarget,
-  runnerPolicy,
-  taskPrompt,
-} from './target.ts'
-import { scopedCwd } from './scope.ts'
-import { formatDuration, isRecord, refusalText, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
+import { parentRuntimeModeFromPermissionMode } from './target.ts'
+import { formatDuration, isRecord, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -132,7 +124,7 @@ async function readMessages($: TaskEngine, agentId: string): Promise<{ role: str
   }
 }
 
-/** Resolve the header against the ceiling and the configured instances, then launch. Every refusal is text. */
+/** Read the header and the spawn's permission ceiling, then launch. Every refusal is text. */
 async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string): Promise<TaskRun> {
   const text = firstUserText(await readMessages($, agentId))
   if (text === undefined) return { refusal: `${TASK_REFUSAL}: its prompt could not be read.` }
@@ -142,33 +134,11 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (spawnMode === undefined) {
     await $.ui.log(`orq: ceiling for ${agentId}: no permission mode captured at spawn, using approval-required`, { to: 'debug' })
   }
-  const ceiling = parentRuntimeModeFromPermissionMode(spawnMode)
-  const resolved = resolveTarget({
-    target: header.target,
-    instances: config.instances,
-    parentRuntimeMode: ceiling.runtimeMode,
-    parentInteractionMode: ceiling.interactionMode,
-    runtimeMode: header.runtimeMode ?? 'inherit',
-    interactionMode: header.interactionMode ?? 'inherit',
-  })
-  if (isFailure(resolved)) return { refusal: refusalText(resolved) }
-  const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
-  if (isFailure(policy)) return { refusal: refusalText(policy) }
-  const scoped = await scopedCwd($, config, await sessionCwd($), header.cwd)
-  if ('refusal' in scoped) return scoped
-  const effort = appliedEffort(resolved.instance.driver, resolved.options)
-  const launched = await launchTaskJob($, config, {
+  const launched = await launchTaskFromHeader($, config, {
     agentId,
-    instance: resolved.instance,
-    model: resolved.model,
-    cwd: scoped.cwd,
-    prompt: taskPrompt(header.prompt, header.role),
-    flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
-    runtimeMode: resolved.runtimeMode,
-    interactionMode: resolved.interactionMode,
-    ...(effort !== undefined ? { effort } : {}),
-    isolation: header.isolation,
-    scopeRoots: scoped.roots,
+    header,
+    ceiling: parentRuntimeModeFromPermissionMode(spawnMode),
+    sessionDir: await sessionCwd($),
   })
   return 'refusal' in launched ? { refusal: launched.refusal } : { jobId: launched.job.id }
 }

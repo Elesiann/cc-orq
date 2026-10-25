@@ -1,9 +1,11 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation, TaskStatus, TaskStatusResult, WorkState } from './contract.ts'
-import { hasControlCharacters, plainArgument } from './target.ts'
+import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
+import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
+import { scopedCwd } from './scope.ts'
+import type { TaskHeader } from './task-header.ts'
 import {
   DRIVER_RUNNER,
   buildFooter,
@@ -13,6 +15,7 @@ import {
   isSafeJobId,
   parseJobMeta,
   parseRolloutModelEffort,
+  refusalText,
   TASK_REFUSAL,
   rand36,
   shellWord,
@@ -111,7 +114,7 @@ async function isDirectory($: CoreEngine, path: string): Promise<boolean> {
 }
 
 /** The question a job wrote to question.txt, trimmed; null when the file is missing or blank. */
-async function readQuestion($: CoreEngine, job: JobRecord): Promise<string | null> {
+export async function readQuestion($: CoreEngine, job: JobRecord): Promise<string | null> {
   const text = ((await readText($, `${job.dir}/${QUESTION_FILE}`)) ?? '').trim()
   return text === '' ? null : text
 }
@@ -569,6 +572,47 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
     ? '. Pass `isolation: shared` to run the task in this directory as it is.'
     : ''
   return { refusal: refusal + hint }
+}
+
+/** A refused header comes back as `{ refusal }`, not as a throw. */
+export async function launchTaskFromHeader(
+  $: CoreEngine,
+  config: OrqConfig,
+  args: {
+    agentId: string
+    header: TaskHeader
+    ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+    sessionDir: string
+  },
+): Promise<LaunchResult> {
+  const { agentId, header, ceiling, sessionDir } = args
+  const resolved = resolveTarget({
+    target: header.target,
+    instances: config.instances,
+    parentRuntimeMode: ceiling.runtimeMode,
+    parentInteractionMode: ceiling.interactionMode,
+    runtimeMode: header.runtimeMode ?? 'inherit',
+    interactionMode: header.interactionMode ?? 'inherit',
+  })
+  if (isFailure(resolved)) return { refusal: refusalText(resolved) }
+  const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
+  if (isFailure(policy)) return { refusal: refusalText(policy) }
+  const scoped = await scopedCwd($, config, sessionDir, header.cwd)
+  if ('refusal' in scoped) return scoped
+  const effort = appliedEffort(resolved.instance.driver, resolved.options)
+  return launchTaskJob($, config, {
+    agentId,
+    instance: resolved.instance,
+    model: resolved.model,
+    cwd: scoped.cwd,
+    prompt: taskPrompt(header.prompt, header.role),
+    flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
+    runtimeMode: resolved.runtimeMode,
+    interactionMode: resolved.interactionMode,
+    ...(effort !== undefined ? { effort } : {}),
+    isolation: header.isolation,
+    scopeRoots: scoped.roots,
+  })
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. */
