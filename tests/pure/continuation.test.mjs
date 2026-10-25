@@ -140,6 +140,18 @@ test('a job that recorded no session, or whose instance changed, answers resume_
   assert.ok(old.result.includes('cannot be resumed'), 'the BLOCKED text of a job without a session says so, and not that the answer tool resumes it')
 })
 
+test('answer on a job that wrote its question and has not exited says so, and to answer when the job ends', async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  job(s.jobsDir, 'job-asking', { meta: { cwd: repo }, files: { pgid: String(s.liveGroup()), 'question.txt': 'Which branch?\n' } })
+  const server = s.startIn(session)
+
+  const answer = await server.call('answer', { taskId: 'job-asking', answer: 'main' })
+  assert.equal(code(answer), 'invalid_request')
+  assert.equal(answer.json.error.message, 'task job-asking wrote a question and has not exited yet, so answer it when the job ends')
+})
+
 test('answer refuses an id that is unknown, a job that did not stop on a question, and input that is not valid', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())
