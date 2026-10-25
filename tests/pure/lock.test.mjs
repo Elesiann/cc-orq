@@ -283,3 +283,20 @@ test('a stale mutex is stepped over and left in place, and a fresh one that neve
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('a checkout path with spaces, quotes and shell syntax is locked as written and runs nothing', async () => {
+  const { root, engine, jobsDir } = scratch()
+  const stray = join(process.cwd(), 'orq-lock-injected')
+  try {
+    const repo = join(root, `it's a "quoted" $(touch orq-lock-injected) \`touch orq-lock-injected\` ;touch orq-lock-injected`)
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    const claim = await claimCheckout(engine, jobsDir, 'job-a', repo, probeOf({}))
+    assert.equal(claim.kind, 'held')
+    assert.equal(readFileSync(join(jobsDir, '.locks', sha256Hex(repo), 'key'), 'utf8'), `${repo}\n`)
+    assert.deepEqual(await claimCheckout(engine, jobsDir, 'job-b', repo, probeOf({})), { kind: 'busy', owner: 'job-a' })
+    assert.equal(existsSync(stray), false)
+  } finally {
+    rmSync(stray, { force: true })
+    rmSync(root, { recursive: true, force: true })
+  }
+})
