@@ -554,9 +554,10 @@ test('a value that the model chose cannot add a line, a sentence or a look-alike
   assert.equal(lines[0], 'A task asks for more than your ceiling allows: runtime auto.')
   assert.equal(lines[1], 'It runs in its own worktree.')
   const escapedDir = evil.replaceAll('\n', '\\n').replaceAll('"', '\\"')
+  const shownDir = escapedDir.length > 120 ? `${escapedDir.slice(0, 120)}…` : escapedDir
   assert.equal(
     lines[2],
-    `Worker "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?", directory "${escapedDir}".`,
+    `Worker "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?", directory "${shownDir}".`,
     'the quote is escaped, the invisible characters are written out, and so are the line breaks of a real directory name',
   )
   assert.equal(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(params.message.replaceAll('\n', '')), false, 'no control or format character is left in the question')
