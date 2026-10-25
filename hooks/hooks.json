@@ -1,4 +1,18 @@
 {
-  "description": "The orq mod: function hooks that serve /orq, /orq-panel, the task card and the cc-orq:task agent",
-  "modules": ["./register.ts"]
+  "description": "The orq mod: function hooks that serve /orq, /orq-panel, the task card and the cc-orq:task agent, and the PreToolUse hook that gives the orq tools the session's permission mode",
+  "modules": ["./register.ts"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_cc-orq_orq__(delegate|answer|capabilities)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-mode-hook.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
 }

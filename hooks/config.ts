@@ -1,3 +1,4 @@
+import { defaultCeilingConfig, parseCeilingConfig, type CeilingConfig } from './ceiling.ts'
 import type { CoreEngine } from './engine.ts'
 
 export type DriverKind = 'codex' | 'opencode' | 'antigravity' | 'claudeAgent'
@@ -17,6 +18,8 @@ export type OrqConfig = {
   waitSeconds: number
   /** Absolute directories, besides the session's own, that a cc-orq:task may run in. */
   allowedRoots: string[]
+  /** The most a task may run as. The session's permission mode can lower it, never raise it. */
+  ceiling: CeilingConfig
 }
 
 export const CONFIG_PATH = '.config/orq/config.json'
@@ -35,6 +38,7 @@ export function defaultConfig(home: string): OrqConfig {
     instances: DEFAULT_INSTANCES.map((i) => ({ ...i })),
     waitSeconds: 120,
     allowedRoots: [],
+    ceiling: defaultCeilingConfig(),
   }
 }
 
@@ -81,6 +85,11 @@ export function parseConfig(text: string | null, home: string): ParsedConfig {
     const w = typeof obj.waitSeconds === 'number' && Number.isFinite(obj.waitSeconds) ? Math.floor(obj.waitSeconds) : Number.NaN
     if (w >= 10 && w <= MAX_WAIT_SECONDS) config.waitSeconds = w
     else warnings.push(`waitSeconds must be a number between 10 and ${MAX_WAIT_SECONDS}, keeping the default`)
+  }
+  if (obj.ceiling !== undefined) {
+    const parsed = parseCeilingConfig(obj.ceiling)
+    config.ceiling = parsed.ceiling
+    warnings.push(...parsed.warnings)
   }
   if (obj.instances !== undefined) {
     if (!Array.isArray(obj.instances)) {
