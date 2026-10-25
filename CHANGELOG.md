@@ -96,6 +96,15 @@ All notable changes to cc-orq are recorded here. The format follows
   stderr. The README says what the opt-in risks: a worker that can write the
   checkout's shared git directory, or a hooks path in the work tree, decides what
   runs. Any other value, and the default, run no hook.
+- A conformance job for the task layer. `tests/conformance/` serves the seven
+  fixtures of the MCP conformance suite (`greet`, `slow_compute`, `failing_job`,
+  `protocol_error_job`, `confirm_delete`, `multi_input` and `test_tool_with_task`)
+  over a test-only HTTP entry, through `server/protocol.ts`, and CI runs each of
+  the suite's ten tasks scenarios by name, at commit c37eec8. Nine pass, with
+  44 checks, and `tasks-status-notifications` is skipped by the suite itself,
+  because its harness reads the SSE of `tools/call` where the spec has
+  `subscriptions/listen`. `--requirements 2026-07-28` is not the gate, since it
+  lists these scenarios as `not_scored`. The product still serves stdio only.
 
 - macOS, experimental. CI runs the test suites on `macos-latest` as well as
   `ubuntu-latest`. Where `setsid` is missing, as on macOS, the start script runs

@@ -1348,6 +1348,16 @@ in `scripts/session-mode-hook.sh`, which `hooks/hooks.json` runs before
 `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane from the job
 directories.
 
+`server/protocol.ts` is also tested without any job. `tests/conformance/` serves
+the fixtures of the MCP conformance suite over HTTP through it, and CI runs the
+suite's ten tasks scenarios by name: nine pass (`tasks-lifecycle`,
+`tasks-capability-negotiation`, `tasks-wire-fields`,
+`tasks-request-state-removal`, `tasks-mrtr-input`, `tasks-request-headers`,
+`tasks-dispatch-and-envelope`, `tasks-required-task-error` and
+`tasks-mrtr-composition`), and the suite skips `tasks-status-notifications`
+itself. The product serves stdio only; see [CONTRIBUTING.md](CONTRIBUTING.md) to
+run it.
+
 ## Troubleshooting
 
 | You see | Do this |
