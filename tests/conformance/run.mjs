@@ -54,6 +54,7 @@ function savedChecks(dir) {
 function whyNot(name, code, checks) {
   if (code !== 0) return `the suite exited ${code}`
   if (SKIPPED_BY_THE_SUITE.has(name)) return checks.length > 0 && checks.every((check) => check.status === 'SKIPPED') ? null : 'it was expected to be skipped by the suite'
+  if (checks.some((check) => check.status === 'FAILURE')) return 'a check failed'
   if (!checks.some((check) => check.status === 'SUCCESS')) return 'no check passed'
   if (checks.some((check) => check.status === 'SKIPPED')) return 'the suite skipped a check'
   return null
