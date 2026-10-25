@@ -553,8 +553,9 @@ test('a value that the model chose cannot add a line, a sentence or a look-alike
   assert.equal(lines.length, 3, 'three lines, whatever the values hold')
   assert.equal(lines[0], 'A task asks for more than your ceiling allows: runtime auto.')
   assert.equal(lines[1], 'It runs in its own worktree.')
-  const escapedDir = evil.replaceAll('\n', '\\n').replaceAll('"', '\\"')
-  const shownDir = escapedDir.length > 120 ? `${escapedDir.slice(0, 120)}…` : escapedDir
+  const chars = [...evil]
+  const cutDir = chars.length > 120 ? `${chars.slice(0, 120).join('')}…` : evil
+  const shownDir = cutDir.replaceAll('\n', '\\n').replaceAll('"', '\\"')
   assert.equal(
     lines[2],
     `Worker "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?", directory "${shownDir}".`,
