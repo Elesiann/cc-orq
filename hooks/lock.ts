@@ -31,9 +31,6 @@ export type LockVerdict = { kind: 'busy'; owner: string | null } | { kind: 'dead
 /** The supervisor takes up to 5 s to write its pid, so a launch younger than this may still be starting. */
 export const LAUNCH_GRACE_MS = 10_000
 
-/** The mutex guards a few milliseconds of work, so one this old belongs to a launcher that died holding it. */
-const MUTEX_STALE_MS = 30_000
-
 export function judgeLock(facts: LockFacts): LockVerdict {
   if (facts.owner === null) return facts.ageMs < LAUNCH_GRACE_MS ? { kind: 'busy', owner: null } : { kind: 'dead' }
   switch (facts.state) {
@@ -124,6 +121,8 @@ export type Claim =
   | { kind: 'failed'; detail: string }
 
 const SCRIPT_TIMEOUT_MS = 15000
+/** A launcher holds the mutex across a liveness probe, the move aside and the release, each cut off at SCRIPT_TIMEOUT_MS. */
+const MUTEX_STALE_MS = 4 * SCRIPT_TIMEOUT_MS
 const MUTEX_GENERATIONS = 4
 const EXIT_TAKEN = 0
 const EXIT_HELD = 1

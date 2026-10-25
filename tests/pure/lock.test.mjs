@@ -410,17 +410,17 @@ test('a break whose move aside is slow cannot take the lock a second launcher ma
   }
 })
 
-test('a stale mutex is stepped over and left in place, and a fresh one that never frees makes the claim busy', async () => {
+test('a mutex of two minutes is stepped over and left in place, and one of 45 s that never frees makes the claim busy', async () => {
   const { root, engine, jobsDir } = scratch()
   try {
     const repo = checkoutWithSubdirectory(root)
     assert.equal((await claimCheckout(engine, jobsDir, 'job-a', repo, probeOf({}))).kind, 'held')
     const lock = join(jobsDir, '.locks', sha256Hex(repo))
     mkdirSync(`${lock}.mutex`)
-    backdate(`${lock}.mutex`, 60)
+    backdate(`${lock}.mutex`, 120)
     assert.equal((await claimCheckout(engine, jobsDir, 'job-b', repo, probeOf({ 'job-a': 'finished' }))).kind, 'held')
     assert.equal(existsSync(`${lock}.mutex`), true)
-    backdate(`${lock}.mutex`, 0)
+    backdate(`${lock}.mutex`, 45)
     assert.deepEqual(await claimCheckout(engine, jobsDir, 'job-c', repo, probeOf({ 'job-b': 'finished' })), { kind: 'busy', owner: null })
     assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-b\n')
   } finally {
