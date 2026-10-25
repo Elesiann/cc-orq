@@ -224,6 +224,22 @@ test('a form for a request above both ceilings names both levels and both limits
   )
 })
 
+test('the description names only the limits that are below the level, so a limit that allows it is not called a limit in the way', async (t) => {
+  const { s, tasks, record } = setup()
+  t.after(() => s.cleanup())
+  const equal = { runtimeMode: 'auto-accept-edits', interactionMode: 'default' }
+  record('task-session', { approval: { ...APPROVAL, launch: equal, config: equal, session: { runtimeMode: 'approval-required', interactionMode: 'default' } } })
+  record('task-config', { approval: { ...APPROVAL, launch: equal, config: { runtimeMode: 'approval-required', interactionMode: 'default' }, session: equal } })
+  record('task-neither-named-twice', { approval: { ...APPROVAL, launch: equal, config: { runtimeMode: 'approval-required', interactionMode: 'default' }, session: { runtimeMode: 'approval-required', interactionMode: 'default' } } })
+  const description = async (id) => (await tasks.get(id)).inputRequests.approve.params.requestedSchema.properties.approve.description
+  assert.equal(await description('task-session'), "runtime auto-accept-edits is above the session's permission mode approval-required.")
+  assert.equal(await description('task-config'), 'runtime auto-accept-edits is above ceiling.runtime approval-required.')
+  assert.equal(
+    await description('task-neither-named-twice'),
+    "runtime auto-accept-edits is above ceiling.runtime approval-required and the session's permission mode approval-required.",
+  )
+})
+
 test('a declined form ends the task as completed with the escalation error that the request got', async (t) => {
   const { s, tasks, record, mark } = setup()
   t.after(() => s.cleanup())

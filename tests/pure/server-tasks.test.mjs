@@ -3,7 +3,7 @@
 // tasks/get), so a test here only has to say what it expects and the wire is checked on every line.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { FAKE_HELD_WORKER, FAKE_WORKER, NO_TASKS, REPO, SECOND, TASKS, WITH_FORMS, checkout, job, jobDirs, modern, scene, until } from './support/harness.mjs'
@@ -257,4 +257,25 @@ test('a server that starts after the old one stopped answers for the same task, 
   assert.ok(existsSync(join(s.jobsDir, form.task.taskId, 'meta.json')), 'the new server launched what the old one had asked about')
   release(s, form.task.taskId)
   assert.equal((await until(second, form.task.taskId)).status, 'completed')
+})
+
+test('a record that cannot be read answers -32603 on each method, so Claude Code asks again, and a record that is corrupt is a failed task', { skip: process.getuid?.() === 0 && 'root can read any file' }, async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const unreadable = 'mcp-1-23456789-abcdef'
+  const corrupt = 'mcp-2-23456789-abcdef'
+  for (const id of [unreadable, corrupt]) mkdirSync(join(s.jobsDir, '.tasks', id), { recursive: true })
+  writeFileSync(join(s.jobsDir, '.tasks', unreadable, 'task.json'), '{}')
+  chmodSync(join(s.jobsDir, '.tasks', unreadable, 'task.json'), 0)
+  writeFileSync(join(s.jobsDir, '.tasks', corrupt, 'task.json'), '{"taskId":')
+  const server = s.start()
+  for (const method of ['tasks/get', 'tasks/update', 'tasks/cancel']) {
+    const answer = await server.request(method, { taskId: unreadable, ...modern() })
+    assert.equal(answer.error.code, -32603, method)
+    assert.match(answer.error.message, /^Failed to (retrieve|update|cancel) task: /)
+  }
+  const failed = await server.get(corrupt)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.error.code, -32603)
+  assert.equal((await server.cancel(corrupt)).error, undefined, 'cancelling a failed task is acked')
 })

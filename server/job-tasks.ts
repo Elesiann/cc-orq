@@ -204,8 +204,12 @@ function shown(text: string, limit = 120): string {
   return JSON.stringify(cut).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u{${char.codePointAt(0)?.toString(16)}}`)
 }
 
-function limitText(key: string, config: string, session: string | null): string {
-  return session === null ? `${key} ${config}` : `${key} ${config} and the session's permission mode ${session}`
+/** Only a limit below the level is in its way, so only that one is named. */
+function limitsBelow<Mode extends string>(level: Mode, key: string, config: Mode, session: Mode | null, rank: (mode: Mode) => number): string {
+  return [
+    ...(rank(config) < rank(level) ? [`${key} ${config}`] : []),
+    ...(session !== null && rank(session) < rank(level) ? [`the session's permission mode ${session}`] : []),
+  ].join(' and ')
 }
 
 function exceeded(approval: Approval): { level: string; limit: string }[] {
@@ -213,10 +217,10 @@ function exceeded(approval: Approval): { level: string; limit: string }[] {
   const { launch, config, session, isolation } = approval
   return [
     ...(runtimeModeRank(launch.runtimeMode) > runtimeModeRank(effective.runtimeMode)
-      ? [{ level: `runtime ${launch.runtimeMode}`, limit: limitText(isolation === 'shared' ? 'ceiling.sharedRuntime' : 'ceiling.runtime', config.runtimeMode, session?.runtimeMode ?? null) }]
+      ? [{ level: `runtime ${launch.runtimeMode}`, limit: limitsBelow(launch.runtimeMode, isolation === 'shared' ? 'ceiling.sharedRuntime' : 'ceiling.runtime', config.runtimeMode, session?.runtimeMode ?? null, runtimeModeRank) }]
       : []),
     ...(interactionModeRank(launch.interactionMode) > interactionModeRank(effective.interactionMode)
-      ? [{ level: `interaction ${launch.interactionMode}`, limit: limitText('ceiling.interaction', config.interactionMode, session?.interactionMode ?? null) }]
+      ? [{ level: `interaction ${launch.interactionMode}`, limit: limitsBelow(launch.interactionMode, 'ceiling.interaction', config.interactionMode, session?.interactionMode ?? null, interactionModeRank) }]
       : []),
   ]
 }
