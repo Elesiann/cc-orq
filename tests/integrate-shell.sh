@@ -114,7 +114,7 @@ function scrub() {
   git(repo, 'merge', '--abort')
   git(repo, 'reset', '--hard', '-q')
   git(repo, 'clean', '-fdq')
-  for (const name of ['pre-merge-commit', 'commit-msg', 'post-merge']) rmSync(`${repo}/.git/hooks/${name}`, { force: true })
+  for (const name of ['pre-merge-commit', 'commit-msg', 'post-merge', 'reference-transaction']) rmSync(`${repo}/.git/hooks/${name}`, { force: true })
 }
 
 // A detached child leads its own process group, so its pid is the pgid that the job records.
@@ -301,7 +301,8 @@ writeMeta('fresh-job', { cwd: planV.worktree, startedAt: Date.now() - 60000 })
 check('the same job a minute later, still with no pgid, counts as gone, and the task integrates', (await integrate(V, 'merge')).ok === true)
 
 // git writes MERGE_HEAD after the pre-merge-commit hook and before commit-msg, so a merge killed in the first leaves its
-// half-made index with no merge pending, and one killed in the second leaves a merge pending.
+// half-made index with no merge pending, and one killed in the second leaves a merge pending. integrate resets nothing
+// in the first case, because it cannot tell the merge's staged changes from the user's own.
 const pidFile = `${home}/hook-pid`
 const hookMade = `${repo}/hook-made.txt`
 const T = 'task-t'
@@ -314,12 +315,35 @@ mergeTimeoutMs = 1500
 const hung = await integrate(T, 'merge', 'run')
 mergeTimeoutMs = null
 check('with the opt-in, a pre-merge-commit hook that outlives the timeout answers git_failed and names the timeout', hung.ok === false && hung.error?.code === 'git_failed' && /did not finish within 1500 ms/.test(hung.error.message))
-check('the killed merge is undone: no merge pending, HEAD unmoved, only the file the hook made is left', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'rev-parse', 'HEAD') === headBeforeT && must(repo, 'status', '--porcelain') === '?? hook-made.txt')
-check('the answer lists the file the hook left, and says the half-made merge was undone', hung.error?.message.includes('hook-made.txt') === true && hung.error.message.includes('git reset --merge'))
+check('nothing is reset: no merge pending, HEAD unmoved, the index still holds the killed merge, and the hook file stays', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'rev-parse', 'HEAD') === headBeforeT && must(repo, 'status', '--porcelain') === 'A  t.txt\n?? hook-made.txt')
+check('the answer says nothing was reset, lists both paths and names git reset --merge for the user to run', hung.error?.message.includes('nothing was reset') === true && hung.error.message.includes('t.txt') && hung.error.message.includes('hook-made.txt') && hung.error.message.includes('git reset --merge'))
+check('integrate ran no git reset', gitCalls.every((argv) => argv[3] !== 'reset'))
 check('the hook that outlived the timeout is gone', await hookGone(pidFile))
 rmSync(hookMade, { force: true })
 rmSync(`${repo}/.git/hooks/pre-merge-commit`, { force: true })
-check('the same task merges once the hook is gone, so the killed merge left nothing in the way', (await integrate(T, 'merge', 'run')).ok === true)
+must(repo, 'reset', '--merge')
+check('after the command the answer names, and without the hook, the same task merges', (await integrate(T, 'merge', 'run')).ok === true)
+scrub()
+
+// A change that the user stages while the hook runs cannot be told from the merge's, so a killed merge keeps it.
+const X = 'task-x'
+const planX = await startTask(X)
+commit(planX.worktree, 'x.txt', 'task x\n', 'task x work')
+finish(X)
+rmSync(pidFile, { force: true })
+installHook('pre-merge-commit', `echo $$ > "${pidFile}"; sleep 30`)
+mergeTimeoutMs = 2500
+const merging = integrate(X, 'merge', 'run')
+for (let wait = 0; wait < 250 && !existsSync(pidFile); wait += 1) await new Promise((done) => setTimeout(done, 20))
+writeFileSync(`${repo}/shared.txt`, 'a change of the user\n')
+must(repo, 'add', 'shared.txt')
+const withUser = await merging
+mergeTimeoutMs = null
+check('a change staged by the user while the hook ran: the answer is git_failed, names the timeout and says nothing was reset', withUser.ok === false && withUser.error?.code === 'git_failed' && /did not finish within 2500 ms/.test(withUser.error.message) && withUser.error.message.includes('nothing was reset'))
+check('the change the user staged is still staged, with the user text', must(repo, 'diff', '--cached', '--name-only').split('\n').includes('shared.txt') && readFileSync(`${repo}/shared.txt`, 'utf8') === 'a change of the user\n')
+check('the answer lists the path of the user and the path of the killed merge', withUser.error?.message.includes('shared.txt') === true && withUser.error.message.includes('x.txt'))
+check('integrate ran no git reset for it either', gitCalls.every((argv) => argv[3] !== 'reset'))
+check('the hook that the user waited on is gone', await hookGone(pidFile))
 scrub()
 
 const U = 'task-u'
@@ -365,6 +389,21 @@ const printed = await integrate(K, 'merge', 'run')
 check('a hook that prints on stdout has its text in hook_failed, which git sends to stderr', printed.ok === false && printed.error?.code === 'hook_failed' && printed.error.message.includes('plain-stdout-words'))
 rmSync(`${repo}/.git/hooks/pre-merge-commit`, { force: true })
 check('the same task merges once the hook lets go', (await integrate(K, 'merge', 'run')).ok === true)
+scrub()
+
+// A reference-transaction hook refuses the ref update, so no merge is pending, and it leaves a file all the same.
+const Y = 'task-y'
+const planY = await startTask(Y)
+commit(planY.worktree, 'y.txt', 'task y\n', 'task y work')
+finish(Y)
+const headBeforeY = must(repo, 'rev-parse', 'HEAD')
+installHook('reference-transaction', `if [ "$1" = prepared ]; then echo made > "${repo}/ref-leftover.txt"; echo "ref guard: no updates" >&2; exit 1; fi`)
+const refLeft = await integrate(Y, undefined, 'run')
+check('with the opt-in, a reference-transaction hook that leaves a file and refuses the fast-forward is hook_failed, and the answer names the file', refLeft.ok === false && refLeft.error?.code === 'hook_failed' && refLeft.error.message.includes('keeps changes the hook made') && refLeft.error.message.includes('ref-leftover.txt') && refLeft.error.message.includes('ref guard: no updates'))
+check('no merge was pending, so none was aborted, and only the file the hook made stays', !existsSync(`${repo}/.git/MERGE_HEAD`) && !refLeft.error.message.includes('the merge was aborted') && must(repo, 'status', '--porcelain') === '?? ref-leftover.txt' && must(repo, 'rev-parse', 'HEAD') === headBeforeY)
+rmSync(`${repo}/ref-leftover.txt`, { force: true })
+rmSync(`${repo}/.git/hooks/reference-transaction`, { force: true })
+check('the same task fast-forwards once the hook lets go', (await integrate(Y, undefined, 'run')).ok === true)
 scrub()
 
 check('an unknown task is task_not_found', (await integrate('task-nope')).error?.code === 'task_not_found')

@@ -10,7 +10,6 @@ import {
 import { failureSnippet, isRecord, isWithin, shortBranch, type JobRecord } from './types.ts'
 import {
   GIT_TIMEOUT_MS,
-  gitArgv,
   gitDetail,
   isAncestorArgv,
   mergeAbortArgv,
@@ -106,38 +105,51 @@ async function must(run: Git, argv: string[], what: string): Promise<ProcessResu
 type Aftermath = {
   conflicted: string[]
   abortedMerge: boolean
-  undidHalfMadeMerge: boolean
   headHasBranch: boolean
   leftBehind: string[]
 }
 
+async function branchIsInHead(run: Git, repo: string, branch: string): Promise<boolean> {
+  const compared = await run(isAncestorArgv(repo, branch))
+  if (compared.exitCode !== 0 && compared.exitCode !== 1) throw new Error(`git merge-base --is-ancestor failed${gitDetail(compared.stderr)}`)
+  return compared.exitCode === 0
+}
+
 /**
- * Puts the checkout back after a merge that did not succeed, then reads what stays in it. The unmerged files are read
- * before any abort, since merge --abort clears them from the index. git 2.43 runs pre-merge-commit before it writes
- * MERGE_HEAD, so a git killed there leaves the merge in the index with no merge pending, which merge --abort does
- * not undo; git reset --merge does, unless HEAD already moved onto the branch.
+ * Aborts a pending merge, then reads what stays in the checkout. The unmerged files are read before any abort, since
+ * merge --abort clears them from the index. git 2.43 runs pre-merge-commit before it writes MERGE_HEAD, so a git killed
+ * there leaves the merge in the index with no merge pending. Nothing resets that: its changes cannot be told from the
+ * ones the user made while the hook ran, so the answer lists them.
  */
 async function cleanUp(run: Git, repo: string, branch: string, killed: boolean): Promise<Aftermath> {
   const conflicted = outputLines((await run(unmergedFilesArgv(repo))).stdout)
   const pending = (await run(mergeHeadArgv(repo))).exitCode === 0
   if (pending) await must(run, mergeAbortArgv(repo), 'git merge --abort')
-  if (!pending && !killed) return { conflicted, abortedMerge: false, undidHalfMadeMerge: false, headHasBranch: false, leftBehind: [] }
-  const headHasBranch = killed && !pending && (await run(isAncestorArgv(repo, branch))).exitCode === 0
-  const status = async () => outputLines((await must(run, statusArgv(repo), 'git status')).stdout)
-  let leftBehind = await status()
-  const undidHalfMadeMerge = killed && !pending && !headHasBranch && leftBehind.some((line) => !line.startsWith('??'))
-  if (undidHalfMadeMerge) {
-    await must(run, gitArgv(repo, 'reset', '--merge'), 'git reset --merge')
-    leftBehind = await status()
-  }
-  return { conflicted, abortedMerge: pending, undidHalfMadeMerge, headHasBranch, leftBehind }
+  const headHasBranch = killed && !pending && (await branchIsInHead(run, repo, branch))
+  const leftBehind = outputLines((await must(run, statusArgv(repo), 'git status')).stdout)
+  return { conflicted, abortedMerge: pending, headHasBranch, leftBehind }
+}
+
+function pathList(leftBehind: string[]): string {
+  const paths = leftBehind.slice(0, LEFT_PATHS_LISTED).map((line) => line.slice(3))
+  const more = leftBehind.length > LEFT_PATHS_LISTED ? `, and ${leftBehind.length - LEFT_PATHS_LISTED} more` : ''
+  return `${paths.join(', ')}${more}`
 }
 
 function keptClause(repo: string, madeBy: string, leftBehind: string[]): string {
-  if (leftBehind.length === 0) return ''
-  const paths = leftBehind.slice(0, LEFT_PATHS_LISTED).map((line) => line.slice(3))
-  const more = leftBehind.length > LEFT_PATHS_LISTED ? `, and ${leftBehind.length - LEFT_PATHS_LISTED} more` : ''
-  return `; ${repo} keeps changes ${madeBy} made: ${paths.join(', ')}${more}`
+  return leftBehind.length === 0 ? '' : `; ${repo} keeps changes ${madeBy} made: ${pathList(leftBehind)}`
+}
+
+function killedClause(repo: string, branch: string, { abortedMerge, headHasBranch, leftBehind }: Aftermath): string {
+  const aborted = abortedMerge ? '; the merge was aborted' : ''
+  const finished = headHasBranch ? `; ${branch} is already part of HEAD of ${repo}, so the merge itself finished` : ''
+  if (leftBehind.length === 0) return `${aborted}${finished}`
+  const safe = abortedMerge ? '' : '; nothing was reset, so changes of your own are safe'
+  const manual =
+    abortedMerge || headHasBranch
+      ? ''
+      : `. If the merge left them, check them with git status, then run git reset --merge in ${repo} to drop what it staged (untracked files stay, and staged changes of your own go with it)`
+  return `${aborted}${finished}${safe}; ${repo} has changes: ${pathList(leftBehind)}${manual}`
 }
 
 type Merging = { repo: string; branch: string; strategy: IntegrateStrategy; gitHooks: IntegrateGitHooks }
@@ -150,14 +162,11 @@ async function failedMerge(run: Git, { repo, branch, strategy, gitHooks }: Mergi
     const ended = 'unfinished' in merged ? 'did not finish' : 'failed'
     return fail('git_failed', `git merge of ${branch} into ${repo} ${ended}, and ${reasonOf(err)}; ${repo} may still be mid-merge`)
   }
-  const { conflicted, abortedMerge, undidHalfMadeMerge, headHasBranch, leftBehind } = after
-  const aborted = abortedMerge ? '; the merge was aborted' : ''
   if ('unfinished' in merged) {
-    const undone = undidHalfMadeMerge ? '; the half-made merge was undone with git reset --merge' : ''
-    const finished = headHasBranch ? `; ${branch} is already part of HEAD of ${repo}, so the merge itself finished` : ''
-    const kept = keptClause(repo, 'the merge or its hook', leftBehind)
-    return fail('git_failed', `git merge ${branch} into ${repo} did not finish: ${merged.unfinished}${aborted}${undone}${finished}${kept}`)
+    return fail('git_failed', `git merge ${branch} into ${repo} did not finish: ${merged.unfinished}${killedClause(repo, branch, after)}`)
   }
+  const { conflicted, abortedMerge, leftBehind } = after
+  const aborted = abortedMerge ? '; the merge was aborted' : ''
   const { result } = merged
   if (conflicted.length > 0) {
     const kept = keptClause(repo, 'the merge', leftBehind)
@@ -176,8 +185,8 @@ async function failedMerge(run: Git, { repo, branch, strategy, gitHooks }: Mergi
 /**
  * Merge a finished task's branch into the checkout it was launched from. Every git call is an explicit
  * argv in the destination, with no force. A job still running on the branch or in the task's worktree refuses
- * the merge before git runs. A merge that conflicts, is refused, or is killed for outliving git's timeout is
- * cleaned up, and the answer says what stays in the checkout; the worktree stays.
+ * the merge before git runs. A merge that fails has its pending merge aborted, and the answer lists what stays in
+ * the checkout. A merge killed for outliving git's timeout with none pending resets nothing. The worktree stays.
  *
  * `gitHooks` says whether `$` runs the checkout's hooks as they are, which only an engine that keeps them on can do.
  * With `run`, a merge that a hook refuses is aborted too, and answers hook_failed.
