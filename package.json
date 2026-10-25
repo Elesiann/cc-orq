@@ -14,6 +14,7 @@
     "validate": "claude plugin validate . --strict"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "typescript": "^5.9.3"
   }
 }
