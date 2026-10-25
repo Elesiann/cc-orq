@@ -48,9 +48,10 @@ when the task ends, and a `delegate` job is read with `status`.
   OpenCode, Antigravity or the Claude CLI. The task's header names the
   provider instance and the model, so the parent session picks the right model
   for each job.
-- **A permission ceiling.** A task never runs with a broader mode than the
-  lower of your `ceiling` configuration and the permission mode of the session
-  that starts it, and a driver refuses a mode it cannot enforce with a CLI flag.
+- **A permission ceiling.** A task never runs with a broader mode than your
+  `ceiling` configuration allows, nor, while the hook that reads the session's
+  permission mode runs, than that mode allows. A driver refuses a mode it cannot
+  enforce with a CLI flag.
 - **Jobs that outlive the session.** Workers run detached, keep their prompt,
   events and answer on disk, and can be read, cancelled or integrated from a
   later session.
@@ -279,8 +280,10 @@ supervisor stops the job.
 
 A task never runs with a broader mode than its ceiling. The ceiling is the lower
 of two limits: the `ceiling` in your [configuration](#configuration), and the
-permission mode of the session that starts the task. The `delegate` tool and the
-`cc-orq:task` agent both obey it.
+permission mode of the session that starts the task. The configuration's limit
+always holds. The session's limit reaches `delegate` through a hook, and holds
+only while that hook runs (see [The session's limit](#the-sessions-limit)). The
+`delegate` tool and the `cc-orq:task` agent both obey the ceiling.
 
 ### The configuration's limit
 
@@ -344,8 +347,10 @@ configuration alone limits the task.
 
 A hook that outlives its timeout does not block the call (measured on 2.1.310),
 and the call then reaches the server as the model wrote it. The hook takes about
-30 ms and its timeout is 30 s. `delegate` also takes a prompt of at most 200,000
-characters, so that no call outgrows the hook.
+30 ms and its timeout is 30 s. So that it ends before that, the hook reads at most
+8 MiB and gives up after 20 s, both with exit 2. `delegate` also takes a prompt of
+at most 200,000 characters. That cap keeps the usual input small. It does not
+bound the whole input, since the other fields are free text.
 
 ### The effective ceiling
 
@@ -494,8 +499,18 @@ refused for that, and it does not take the lock.
 The refusal names no job, and reads `is in use by a launch in progress`, only
 when the lock holds no job id yet, when two launches claim it at the same
 moment, when another launch is taking over the lock of a job that ended, or
-when this launch lost its lock while it scanned the jobs directory. Try again a
-moment later.
+when this launch lost its lock while it scanned the jobs directory or wrote its
+job files. Try again a moment later.
+
+A launch keeps its lock young while it works. It touches the lock, with a check
+that the lock is still its own, while it scans the jobs directory, after the scan,
+and again after it writes its job files, right before the start script. When a
+check finds that another launcher has taken the lock, the launch starts nothing
+and is refused. One window remains: a start script that takes more than 10 s,
+the time a launch with no supervisor pid yet counts as alive, to get its
+supervisor to write that pid. Another launcher can then take the lock and start
+its own job, and both run. Once the pid is written, the lock holds however old it
+is.
 
 The lock is a directory under `.locks` in the jobs directory. It stays after
 its job ends. The next shared launch takes it over, as it does the lock of a

@@ -59,9 +59,10 @@ All notable changes to cc-orq are recorded here. The format follows
   the session's permission mode, or both.
 - `capabilities` answers the effective ceiling as `runtimeMode` and
   `interactionMode`, the lower of the configuration's `ceiling` and the
-  session's permission mode, and adds `ceiling` (the configuration's limits, the
-  session's mode and each isolation's effective ceiling) and `client` (whether
-  the client declared MCP tasks and form input).
+  session's permission mode, which counts as far as the hook supplies it, and
+  adds `ceiling` (the configuration's limits, the session's mode and each
+  isolation's effective ceiling) and `client` (whether the client declared MCP
+  tasks and form input).
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.

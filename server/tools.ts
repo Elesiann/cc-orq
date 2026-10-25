@@ -105,7 +105,7 @@ const CAPABILITIES_DESCRIPTION =
   'List the orq provider instances (as configured in the instances list) with their live models from the catalog probe, ' +
   "each model's options and allowed values (such as reasoningEffort), and each instance's constraints. " +
   'runtimeMode and interactionMode are the most that a task in its own worktree, the default isolation, may run as: ' +
-  'the lower of the config ceiling and the session permission mode. ' +
+  'the lower of the config ceiling and the session permission mode. The session mode counts as far as the cc-orq hook supplies it; without the hook only the config ceiling holds. ' +
   'ceiling shows both limits, the effective ceiling of a worktree task and of a shared one, and a warning for a config value that is not valid; ' +
   'client says whether this client gets tasks and forms. ' +
   'Read it before you name a target in a task brief, and do not guess model ids. Takes no input; sessionMode is filled by the cc-orq hook, so leave it out.'
@@ -114,7 +114,7 @@ const DELEGATE_DESCRIPTION =
   'The answer comes at once, as {"taskId", "status": "running"}; read the job with status until it ends. ' +
   'The worker has no history, so the prompt carries the whole brief, at most 200,000 characters. ' +
   'isolation worktree, the default, gives the worker its own git worktree on a new branch: tell it to commit, because integrate merges commits only. ' +
-  'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode. ' +
+  'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode, which counts as far as the cc-orq hook supplies it. ' +
   'runtime and interaction ask for less; a request above the ceiling is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
   'questions parent, the default, ends a job that asks a question with BLOCKED in its result; questions human is not available yet. ' +
   'Input: {"target", "model", "cwd", "prompt"}, and optionally effort, isolation, role, runtime, interaction and questions.'
