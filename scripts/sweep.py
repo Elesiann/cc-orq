@@ -10,12 +10,12 @@ supervisor marks a job with ORQ_JOB_DIR, and the catalog probe marks each
 `opencode models` call with ORQ_PROBE_ID.
 
 This script and every ancestor of it stay alive, because its caller carries the
-marker too, and so does each PID given to --spare-tree with everything below it:
-a supervisor that sweeps after its CLI exited spares itself, so that its own
-helper processes are not counted as leftovers. A process that ignores SIGTERM gets SIGKILL at once, since a
-supervisor's descendants inherit that ignore and waiting for them is pointless.
-The others get SIGTERM and GRACE_SECONDS (default 1) to exit, then SIGKILL. It
-scans again after each round, up to five times, for a process spawned meanwhile.
+marker too, and so does each PID given to --spare-tree with everything below it,
+for a caller whose own helper processes carry the marker. A process that
+ignores SIGTERM gets SIGKILL at once, since a supervisor's descendants inherit
+that ignore and waiting for them is pointless. The others get SIGTERM and
+GRACE_SECONDS (default 1) to exit, then SIGKILL. It scans again after each
+round, up to five times, for a process spawned meanwhile.
 
 It reads /proc, so where /proc is missing (macOS) it does nothing. It prints
 nothing and exits 0 when no process carries the marker, and one line to stderr

@@ -33,6 +33,11 @@ All notable changes to cc-orq are recorded here. The format follows
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
+- A cancel no longer waits out the 5 seconds when the CLI ends sooner. Once the
+  CLI has ended and its leftovers are swept, the supervisor writes `exit` 124
+  and sends SIGKILL to the process group. A process in the group that needs
+  longer than the CLI to stop on SIGTERM gets less than the 5 seconds a cancel
+  gave it before.
 
 ### Fixed
 
@@ -60,12 +65,17 @@ All notable changes to cc-orq are recorded here. The format follows
 - A process that a job's CLI left running outside its process group, such as an
   OpenCode MCP server that was still starting when the command ended, no longer
   outlives the job. When the CLI is gone, finished or cancelled, the supervisor
-  ends every process that still carries the job's `ORQ_JOB_DIR`, and the
-  `capabilities` probe does the same for each `opencode models` call. Under
-  load that leftover was up to 20 processes after one probe on OpenCode 2.0.27.
+  ends every process that still carries the job's `ORQ_JOB_DIR` before it
+  writes `exit`, so a cancelled job reads `cancelled` only once they are gone,
+  and the `capabilities` probe does the same for each `opencode models` call.
+  Under load that leftover was up to 20 processes after one probe on OpenCode
+  2.0.27.
 - Cancelling an OpenCode job sends SIGINT first, so OpenCode aborts the session.
   SIGTERM left the session claimed, and OpenCode's shared service continues a
-  claimed session ("continue where you left off") the next time it starts.
+  claimed session ("continue where you left off") the next time it starts. The
+  supervisor sends the SIGINT to the pid it recorded in `cli.pid`. A client that
+  is still running 3 seconds later gets one line in `child.log`, and the cancel
+  goes on with SIGTERM.
 
 ## [0.1.1] - 2026-10-21
 
