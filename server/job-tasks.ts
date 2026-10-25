@@ -188,7 +188,7 @@ const whoIs = (job: JobRecord): string => `${job.instanceId ?? job.runner ?? job
 function capText(text: string): string {
   const bytes = Buffer.from(text, 'utf8')
   if (bytes.length <= RESULT_LIMIT_BYTES) return text
-  const cut = bytes.subarray(0, RESULT_LIMIT_BYTES).toString('utf8').replace(/�$/, '')
+  const cut = bytes.subarray(0, RESULT_LIMIT_BYTES).toString('utf8').replace(/\uFFFD$/, '')
   return `${cut}\n\n[cut at 100 KB: the full text is in last.txt and in the answer of the status tool]`
 }
 
