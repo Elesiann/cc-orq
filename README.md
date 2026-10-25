@@ -992,7 +992,12 @@ an allowed root, a worktree counts as the task's own only when `git worktree
 list` of the recorded checkout lists it on the recorded branch (otherwise the
 worker runs, and is locked, as a shared one), and a level above the ceiling opens
 the same form as `delegate` for a client with tasks and forms, and is refused for
-any other. An earlier approval carries over only from the task records the
+any other. The worker resumes in a directory the server resolved and checked, never
+in the path `meta.json` names: a worktree is the task's own only when its branch is
+`orq/ID` of a job that exists and does not run, its path is the one a launch computes
+for that ID, git lists it on that branch, the directory resolves, links followed, to
+where a launch from the recorded directory put it, and no other live job holds the
+branch. Anything else runs as a shared task, scoped and locked as one. An earlier approval carries over only from the task records the
 server wrote for the same chain of tasks, and only for the same worker (instance,
 model, directory and isolation) at no higher level; the `parent` in a job's
 `meta.json` never gives one, since a worker can write that file.

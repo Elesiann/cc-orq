@@ -2,10 +2,11 @@
 // the real server over stdio and a fake claude that asks on its first run and quotes what it is told when it is resumed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
-import { NO_TASKS, SECOND, WITH_FORMS, checkout, job, jobDirs, scene, until } from './support/harness.mjs'
+import { NO_TASKS, SECOND, WITH_FORMS, checkout, git, job, jobDirs, scene, until } from './support/harness.mjs'
 
 const QUESTION = 'Which environment, staging or production?'
 
@@ -13,7 +14,7 @@ const QUESTION = 'Which environment, staging or production?'
 const QUESTION_WORKER = [
   '#!/bin/bash',
   'printf "%s\\n" "$@" > "$ORQ_JOB_DIR/argv.txt"',
-  'pwd > "$ORQ_JOB_DIR/cwd.txt"',
+  'pwd -P > "$ORQ_JOB_DIR/cwd.txt"',
   'for last; do :; done',
   'if printf "%s\\n" "$@" | grep -qx -e --resume; then',
   '  first=$(printf "%s" "$last" | head -n 1)',
@@ -273,6 +274,43 @@ test('the continuation is scoped like a launch, and a worktree that git does not
   assert.equal(code(scoped), 'cwd_out_of_scope', 'a directory outside the session directory and the allowed roots is not resumed in')
 }
 )
+
+test('a meta.json whose cwd or worktree points elsewhere does not move the worker out of its own worktree, or into one that another job holds', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = s.startIn(session)
+  const { id } = await asked(s, server, repo)
+  const first = meta(s, id)
+  const rewrite = (fields) => writeFileSync(join(s.jobsDir, id, 'meta.json'), JSON.stringify({ ...first, ...fields }))
+
+  // A link inside the worktree that leads to the user's own checkout: the path starts in the worktree and ends outside it.
+  symlinkSync(repo, join(first.worktree, 'escape'))
+  rewrite({ cwd: join(first.worktree, 'escape') })
+  const escaped = await server.call('answer', { taskId: id, answer: 'Production.', sessionMode: 'acceptEdits' })
+  assert.equal(code(escaped), 'runtime_mode_escalation_denied', 'a directory that is not in the worktree runs as a shared task, and a shared task is held to the shared ceiling')
+  assert.equal(jobDirs(s).length, 1, 'no worker was resumed in the checkout')
+  assert.equal(existsSync(join(s.jobsDir, id, 'next')), false)
+
+  // The worktree and the branch of a task that is still running, named by a job that is not its own.
+  const wt = join(session, 'repo-wt', 'job-held')
+  git(repo, ['worktree', 'add', '-q', wt, '-b', 'orq/job-held'])
+  job(s.jobsDir, 'job-held', { meta: { cwd: wt, repo, baseSha: git(repo, ['rev-parse', 'HEAD']), branch: 'orq/job-held', worktree: wt }, files: { pgid: String(s.liveGroup()) } })
+  rewrite({ cwd: wt, repo, branch: 'orq/job-held', worktree: wt, runtimeMode: 'approval-required' })
+  const held = await server.call('answer', { taskId: id, answer: 'Production.', sessionMode: 'acceptEdits' })
+  assert.equal(code(held), 'worktree_busy', 'the worktree that another job holds is locked like a shared one')
+  assert.ok(held.json.error.message.includes('job-held'), held.text)
+  assert.deepEqual(jobDirs(s).filter((dir) => existsSync(join(s.jobsDir, dir, 'argv.txt'))), [id], 'no worker has run but the one that asked')
+  assert.equal(existsSync(join(s.jobsDir, id, 'next')), false, 'a launch that did not start gives the claim back')
+
+  // The same task, untouched, resumes in its own worktree.
+  rewrite({})
+  const own = await server.call('answer', { taskId: id, answer: 'Production.', sessionMode: 'acceptEdits' })
+  assert.ok(own.task !== undefined, own.text)
+  await until(server, own.task.taskId)
+  assert.equal(read(s, own.task.taskId, 'cwd.txt').trim(), realpathSync(first.worktree), 'it ran in the worktree the server made for the task')
+  assert.equal(spawnSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).stdout, '', 'and the checkout is as it was')
+})
 
 test('a client without tasks gets the id of the continuation at once and reads it with status', async (t) => {
   const s = scene({ bin: { claude: QUESTION_WORKER } })

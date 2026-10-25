@@ -1009,41 +1009,79 @@ export type ContinuationPlan = {
   isolation: TaskIsolation
   /** The directory the task was asked to work in, resolved: the checkout of a worktree task, the directory itself of a shared one. */
   requestCwd: string
+  /** Where the worker resumes: the resolved, checked directory, never the one meta.json names. */
+  cwd: string
   worktree?: NonNullable<Continuation['worktree']>
 }
 
-async function realPath($: CoreEngine, path: string): Promise<string> {
+/** The real path of a directory that exists, with every link followed; null when it does not exist. */
+async function realPath($: CoreEngine, path: string): Promise<string | null> {
   try {
-    const r = await $.process.run(['realpath', '-m', '--', path], { timeoutMs: 10000 })
-    return r.exitCode === 0 && r.stdout.trim().startsWith('/') ? r.stdout.trim() : path
+    const r = await $.process.run(['realpath', '-e', '--', path], { timeoutMs: 10000 })
+    const resolved = r.stdout.trim()
+    return r.exitCode === 0 && resolved.startsWith('/') ? resolved : null
   } catch {
-    return path
+    return null
   }
 }
 
-/**
- * The worktree of a job, when it is the one this task made: its directory is inside the worktree, and git of the recorded
- * checkout lists that worktree on the recorded branch. meta.json is the job's own file, and a worker that can write outside
- * its directory can change it, so a path that git does not list for the branch is not trusted to be held by this task alone.
- */
-async function ownWorktree($: CoreEngine, job: JobRecord): Promise<NonNullable<Continuation['worktree']> | null> {
-  const { repo, baseSha, branch, worktree } = job
-  if (repo === undefined || baseSha === undefined || branch === undefined || worktree === undefined) return null
-  if (!isWithin(job.cwd, worktree) || !(await isDirectory($, job.cwd))) return null
+/** Whether a live job other than `except` works on this branch, as far as its meta.json says. */
+async function branchHeldByAnother($: CoreEngine, jobsDir: string, branch: string, except: string): Promise<boolean> {
+  let entries: { name: string; kind: string }[]
   try {
+    entries = await $.fs.list(jobsDir)
+  } catch {
+    return false
+  }
+  for (const entry of entries) {
+    if (entry.kind !== 'dir' || entry.name === except) continue
+    const other = await readMeta($, jobsDir, entry.name)
+    if (other?.branch === branch && (await jobIsLive($, other))) return true
+  }
+  return false
+}
+
+type OwnWorktree = { fields: NonNullable<Continuation['worktree']>; cwd: string }
+
+/**
+ * The worktree of a job, when it is the one the server made for the task, and the directory to resume in. meta.json is the
+ * job's own file, and a worker that can write outside its directory can change it, so nothing in it is taken as it stands: the
+ * branch must be `orq/ID` of a job that exists and does not run, the worktree must be the path that a launch computes for that
+ * ID from the checkout git reports, git must list it on that branch, and the directory must resolve, links followed, to where a
+ * launch from the recorded directory would have put it. Anything else is not the task's own worktree, and the job runs, is
+ * scoped and is locked as a shared one.
+ */
+async function ownWorktree($: CoreEngine, config: OrqConfig, job: JobRecord): Promise<OwnWorktree | null> {
+  const { repo, baseSha, branch } = job
+  if (repo === undefined || baseSha === undefined || branch === undefined || job.worktree === undefined) return null
+  const rootId = branch.startsWith('orq/') ? branch.slice('orq/'.length) : ''
+  if (!isSafeJobId(rootId) || branchFor(rootId) !== branch) return null
+  try {
+    const top = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'rev-parse', '--show-toplevel'), { timeoutMs: GIT_TIMEOUT_MS })
+    if (top.exitCode !== 0) return null
+    const toplevel = await realPath($, top.stdout.trim())
+    const worktree = await realPath($, worktreePathFor(top.stdout.trim(), rootId))
+    if (toplevel === null || worktree === null || (await realPath($, job.worktree)) !== worktree) return null
     const listed = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'worktree', 'list', '--porcelain'), { timeoutMs: GIT_TIMEOUT_MS })
     if (listed.exitCode !== 0) return null
-    const wanted = await realPath($, worktree)
+    let registered = false
     for (const block of listed.stdout.split('\n\n')) {
       const lines = block.split('\n')
       const path = lines.find((line) => line.startsWith('worktree '))?.slice('worktree '.length)
-      if (path === undefined || !lines.includes(`branch refs/heads/${branch}`)) continue
-      if ((await realPath($, path)) === wanted) return { repo, baseSha, branch, worktree }
+      if (path !== undefined && lines.includes(`branch refs/heads/${branch}`) && (await realPath($, path)) === worktree) registered = true
     }
+    if (!registered) return null
+    const asked = await realPath($, repo)
+    if (asked === null) return null
+    const subdir = asked !== toplevel && isWithin(asked, toplevel) ? asked.slice(toplevel.length) : ''
+    const cwd = await realPath($, `${worktree}${subdir}`)
+    if (cwd === null || (await realPath($, job.cwd)) !== cwd) return null
+    if (rootId !== job.id && (await readMeta($, config.jobsDir, rootId)) === null) return null
+    if (await branchHeldByAnother($, config.jobsDir, branch, job.id)) return null
+    return { fields: { repo, baseSha, branch, worktree }, cwd }
   } catch {
-    /* a git that cannot be asked confirms nothing */
+    return null
   }
-  return null
 }
 
 /**
@@ -1071,9 +1109,9 @@ export async function continuationPlan(
   if (instance.env?.CODEX_HOME !== parent.codexHome) return unavailable('the CODEX_HOME of its instance changed, so its session is not where the worker left it')
   if (!plainArgument(model)) return unavailable('its model is not one word')
   if (!(await isDirectory($, parent.cwd))) return unavailable(`its directory ${parent.cwd} is gone`)
-  const worktree = await ownWorktree($, parent)
+  const own = await ownWorktree($, config, parent)
   // The scope is judged as a launch judges it: on the directory the task was asked to work in.
-  const scoped = await scopedCwd($, config, sessionDir, worktree === null ? parent.cwd : worktree.repo)
+  const scoped = await scopedCwd($, config, sessionDir, own === null ? parent.cwd : own.fields.repo)
   if ('refusal' in scoped) {
     const body = scoped.refusal.slice(`${TASK_REFUSAL}: `.length)
     const outside = /^cwd_out_of_scope: ([\s\S]*)$/.exec(body)
@@ -1090,9 +1128,10 @@ export async function continuationPlan(
       model,
       modes: { runtimeMode, interactionMode },
       flags: [...policy.flags, ...effort],
-      isolation: worktree === null ? 'shared' : 'worktree',
+      isolation: own === null ? 'shared' : 'worktree',
       requestCwd: scoped.cwd,
-      ...(worktree !== null ? { worktree } : {}),
+      cwd: own === null ? scoped.cwd : own.cwd,
+      ...(own !== null ? { worktree: own.fields } : {}),
     },
   }
 }
@@ -1119,7 +1158,7 @@ export async function launchContinuation(
     agentId: input.agentId,
     runner: DRIVER_RUNNER[instance.driver],
     model,
-    cwd: parent.cwd,
+    cwd: plan.cwd,
     prompt: taskPrompt(input.answer, undefined),
     env: instance.env ?? {},
     instanceId: instance.id,

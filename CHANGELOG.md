@@ -108,8 +108,12 @@ All notable changes to cc-orq are recorded here. The format follows
   answers `resume_unavailable`, and `delegate` with the brief and the answer is
   the way left. The continuation never runs above its worker's level, and it is
   checked as a launch is: its directory must be in scope, a worktree counts as the
-  task's own only when `git worktree list` of the recorded checkout lists it on the
-  recorded branch (else the worker is locked as a shared one), and a level above
+  task's own only when its branch is `orq/ID` of a job that exists and does not
+  run, its path is the one a launch computes for that ID, `git worktree list` of the
+  recorded checkout lists it on that branch, its directory resolves, links followed,
+  to where a launch put it, and no other live job holds the branch (else the worker
+  runs, is scoped and is locked as a shared one, in a resolved directory that is
+  never the path `meta.json` names), and a level above
   the ceiling opens the same form as `delegate`, or is refused for a client with no
   form. An approval carries over only from the server's own task records of the
   same chain, for the same worker at no higher level, never from `meta.json`.
