@@ -148,7 +148,7 @@ export function fixtureSource() {
   }
   return {
     async create(tool, input, client) {
-      const work = WORK[tool]
+      const work = Object.hasOwn(WORK, tool) ? WORK[tool] : undefined
       const args = argumentsOf(tool, input)
       if (!client.tasks) {
         return { result: work.sync !== undefined ? await work.sync(args) : text(`${tool} needs a client that declares ${TASKS_EXTENSION}`, true) }
@@ -227,7 +227,7 @@ export function registerFixtureTools(server, source) {
   }))
   server.setRequestHandler('tools/call', async (request, ctx) => {
     const { name, arguments: input = {} } = request.params
-    const tool = TOOLS[name]
+    const tool = Object.hasOwn(TOOLS, name) ? TOOLS[name] : undefined
     if (tool === undefined) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Tool ${name} not found`)
     if (tool.required && !clientInfoOf(ctx.mcpReq.envelope).tasks) throw missingTasks()
     if (name === 'test_tool_with_task') return testToolWithTask(source, input, ctx)

@@ -34,10 +34,15 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           repository: modelcontextprotocol/conformance
           ref: c37eec888e1c6ff140af79987a40008548b7cc5f
           path: conformance-suite

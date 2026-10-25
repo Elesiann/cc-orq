@@ -7,7 +7,7 @@
 // Each scenario's results, its checks.json included, go under DIR (default: a new temporary directory).
 
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -74,6 +74,7 @@ async function main() {
   try {
     for (const name of names) {
       const dir = join(out, name)
+      rmSync(dir, { recursive: true, force: true })
       mkdirSync(dir, { recursive: true })
       if (github) console.log(`::group::${name}`)
       const { code, output } = await runSuite(words, ['server', '--url', entry.url, '--scenario', name, '--output-dir', dir])
