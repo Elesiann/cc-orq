@@ -143,11 +143,15 @@ async function exitCodeOf($: LockEngine, script: string): Promise<number> {
 
 const quoted = shellWord
 
+/** A lock broken between the failed mkdir and the look at the directory is gone, so the mkdir runs once more before exit 9. */
 function claimScript({ locks, dir }: LockPaths, owner: string, key: string): string {
   return (
     `# orq:lock claim\n` +
     `mkdir -p ${quoted(locks)} || exit 8\n` +
-    `mkdir ${quoted(dir)} 2>/dev/null || { [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}; exit 9; }\n` +
+    `if ! mkdir ${quoted(dir)} 2>/dev/null; then\n` +
+    `  [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}\n` +
+    `  mkdir ${quoted(dir)} 2>/dev/null || { [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}; exit 9; }\n` +
+    `fi\n` +
     `( set -C; printf '%s\\n' ${quoted(owner)} > ${quoted(`${dir}/owner`)} ) 2>/dev/null || exit ${EXIT_LOST}\n` +
     `printf '%s\\n' ${quoted(key)} > ${quoted(`${dir}/key`)} 2>/dev/null\n` +
     `exit 0`
@@ -160,7 +164,6 @@ function mutexScript(mutex: string): string {
     `i=0\n` +
     `while [ "$i" -lt 100 ]; do\n` +
     `  mkdir ${quoted(mutex)} 2>/dev/null && exit ${EXIT_TAKEN}\n` +
-    `  [ -d ${quoted(mutex)} ] || exit 9\n` +
     `  sleep 0.02\n` +
     `  i=$((i + 1))\n` +
     `done\n` +

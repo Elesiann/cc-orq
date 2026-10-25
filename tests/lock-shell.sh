@@ -3,15 +3,18 @@
 # launchTaskFromHeader), every launch in its own OS process, and a fake claude as the worker. The kit cannot
 # fork processes, so this is where the lock meets a real mkdir, a real supervisor and a real kill -9.
 #
-# Usage: bash tests/lock-shell.sh [race]
+# Usage: bash tests/lock-shell.sh [race|dead]
 #   ORQ_ROOT=DIR        launch through the engine of another checkout, such as an older commit
 #   ORQ_LOCK_ROUNDS=N   rounds of the twenty-launch scenario (default 1)
-#   race                run only those rounds and print their counts, which is how the race of an engine
-#                       without the lock shows
+#   ORQ_DEAD_ROUNDS=N   rounds of the twenty launches into a dead lock (default 5)
+#   race                run only the twenty-launch rounds and print their counts, which is how the race of an
+#                       engine without the lock shows
+#   dead                run only the dead-lock rounds and print their counts
 set -e -o pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ENGINE=${ORQ_ROOT:-$ROOT}
 ROUNDS=${ORQ_LOCK_ROUNDS:-1}
+DEAD_ROUNDS=${ORQ_DEAD_ROUNDS:-5}
 T="$ROOT/.ref/tmp/lock-shell-$(date +%s)-$$"
 mkdir -p "$T/bin" "$T/slow-bin"
 T=$(cd -P "$T" && pwd)
@@ -151,8 +154,24 @@ round() {
   echo "round $n: launched=$(tally launched) busy=$(tally busy) other=$(grep -vc '^launched \|^busy ' "$T/many.out" || true)"
 }
 
+dead_round() {
+  local n=$1 repo
+  repo="$SESSION/repo-$n"; new_repo "$repo"
+  mkdir -p "$JOBS/dead-$n" "$(lock_of "$repo")"
+  printf '0\n' > "$JOBS/dead-$n/exit"
+  printf 'dead-%s\n' "$n" > "$(lock_of "$repo")/owner"
+  launch_many 20 "$repo" shared
+  echo "dead-lock round $n: launched=$(tally launched) busy=$(tally busy) could-not-lock=$(grep -c 'could not lock' "$T/many.out" || true) other=$(grep -vc '^launched \|^busy ' "$T/many.out" || true)"
+}
+dead_session() { SESSION="$T/session-dead"; JOBS="$T/jobs-dead"; HOLD="$T/hold-dead"; export HOLD; : > "$HOLD"; }
+
 if [ "${1:-}" = race ]; then
   for n in $(seq 1 "$ROUNDS"); do round "$n"; done
+  exit 0
+fi
+if [ "${1:-}" = dead ]; then
+  dead_session
+  for n in $(seq 1 "$DEAD_ROUNDS"); do dead_round "$n"; done
   exit 0
 fi
 
@@ -226,6 +245,16 @@ done
 [ "$two_holders" -eq 0 ] && ok "two launchers breaking one dead lock: never two holders, over 20 tries" || bad "two holders in $two_holders of 20 tries"
 [ "$no_holder" -eq 0 ] && ok "and one of them always got the lock" || bad "no holder in $no_holder of 20 tries"
 [ -z "$(ls "$JOBS/.locks" | grep '\.' || true)" ] && ok "no mutex or tombstone is left behind" || bad "left in .locks: $(ls "$JOBS/.locks" | grep '\.')"
+rm -f "$HOLD"; unset HOLD
+
+dead_session
+for n in $(seq 1 "$DEAD_ROUNDS"); do
+  dead_round "$n"
+  [ "$(tally launched)" -eq 1 ] && [ "$(tally busy)" -eq 19 ] && [ "$(grep -c 'could not lock' "$T/many.out" || true)" -eq 0 ] \
+    && ok "dead-lock round $n: twenty launches give one job and nineteen worktree_busy, none could not lock" \
+    || { bad "dead-lock round $n: twenty launches into a dead lock (see counts above)"; grep -v '^launched ' "$T/many.out" | cut -c1-200 | sort | uniq -c | sed -n 1,4p; }
+done
+[ -z "$(ls "$JOBS/.locks" | grep '\.' || true)" ] && ok "the dead-lock rounds left no mutex or tombstone behind" || bad "left in .locks: $(ls "$JOBS/.locks" | grep '\.')"
 rm -f "$HOLD"; unset HOLD
 
 SESSION="$T/session-same"; JOBS="$T/jobs-same"; HOLD="$T/hold-same"; export HOLD; : > "$HOLD"

@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { LAUNCH_GRACE_MS, checkoutOf, claimCheckout, judgeLock, releaseLock, sha256Hex } from '../../hooks/lock.ts'
+import { shellWord } from '../../hooks/types.ts'
 import { nodeEngine } from '../../server/node-engine.ts'
 
 test('sha256Hex agrees with node:crypto across padding boundaries and non-ASCII text', () => {
@@ -136,6 +137,16 @@ function backdate(path, seconds) {
   utimesSync(path, then, then)
 }
 
+// `shim` is bash that runs before the script of one action; a shell function in it shadows a command the script
+// calls, which is how another launcher acts in the middle of the script without any timing.
+function withShim(engine, action, shim) {
+  const run = (argv, init) => {
+    const script = argv[2]
+    return engine.process.run(script.startsWith(`# orq:lock ${action}`) ? ['bash', '-c', `${shim}\n${script}`] : argv, init)
+  }
+  return { ...engine, process: { ...engine.process, run } }
+}
+
 test('a claim writes the owner and the key, and a second claim is busy with the first owner id', async () => {
   const { root, engine, jobsDir } = scratch()
   try {
@@ -221,6 +232,71 @@ test('releasing gives the lock back, and never removes a lock that another job t
     writeFileSync(join(lock, 'owner'), 'job-taker\n')
     await releaseLock(engine, again.held, probeOf({}))
     assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-taker\n')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a lock broken between the claim\'s failed mkdir and its look at the directory is claimed, not reported as a failure', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner'), 'job-gone\n')
+    const racing = withShim(
+      engine,
+      'claim',
+      `mkdir() { command mkdir "$@"; local rc=$?; [ $rc -ne 0 ] && [ "$1" = ${shellWord(lock)} ] && rm -rf ${shellWord(lock)}; return $rc; }`,
+    )
+    const claim = await claimCheckout(racing, jobsDir, 'job-new', repo, probeOf({ 'job-gone': 'finished' }))
+    assert.equal(claim.kind, 'held', JSON.stringify(claim))
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-new\n')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a lock broken and taken by another launcher between the claim\'s failed mkdir and its look is judged, and busy names the taker', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner'), 'job-gone\n')
+    const taken = `rm -rf ${shellWord(lock)}; command mkdir ${shellWord(lock)}; printf 'job-taker\\n' > ${shellWord(`${lock}/owner`)}`
+    const racing = withShim(
+      engine,
+      'claim',
+      `mkdir() { command mkdir "$@"; local rc=$?; if [ $rc -ne 0 ] && [ "$1" = ${shellWord(lock)} ]; then ${taken}; fi; return $rc; }`,
+    )
+    assert.deepEqual(await claimCheckout(racing, jobsDir, 'job-new', repo, probeOf({ 'job-gone': 'finished' })), {
+      kind: 'busy',
+      owner: 'job-taker',
+    })
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-taker\n')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a mutex released between the mutex script\'s failed mkdir and its look at the directory is taken on the next try, not reported as a launch in progress', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner'), 'job-dead\n')
+    mkdirSync(`${lock}.mutex`)
+    const releasing = withShim(
+      engine,
+      'mutex',
+      `mkdir() { command mkdir "$@"; local rc=$?; [ $rc -ne 0 ] && rmdir ${shellWord(`${lock}.mutex`)} 2>/dev/null; return $rc; }`,
+    )
+    const claim = await claimCheckout(releasing, jobsDir, 'job-new', repo, probeOf({ 'job-dead': 'finished' }))
+    assert.equal(claim.kind, 'held', JSON.stringify(claim))
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-new\n')
+    assert.equal(existsSync(`${lock}.mutex`), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
