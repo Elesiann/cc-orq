@@ -23,7 +23,7 @@
 # A <dir>/cancel file ends the job. The watcher looks for it every 2 s, then:
 #   1. OpenCode only: SIGINT to the client, and up to 3 s for it to end. A
 #      client still running after that gets one line in child.log.
-#   2. SIGTERM to the process group.
+#   2. If the CLI is still running, SIGTERM to the process group.
 #   3. When the CLI has ended, the main flow stops the watcher, sweeps, writes
 #      exit 124 and sends SIGKILL to the group, itself included. When the CLI
 #      is still running 5 s after the SIGTERM, the watcher takes the same
@@ -76,7 +76,7 @@ interrupt_cli() {
   [[ "$cli" =~ ^[0-9]+$ ]] || return 0
   kill -INT "$cli" 2>/dev/null || return 0
   for i in $(seq 1 30); do
-    kill -0 "$cli" 2>/dev/null || return 0
+    kill -0 "$child" 2>/dev/null || return 0
     sleep 0.1
   done
   echo "orq: OpenCode did not end on SIGINT within 3 s, so the cancel falls back to SIGTERM" >&2
@@ -84,7 +84,7 @@ interrupt_cli() {
 
 # The watcher's sleep outlives it, and a cancel's sleep lasts 5 s. Stopping the watcher first keeps it from
 # starting another before its children are collected, and from sweeping while the main flow does. pgrep finds
-# the children; without it a sleep outlives the job by up to 5 s.
+# the children; without it the sweep ends the watcher's sleep and says so in child.log.
 stop_watcher() {
   local kids stat i
   kill -STOP "$watcher" 2>/dev/null
@@ -208,6 +208,7 @@ child=$!
   while kill -0 "$child" 2>/dev/null; do
     if [ -e "$dir/cancel" ]; then
       interrupt_cli
+      kill -0 "$child" 2>/dev/null || exit 0
       kill -TERM -$$ 2>/dev/null
       sleep 5
       sweep_job

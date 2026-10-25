@@ -26,7 +26,7 @@ ok() { PASS=$((PASS+1)); echo "ok: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 cat > "$BIN/fakelib.sh" <<'EOF'
-SLEEP=$(command -v sleep)
+PYTHON=$(command -v python3)
 # A marked process in a session of its own, like an MCP server the CLI leaves behind. It takes 0.8 s to stop on SIGTERM.
 leftover() {
   setsid "$BIN/slow-stop" "$ARGV_DUMP/$1.leftover" 0.8 </dev/null >/dev/null 2>&1 &
@@ -34,9 +34,18 @@ leftover() {
 }
 # A member of the CLI's process group with a scrubbed environment that ignores SIGTERM: only a SIGKILL to the group ends it.
 straggler() {
-  env -i "$SLEEP" 301 </dev/null >/dev/null 2>&1 &
-  echo $! > "$ARGV_DUMP/$1.straggler"
+  env -i "$PYTHON" "$BIN/deaf" "$ARGV_DUMP/$1.straggler" </dev/null >/dev/null 2>&1 &
+  for _ in $(seq 1 100); do [ -s "$ARGV_DUMP/$1.straggler" ] && break; sleep 0.02; done
 }
+EOF
+cat > "$BIN/deaf" <<'EOF'
+#!/usr/bin/env python3
+import os, signal, sys, time
+def on_term(*_):
+    open(sys.argv[1] + '.term', 'w').write('1\n')
+signal.signal(signal.SIGTERM, on_term)
+open(sys.argv[1], 'w').write('%d\n' % os.getpid())
+time.sleep(301)
 EOF
 cat > "$BIN/slow-stop" <<'EOF'
 #!/usr/bin/env python3
@@ -106,7 +115,7 @@ printf '{"type":"system","subtype":"init","session_id":"ses-fake"}\n'
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"ses-fake","result":"FAKE-CLAUDE","usage":{"input_tokens":11,"output_tokens":4},"modelUsage":{"fake-claude-model":{}}}\n'
 exit 0
 EOF
-chmod +x "$BIN"/codex "$BIN"/opencode "$BIN"/agy "$BIN"/claude "$BIN"/hold "$BIN"/slow-stop
+chmod +x "$BIN"/codex "$BIN"/opencode "$BIN"/agy "$BIN"/claude "$BIN"/hold "$BIN"/slow-stop "$BIN"/deaf
 export BIN PATH="$BIN:$PATH" ARGV_DUMP="$DUMP"
 
 # run_job <name> <runner> <model> <effort> <sandbox> <prompt> [flags...]
@@ -276,7 +285,8 @@ for tool in python3 env setsid sleep seq dirname mv cat; do ln -s "$(command -v 
 # One cancel, started as the start script starts a job: a supervisor under setsid with its output in child.log. The
 # scenarios run side by side, so each writes what it saw to $T/<name>.res: took_ms (from the request to exit),
 # leftover (state of the marked leftover when exit appeared), straggler_ms (how long the straggler lived after exit),
-# group_left, marked_left (what still carried the marker, for a marked job) and sigint (the CLI got SIGINT).
+# group_left, marked_left (what still carried the marker, for a marked job), sigint (the CLI got SIGINT) and
+# straggler_term (the group got SIGTERM).
 cancel_scenario() {
   local name=$1 runner=$2 marked=$3; shift 3
   local job="$T/$name" d="$T/$name.dump" mark=() i sup pgid sp t0 t1 left=none straggler=none group marked_left=na
@@ -313,6 +323,7 @@ cancel_scenario() {
     echo "group_left=$group"
     echo "marked_left=$marked_left"
     echo "sigint=$([ -e "$d/$runner.int" ] && echo yes || echo no)"
+    echo "straggler_term=$([ -e "$d/$runner.straggler.term" ] && echo yes || echo no)"
   } > "$T/$name.res"
   wait "$sup" 2>/dev/null || true
 }
@@ -368,9 +379,11 @@ check_cancel cancel-hung-agy cancel 12000
 check_cancel cancel-hung-agy-marked cancel-marked 12000
 
 check_cancel cancel-agy-ends-on-term cancel-agy-sigterm 5000
+if [ "$(res cancel-agy-ends-on-term straggler_term)" = yes ]; then ok cancel-agy-sigterm-sent; else bad cancel-agy-sigterm-sent; fi
 
 check_cancel cancel-opencode-ends-on-sigint cancel-opencode 4500
 if [ "$(res cancel-opencode-ends-on-sigint sigint)" = yes ]; then ok cancel-opencode-gets-sigint; else bad cancel-opencode-gets-sigint; fi
+if [ "$(res cancel-opencode-ends-on-sigint straggler_term)" = no ]; then ok cancel-opencode-no-sigterm-after-sigint; else bad cancel-opencode-no-sigterm-after-sigint; fi
 
 if PATH="$NOPGREP:$BIN" command -v pgrep >/dev/null; then bad no-pgrep-path-hides-pgrep; else ok no-pgrep-path-hides-pgrep; fi
 check_cancel cancel-opencode-no-pgrep cancel-opencode-no-pgrep 4500
@@ -378,6 +391,7 @@ if [ "$(res cancel-opencode-no-pgrep sigint)" = yes ]; then ok cancel-opencode-n
 
 check_cancel cancel-opencode-ignores-sigint cancel-opencode-ignores-sigint 12000
 if grep -q 'did not end on SIGINT' "$T/cancel-opencode-ignores-sigint/child.log"; then ok cancel-opencode-ignores-sigint-says-so; else bad cancel-opencode-ignores-sigint-says-so; fi
+if [ "$(res cancel-opencode-ignores-sigint straggler_term)" = yes ]; then ok cancel-opencode-ignores-sigint-gets-sigterm; else bad cancel-opencode-ignores-sigint-gets-sigterm; fi
 
 expect_file "$T/job-near-tick/exit" 0 near-tick-exit
 expect_file "$T/job-near-tick/child.log" '' near-tick-child-log-empty
