@@ -954,12 +954,15 @@ acked and ignored. `tasks/result` and `tasks/list` do not exist, and answer -326
 
 With `questions: human`, a worker that stops on a question is not the end of the task. The task goes to
 `input_required` with one free-text field, `answer`, under the key `q-JOBID` of the job that asked, and
-the first lines of the form are the worker, its model and the question (folded to one line, cut at 600
-characters and escaped, since the worker wrote it). Answering resumes the same worker, as in `answer`, as
+the first line of the form is the worker and its model, and the two that follow are the question (folded,
+wrapped, cut with an ellipsis and escaped, since the worker wrote it); Claude Code shows three lines of a
+message and cuts a longer line at the screen width. Answering resumes the same worker, as in `answer`, as
 a job of the same task: the task stays one task in `/tasks`, and it ends with the result of the job that
 finished last, whose id the merge hint names. The worker may ask again, and each question is a form. The
-task goes on at the level the worker had, since you approved the task; `tasks/update` carries no session
-mode, so nothing is checked again.
+task goes on at the level the worker had, held to the ceiling again as `answer` is: by the config as it is
+now and by the session mode that the server saw last, which is the one the latest `delegate` or `answer`
+call brought, since `tasks/update` carries none. A level above that ceiling closes the form, unless you
+approved that worker in a form: the task ends with the BLOCKED text, and the `declined` file says why.
 
 Declining the form, Esc, a worker that cannot be resumed (no `session`), a continuation that cannot start and 24
 hours after the job ended all end the task `completed` with the `BLOCKED on a question` text, and then

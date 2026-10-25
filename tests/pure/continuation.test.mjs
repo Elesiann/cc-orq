@@ -446,6 +446,26 @@ test('a declined form, Esc, a cancel and 24 hours end the task with BLOCKED, and
   await until(server, late.task.taskId)
 })
 
+test('a form answer is held to the ceiling again: a session mode that was lowered closes the form instead of resuming the worker', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = s.startIn(session)
+  const { task } = await server.call('delegate', REQUEST(repo, { questions: 'human', sessionMode: 'acceptEdits' }), WITH_FORMS)
+  const id = task.taskId
+  const [[key]] = FORM(await until(server, id, ['working']))
+
+  // tasks/update carries no session mode; the next call of a tool that the hook serves does, and the server keeps the last one it saw.
+  await server.call('answer', { taskId: 'job-nope', answer: 'x', sessionMode: 'default' })
+  await server.update(id, { [key]: { action: 'accept', content: { answer: 'Production.' } } })
+  const ended = await server.get(id)
+  assert.equal(ended.status, 'completed', 'the form is closed, not left open')
+  assert.match(ended.result.content[0].text, /^BLOCKED on a question/)
+  assert.equal(existsSync(join(s.jobsDir, id, 'next')), false, 'no worker was resumed')
+  assert.match(read(s, id, 'declined'), /above the ceiling now/, 'the file says why the form was closed')
+  assert.deepEqual(jobDirs(s), [id])
+})
+
 test('a client without tasks gets the id of the continuation at once and reads it with status', async (t) => {
   const s = scene({ bin: { claude: QUESTION_WORKER } })
   t.after(() => s.cleanup())

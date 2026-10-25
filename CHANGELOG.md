@@ -122,8 +122,10 @@ All notable changes to cc-orq are recorded here. The format follows
   that stops on a question puts its task in `input_required`, with a free-text form
   that shows the worker and its question, and the answer resumes the same worker
   as a job of the same task, which then ends with the result of the job that
-  finished last. Declining the form, Esc, a worker that cannot be resumed, a
-  continuation that cannot start, and 24 hours end the task with the BLOCKED text,
+  finished last, held to the ceiling again as `answer` is (the config now, and
+  the session mode the server last saw, since `tasks/update` carries none). Declining
+  the form, Esc, a worker that cannot be resumed, a continuation that cannot start,
+  a level above the ceiling, and 24 hours end the task with the BLOCKED text,
   and `answer` can then answer it. `x` on an open form cancels the task, and while
   a form is open `answer` gets `awaiting_form`. Any other client is refused.
 - The supervisor writes the worker's session id to the file `session` before it

@@ -88,6 +88,8 @@ type TaskRecord = {
   questions: (typeof QUESTION_MODES)[number]
   request: Record<string, string>
   toolUseId?: string
+  /** The permission mode of the session that started the task, as the hook gave it. */
+  sessionMode?: string
   approval?: Approval
 }
 
@@ -113,7 +115,7 @@ function parseApproval(raw: unknown): Approval | null {
 function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
   const tool = isRecord(raw) ? TASK_TOOLS.find((candidate) => candidate === raw.tool) : undefined
   if (!isRecord(raw) || raw.taskId !== taskId || tool === undefined) return null
-  const { createdAt, questions, request, toolUseId, approval } = raw
+  const { createdAt, questions, request, toolUseId, sessionMode, approval } = raw
   const mode = QUESTION_MODES.find((candidate) => candidate === questions)
   if (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt)) || mode === undefined || !isRecord(request)) return null
   const text: Record<string, string> = {}
@@ -130,6 +132,7 @@ function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
     questions: mode,
     request: text,
     ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+    ...(typeof sessionMode === 'string' ? { sessionMode } : {}),
     ...(parsedApproval !== undefined ? { approval: parsedApproval } : {}),
   }
 }
@@ -308,24 +311,54 @@ async function formIsOpen($: CoreEngine, job: JobRecord, view: Extract<JobView, 
   return (await $.clock.now()) - (view.endedAt ?? 0) < FORM_WINDOW_MS
 }
 
-/** The worker chose the question, so its whitespace is folded, it is cut, and its control characters are written out. */
-function plain(text: string, limit: number): string {
+/** The worker chose the question, so its whitespace is folded and its control characters are written out. */
+function plain(text: string): string {
   const folded = text.replace(/\s+/g, ' ').trim()
-  const characters = [...folded]
-  const cut = characters.length > limit ? `${characters.slice(0, limit).join('')}…` : folded
-  return cut.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u{${char.codePointAt(0)?.toString(16)}}`)
+  return folded.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u{${char.codePointAt(0)?.toString(16)}}`)
 }
 
-/** The first three lines of the message are what Claude Code shows of a form, so the worker and its question come first. */
+/** At most `lines` lines of `width` characters, broken at spaces; what does not fit is cut with an ellipsis. */
+function wrapped(text: string, width: number, lines: number): string[] {
+  const out: string[] = []
+  let rest = text
+  while (rest !== '' && out.length < lines) {
+    if ([...rest].length <= width) {
+      out.push(rest)
+      rest = ''
+      break
+    }
+    const room = [...rest].slice(0, width).join('')
+    const cut = room.lastIndexOf(' ')
+    const line = cut > width / 2 ? room.slice(0, cut) : room
+    out.push(line)
+    rest = rest.slice(line.length).trimStart()
+  }
+  const last = out.length - 1
+  return rest === '' || last < 0 ? out : [...out.slice(0, last), `${[...(out[last] ?? '')].slice(0, width - 1).join('')}…`]
+}
+
+/**
+ * Claude Code shows the first three lines of the message and cuts a longer line at the screen width, so the worker comes first
+ * and the question takes the two lines left, wrapped; what does not fit stays in the BLOCKED text. The field's description is
+ * shown under it.
+ */
 function questionRequest(job: JobRecord, question: string): InputRequest {
   return {
     method: 'elicitation/create',
     params: {
       mode: 'form',
-      message: [`${whoIs(job)} asks:`, plain(question, 600), 'Your answer goes to the same worker, which resumes its session.'].join('\n'),
+      message: [`${whoIs(job)} asks:`, ...wrapped(plain(question), 140, 2)].join('\n'),
       requestedSchema: {
         type: 'object',
-        properties: { answer: { type: 'string', title: 'Your answer', minLength: 1, maxLength: ANSWER_MAX_CHARS } },
+        properties: {
+          answer: {
+            type: 'string',
+            title: 'Your answer',
+            description: 'It goes to the same worker, which resumes its session.',
+            minLength: 1,
+            maxLength: ANSWER_MAX_CHARS,
+          },
+        },
         required: ['answer'],
       },
     },
@@ -448,6 +481,8 @@ const widest = <Mode extends string>(asked: Mode | undefined, effective: Mode, r
 
 export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): TaskSource {
   const answering = new Set<string>()
+  /** tasks/update carries no session mode, so a form answer is judged by the last mode a hooked call (delegate, answer) brought. */
+  let lastSessionMode: string | undefined
 
   async function agentId(): Promise<string> {
     return (await $.env.get('CLAUDE_CODE_SESSION_ID')) || 'mcp'
@@ -500,6 +535,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     const config = await getConfig()
     const call = parseAnswerInput(args)
     if (isFailure(call)) return { result: answerOf(call, true) }
+    if (call.sessionMode !== undefined) lastSessionMode = call.sessionMode
     const parent = await readMeta($, config.jobsDir, call.taskId)
     if (parent === null) return { result: answerOf(fail('task_not_found', `no task ${call.taskId}`), true) }
     const view = await jobView($, parent)
@@ -572,6 +608,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     const config = await getConfig()
     const call = parseDelegateInput(args)
     if (isFailure(call)) return { result: answerOf(call, true) }
+    if (call.sessionMode !== undefined) lastSessionMode = call.sessionMode
     if (call.questions === 'human' && !(client.tasks && client.forms)) return { result: answerOf(fail('invalid_request', HUMAN_NEEDS_FORMS), true) }
     const { header } = call
     const { effective, refusal } = resolveCeiling({
@@ -588,6 +625,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
       questions: call.questions,
       request: call.request,
       ...(client.toolUseId !== undefined ? { toolUseId: client.toolUseId } : {}),
+      ...(call.sessionMode !== undefined ? { sessionMode: call.sessionMode } : {}),
     } as const
     if (refusal !== null) {
       if (!client.tasks || !client.forms) return { result: answerOf(refusal, true) }
@@ -706,6 +744,17 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     if (typeof text !== 'string' || text.trim() === '' || [...text].length > ANSWER_MAX_CHARS) return
     const planned = await continuationPlan($, config, tip, await sessionDir())
     if ('failure' in planned) return close(planned.failure.error.message)
+    // As an answer is: held to the ceiling again, by the config now and the session mode last seen, unless the user approved this worker.
+    const { refusal } = resolveCeiling({
+      config: config.ceiling,
+      session: sessionCeiling(lastSessionMode ?? loaded.record.sessionMode),
+      isolation: planned.plan.isolation,
+      request: planned.plan.modes,
+    })
+    if (refusal !== null) {
+      const earlier = await approvalOfChain(config, loaded.record.taskId)
+      if (earlier === null || !withinApproval(earlier, planned.plan)) return close(aboveCeilingNow(refusal, planned.plan.modes).error.message)
+    }
     const launched = await launchContinuation($, config, planned.plan, { answer: text, via: 'form', questions: 'human', agentId: await agentId() })
     if ('job' in launched) return
     if ('failure' in launched) return launched.failure.error.code === 'already_answered' ? undefined : close(launched.failure.error.message)
