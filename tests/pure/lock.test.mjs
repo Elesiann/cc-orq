@@ -15,6 +15,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import { LAUNCH_GRACE_MS, checkoutOf, claimCheckout, judgeLock, releaseLock, sha256Hex } from '../../hooks/lock.ts'
 import { shellWord } from '../../hooks/types.ts'
@@ -336,6 +337,43 @@ test('two claims that break one dead lock at once never both hold it', async () 
       const owner = readFileSync(join(lock, 'owner'), 'utf8').trim()
       assert.equal(owner, [a, b].find((r) => r.kind === 'held').held.owner)
     }
+    assert.deepEqual(locksIn(jobsDir).filter((name) => name.includes('.')), [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a break whose move aside is slow cannot take the lock a second launcher made in the meantime: one holder', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner'), 'dead-1\n')
+    const probe = probeOf({ 'dead-1': 'finished' })
+    let secondDone
+    const second = new Promise((resolve) => (secondDone = resolve))
+    let firstAtAside
+    const atAside = new Promise((resolve) => (firstAtAside = resolve))
+    const slowAside = {
+      ...engine,
+      process: {
+        ...engine.process,
+        run: async (argv, init) => {
+          if (argv[2].startsWith('# orq:lock aside')) {
+            firstAtAside()
+            await Promise.race([second, sleep(1000)])
+          }
+          return engine.process.run(argv, init)
+        },
+      },
+    }
+    const first = claimCheckout(slowAside, jobsDir, 'job-first', repo, probe)
+    await atAside
+    const results = await Promise.all([first, claimCheckout(engine, jobsDir, 'job-second', repo, probe).finally(secondDone)])
+    const held = results.filter((r) => r.kind === 'held')
+    assert.equal(held.length, 1, JSON.stringify(results))
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8').trim(), held[0].held.owner)
     assert.deepEqual(locksIn(jobsDir).filter((name) => name.includes('.')), [])
   } finally {
     rmSync(root, { recursive: true, force: true })

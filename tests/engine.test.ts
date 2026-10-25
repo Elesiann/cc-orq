@@ -759,6 +759,18 @@ test('an owner with no pgid and no exit keeps a lock younger than 10 s, and lose
   expect(s.locks.get(WORK_LOCK)).not.toBe('job-slow')
 })
 
+test('an owner that starts between the first look and the break keeps its lock', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  seedLock(s, 'job-slow', 10000)
+  s.noPgid.add('job-slow')
+  s.onMutex = () => s.noPgid.delete('job-slow')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-slow')
+  expect(s.locks.get(WORK_LOCK)).toBe('job-slow')
+  expect(s.events.includes('lock aside')).toBe(false)
+})
+
 test('a lock with no owner yet is a launch in progress for 10 s, and is broken after that', async ($, on) => {
   const s = fresh({ now: 2000000, locking: true })
   seedLock(s, null, 2000)
