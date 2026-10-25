@@ -83,7 +83,9 @@ All notable changes to cc-orq are recorded here. The format follows
   lock is refused with `could not lock its checkout`. A launch keeps its lock
   while it scans the jobs directory. It checks that the lock is still its own
   before it writes its job and again right before it starts it, under the mutex
-  that a break takes, and the check fails closed. A launch whose lock another
+  that a break takes, and the check fails closed. A launcher that stops for more
+  than 60 s while it holds that mutex can still let two launches start, because
+  the next launcher then counts the mutex as abandoned. A launch whose lock another
   launch took over, or whose check fails, is refused with `worktree_busy`. A
   supervisor that writes its pid after its launch gave up still runs its
   worker, which the supervisor has to close itself.

@@ -506,10 +506,18 @@ A launch keeps its lock young while it works. It touches the lock, with a check
 that the lock is still its own, while it scans the jobs directory. Two touches
 are final checks: one after the scan, before it writes meta.json, and one after
 it writes its job files, right before the start script. A final check takes the
-same mutex as a launcher that breaks a lock, so a check and a break never
-interleave. It fails closed: when the check throws, times out, cannot take the
-mutex in time, exits with anything but success, or finds that another launcher
-has taken the lock, the launch starts nothing and is refused.
+same mutex as a launcher that breaks a lock, so a check and a break do not
+interleave, unless a launcher stops while it holds the mutex (see below). It
+fails closed: when the check throws, times out, cannot take the mutex in time,
+exits with anything but success, or finds that another launcher has taken the
+lock, the launch starts nothing and is refused.
+
+A mutex older than 60 s counts as abandoned, and the next launcher steps over
+it. So a launcher that stops for more than 60 s while it holds the mutex, for
+example a suspended process, loses that guarantee. If it stopped between
+judging a lock dead and moving it aside, a final check can renew the lock in
+the meantime, the stopped launcher then moves the renewed lock aside, and both
+launches start.
 
 The final checks leave a window that runs from the last of them to the moment the
 supervisor writes its pid. A launch with no supervisor pid counts as alive for
