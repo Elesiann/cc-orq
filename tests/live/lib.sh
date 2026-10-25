@@ -15,8 +15,9 @@
 #                                auto is refused)
 #   ORQ_CLAUDE_MD_EXCLUDE_FILES  CLAUDE.md files to keep out of the nested session, one path per line
 #                                (default: $HOME/.claude/CLAUDE.md)
-#   ORQ_LIVE_SCRATCH_DIR         private directory for scratch repositories, run state and tmux sockets
-#                                (default: $XDG_RUNTIME_DIR/cc-orq-live, else $HOME/.cache/cc-orq-live)
+#   ORQ_LIVE_SCRATCH_DIR         private directory for scratch repositories, run state and tmux sockets, without ".."
+#                                in its path (default: $XDG_RUNTIME_DIR/cc-orq-live, else $HOME/.cache/cc-orq-live).
+#                                A new one gets mode 700; an existing one must already be closed to group and others
 #   ORQ_LIVE_TMUX_PREFIX         prefix of tmux session names (default: orq-live)
 #   ORQ_EVIDENCE, ORQ_SCENARIO   receipt directory and name of the scenario (set by run.sh)
 #   LIVE_REPO, LIVE_WORK         scratch repository and its directory (set by live_acquire and exported, so
@@ -101,6 +102,8 @@ LIVE_SERVER_TOOLS=(
 # What the status line of an interactive session shows once it takes input, whatever the permission mode.
 # shellcheck disable=SC2034 # scenarios read this after sourcing the library
 LIVE_TUI_READY='mode on|\? for shortcuts'
+# The option of the dialog that asks to trust the working directory. A directory trusted before shows no dialog.
+LIVE_TUI_TRUST='Yes, I trust this folder'
 
 # Record a failure for run.sh to print and exit the scenario.
 live_fail() {
@@ -204,6 +207,14 @@ live_inside_scratch() {
   return 1
 }
 
+# A scenario name goes into a path and into the name of a state file, so it is a plain word: letters, digits, dots,
+# dashes and underscores, with no leading dot and no "..".
+live_valid_scenario_name() {
+  case $1 in
+    '' | *[!A-Za-z0-9._-]* | .* | *..*) return 1 ;;
+  esac
+}
+
 live_pids_under() {
   local pattern
   live_inside_scratch "$1" || return 0
@@ -239,9 +250,12 @@ live_kill_in() {
 }
 
 # The directory holds run state, repositories and tmux sockets, so it must be private: no predictable path in a
-# shared directory. Sets LIVE_SCRATCH_ERROR and fails unless the user owns it, it is not a symlink and chmod 700 works.
+# shared directory. A directory that does not exist is created with mode 700. One that exists is never changed:
+# it must be yours, not a symlink, and closed to group and others already. A ".." in the path is refused because
+# live_inside_scratch rejects every path with one, which would turn each kill and removal into a silent no-op.
+# Sets LIVE_SCRATCH_ERROR and fails otherwise.
 live_prepare_scratch_root() {
-  local root=$ORQ_LIVE_SCRATCH_DIR
+  local root=$ORQ_LIVE_SCRATCH_DIR mode
   case $root in
     /?*) ;;
     *)
@@ -249,21 +263,33 @@ live_prepare_scratch_root() {
       return 1
       ;;
   esac
+  case $root in
+    *..*)
+      LIVE_SCRATCH_ERROR="the scratch directory '$root' contains '..': give a path without it, or no kill or removal would run in it"
+      return 1
+      ;;
+  esac
   if [ -L "$root" ]; then
     LIVE_SCRATCH_ERROR="the scratch directory $root is a symlink"
     return 1
   fi
-  # shellcheck disable=SC2174 # the mode is meant for the scratch directory alone; its parents are the user's own
-  if ! mkdir -p -m 700 "$root" 2> /dev/null; then
-    LIVE_SCRATCH_ERROR="cannot create the scratch directory $root"
-    return 1
+  if [ ! -e "$root" ]; then
+    mkdir -p -- "$(dirname -- "$root")" 2> /dev/null
+    if ! mkdir -m 700 -- "$root" 2> /dev/null && [ ! -d "$root" ]; then
+      LIVE_SCRATCH_ERROR="cannot create the scratch directory $root"
+      return 1
+    fi
   fi
   if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ]; then
     LIVE_SCRATCH_ERROR="the scratch directory $root is not a directory owned by you"
     return 1
   fi
-  if ! chmod 700 "$root" 2> /dev/null; then
-    LIVE_SCRATCH_ERROR="cannot restrict the scratch directory $root to its owner"
+  if ! mode=$(find "$root" -maxdepth 0 -perm /077 -printf '%m' 2> /dev/null); then
+    LIVE_SCRATCH_ERROR="cannot read the mode of the scratch directory $root"
+    return 1
+  fi
+  if [ -n "$mode" ]; then
+    LIVE_SCRATCH_ERROR="the scratch directory $root has mode $mode, open to group or others, and the harness does not change a directory it did not create: run chmod 700 on it, or set ORQ_LIVE_SCRATCH_DIR to a new path"
     return 1
   fi
 }
@@ -407,8 +433,11 @@ live_git() {
 
 live_acquire() {
   local name=$1 work state
+  live_valid_scenario_name "$name" ||
+    live_fail "invalid scenario name '$name': use letters, digits, dots, dashes and underscores, with no leading dot and no '..'"
   live_prepare_scratch_root || live_fail "$LIVE_SCRATCH_ERROR"
   work=$(live_scratch_path "$name")
+  live_inside_scratch "$work" || live_fail "the work directory $work is not inside the scratch directory $ORQ_LIVE_SCRATCH_DIR"
   state=$work.state
   if [ "$((${#work} + 10))" -gt "$LIVE_SOCKET_MAX" ]; then
     live_fail "the tmux socket path $work/tmux.sock is $((${#work} + 10)) bytes, over the $LIVE_SOCKET_MAX a unix socket allows: set ORQ_LIVE_SCRATCH_DIR to a shorter directory"
@@ -555,15 +584,15 @@ live_tmux_wait() {
 }
 
 # Pass the workspace trust dialog: wait for the options, move the selection to "Yes, I trust this folder" if
-# needed, and confirm. A directory that was trusted before shows no dialog.
+# needed, and confirm.
 # Arguments: session_name [timeout_seconds]
 live_tmux_accept_trust() {
   local session=$1 pane
-  live_tmux_wait "$session" 'Yes, I trust this folder' "${2:-30}" || return 1
+  live_tmux_wait "$session" "$LIVE_TUI_TRUST" "${2:-30}" || return 1
   sleep 0.5
   for _ in 1 2 3; do
     pane=$(live_tmux capture-pane -p -S -200 -t "=$session:" 2> /dev/null || true)
-    if grep -qE '❯.*Yes, I trust this folder' <<< "$pane"; then
+    if grep -qE "❯.*$LIVE_TUI_TRUST" <<< "$pane"; then
       live_tmux send-keys -t "=$session:" Enter
       return 0
     fi
@@ -573,6 +602,20 @@ live_tmux_accept_trust() {
     fi
   done
   return 1
+}
+
+# Wait until the session takes input, passing the trust dialog if that comes first. One wait covers both screens:
+# a fixed guess for the status line would send a slow start into the wait for a dialog that a trusted directory
+# never draws.
+# Arguments: session_name [timeout_seconds]
+live_tmux_wait_ready() {
+  local session=$1 pane
+  live_tmux_wait "$session" "$LIVE_TUI_READY|$LIVE_TUI_TRUST" "${2:-40}" || return 1
+  pane=$(live_tmux capture-pane -p -S -200 -t "=$session:" 2> /dev/null || true)
+  if grep -qE -e "$LIVE_TUI_TRUST" <<< "$pane"; then
+    live_tmux_accept_trust "$session" 5 || return 1
+    live_tmux_wait "$session" "$LIVE_TUI_READY" 30 || return 1
+  fi
 }
 
 # Type text, wait, then press Enter in a separate call: an Enter sent with the text does not submit the prompt.
@@ -618,12 +661,12 @@ live_debug_tool_called() {
 }
 
 # Assert on the init event of the headless stream in the receipt folder $1: the session runs in the pinned
-# permission mode, none of the account's claude.ai connectors reached it, and the plugin's five tools are there
-# with the server connected. Writes init.json and init-tools.txt.
+# permission mode, no MCP server but the plugin's reached it (the account's claude.ai connectors least of all), and
+# the plugin's five tools are there with the server connected. Writes init.json and init-tools.txt.
 live_assert_init() {
   local ex=$1 init='select(.type == "system" and .subtype == "init")' tool found
   jq -e "$init" "$ex/stream.jsonl" > /dev/null || live_fail "no system/init event in stream.jsonl"
-  jq -c "$init | {permissionMode, claude_code_version, mcp_servers: [.mcp_servers[]? | {name, status}], tools: (.tools | length)}" \
+  jq -c "$init | {permissionMode, claude_code_version, mcp_servers: [.mcp_servers[]? | {name, status, source}], tools: (.tools | length)}" \
     "$ex/stream.jsonl" > "$ex/init.json"
   jq -r "$init | .tools[]" "$ex/stream.jsonl" > "$ex/init-tools.txt"
 
@@ -631,6 +674,9 @@ live_assert_init() {
   [ -z "$found" ] || live_fail "init event lists a claude.ai connector: $found"
   found=$(grep -m1 '^mcp__claude_ai_' "$ex/init-tools.txt" || true)
   [ -z "$found" ] || live_fail "init event lists a claude.ai connector tool: $found"
+  found=$(jq -r "$init | first(.mcp_servers[]? | select(.source != \"plugin\") | .name + \" (source: \" + (.source // \"none\") + \")\") // empty" \
+    "$ex/stream.jsonl")
+  [ -z "$found" ] || live_fail "init event lists an MCP server that does not come from the plugin: $found"
 
   found=$(jq -r "$init | .permissionMode" "$ex/stream.jsonl")
   [ "$found" = "$(live_expected_init_mode)" ] ||
@@ -670,6 +716,14 @@ live_assert_plugin_answers() {
     live_fail "expected plugin calls capabilities then list, got: $(tr '\n' ' ' < "$ex/plugin-tool-uses.txt")"
   live_assert_tool_answer "$ex" mcp__plugin_cc-orq_orq__capabilities '.providers | type == "array"'
   live_assert_tool_answer "$ex" mcp__plugin_cc-orq_orq__list '.jobs | type == "array"'
+}
+
+# Claude Code logs an InstructionsLoaded line for each memory file it loads, in a headless session too, so with the
+# user's CLAUDE.md kept out the headless debug log has none. Arguments: headless_debug_log memory_lines_receipt
+live_assert_no_instructions_loaded() {
+  local log=$1 lines=$2
+  { grep -F 'InstructionsLoaded' "$log" || true; } > "$lines"
+  [ ! -s "$lines" ] || live_fail "headless debug log has an InstructionsLoaded line: a memory file may have loaded (see $lines)"
 }
 
 # Claude Code says that no memory file loaded only in an interactive session; the headless debug log has no such

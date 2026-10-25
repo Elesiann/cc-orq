@@ -17,7 +17,7 @@ the interactive terminal. It is a local check, not a CI job.
 | `ORQ_LIVE_MODEL` | `haiku` | the model alias of the nested session |
 | `ORQ_LIVE_PERMISSION_MODE` | `manual` | the `--permission-mode` of the nested session; `auto` is refused |
 | `ORQ_CLAUDE_MD_EXCLUDE_FILES` | `$HOME/.claude/CLAUDE.md` | memory files to keep out of the nested session, one path per line |
-| `ORQ_LIVE_SCRATCH_DIR` | `$XDG_RUNTIME_DIR/cc-orq-live`, else `$HOME/.cache/cc-orq-live` | private directory for scratch repositories, run state and tmux sockets |
+| `ORQ_LIVE_SCRATCH_DIR` | `$XDG_RUNTIME_DIR/cc-orq-live`, else `$HOME/.cache/cc-orq-live` | private directory for scratch repositories, run state and tmux sockets; no `..` in its path |
 | `ORQ_LIVE_TMUX_PREFIX` | `orq-live` | prefix of the tmux session names |
 | `ORQ_LIVE_TIMEOUT` | `170` | seconds a scenario may run |
 | `ORQ_EVIDENCE_DIR` | `.live-evidence` in the repository | where receipts go |
@@ -51,6 +51,8 @@ is empty. A directory with other files in it is refused, so a typo in
 - `prompt-headless.txt`, `prompt-interactive.txt`: the prompts that were sent
 - `pane.txt`, `debug-tmux.log`: the interactive tmux round
 - `memory-lines.txt`: what the interactive debug log says about memory files
+- `memory-lines-headless.txt`: the `InstructionsLoaded` lines of the headless
+  debug log, empty when no memory file loaded
 - `seconds.txt`: the wall time of the scenario
 - `failure.txt`: only when the scenario failed
 
@@ -62,14 +64,17 @@ paths. Read them before you attach them to anything.
 
 `smoke` runs with the function-hook mods off (`disableAllHooks`) and checks:
 
-- the `init` event reports the pinned permission mode and lists no `claude.ai`
-  server and no `mcp__claude_ai_*` tool
+- the `init` event reports the pinned permission mode, lists no `claude.ai`
+  server and no `mcp__claude_ai_*` tool, and every MCP server in it has the
+  source `plugin`
 - the `init` event lists the five `mcp__plugin_cc-orq_orq__*` tools with the
   plugin's server connected, and no `mcp__cc-orq__*` tool
 - the model calls `capabilities` and then `list`, neither answer is an error,
   and the JSON has the documented shape (`providers` for `capabilities`, `jobs`
   for `list`)
-- the debug log shows `plugin:cc-orq:orq` connected over stdio
+- the debug log shows `plugin:cc-orq:orq` connected over stdio and has no
+  `InstructionsLoaded` line, which Claude Code writes for each memory file it
+  loads
 - one interactive tmux round passes the trust dialog when it shows one (a
   directory trusted before shows none), calls `list`, captures the pane and
   leaves with `/exit`; the pane shows the pinned mode and not auto mode
@@ -79,7 +84,8 @@ paths. Read them before you attach them to anything.
 
 `smoke-mods` runs with the mods on and checks the same `init` isolation, that
 `init` offers the five tools plus `mcp__cc-orq__wait`, that the agent type
-`cc-orq:task` is available, and that the plugin's function-hook module loaded.
+`cc-orq:task` is available, that the plugin's function-hook module loaded, and
+that the debug log has no `InstructionsLoaded` line.
 
 ## Isolation and cleanup
 
@@ -106,8 +112,11 @@ entry per scenario and checkout instead of one per run. The harness itself never
 writes under `~/.claude`. Two runs of one scenario from one checkout cannot
 overlap: the second refuses to start.
 
-`SCRATCH` is private to you. The harness creates it with mode 700 and fails
-unless you own it, it is not a symlink and it can be restricted to its owner.
+`SCRATCH` is private to you. The harness creates a missing one with mode 700.
+It never changes the mode of one that exists: that directory must be yours, not
+a symlink, and closed to group and others already, or the run refuses to start
+and tells you to `chmod 700` it or to pick a new path. A path with `..` in it is
+refused too, because cleanup skips every path with one.
 
 The interactive round runs on a tmux server of its own, on a socket inside the
 scratch directory of the run, so the harness never talks to your default tmux
@@ -137,15 +146,18 @@ ignores any other and leaves it where it is.
 `bash tests/live/check.sh` runs the harness against a fake `claude` and either a
 fake `tmux` or a tmux server on a socket inside the check's own directory, so it
 needs no login, no model and no network, and it never touches your default tmux
-server. Each check is named after the finding it covers and fails when that
+server. Each check is named after the finding it covers (a leading `d` marks the
+delta review, whose numbers repeat those of the first) and fails when that
 finding is back. `LIVE_UNDER_TEST=DIR` runs the same checks against another copy
 of the harness. Run it after you change anything under `tests/live`.
 
 ## Adding a scenario
 
-Add `tests/live/scenarios/NAME.sh`. Source `tests/live/lib.sh`, call
-`live_setup`, write assertions with `live_fail` or the `live_assert_*`
-functions, and use `live_run_headless`/`bash tests/live/headless.sh` and the
-`live_tmux_*` helpers. `run.sh` supplies `ORQ_EVIDENCE` and `ORQ_SCENARIO`,
-reports the failure reason and prints `PASS NAME` or `FAIL NAME: reason`. Keep
-the file executable.
+Add `tests/live/scenarios/NAME.sh`, where NAME holds letters, digits, dots,
+dashes and underscores, starts with no dot and has no `..`. Source
+`tests/live/lib.sh`, call `live_setup`, write assertions with `live_fail` or the
+`live_assert_*` functions, and use `live_run_headless`/`bash tests/live/headless.sh`
+and the `live_tmux_*` helpers. After `live_tmux_start`, `live_tmux_wait_ready`
+waits for the session to take input and passes the trust dialog if it comes
+first. `run.sh` supplies `ORQ_EVIDENCE` and `ORQ_SCENARIO`, reports the failure
+reason and prints `PASS NAME` or `FAIL NAME: reason`. Keep the file executable.

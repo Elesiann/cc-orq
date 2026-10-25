@@ -4,10 +4,11 @@
 #
 # Proves, with function-hook mods off:
 #   - the nested session runs in the pinned permission mode and no claude.ai connector reached it;
-#   - the init event lists the five plugin MCP tools and no mod tool, with the server connected;
+#   - the init event lists the five plugin MCP tools and no mod tool, with the server connected, and
+#     every MCP server in it comes from the plugin;
 #   - the model calls capabilities then list, and the server answers both without an error and with
 #     the documented JSON;
-#   - the debug log reports the server connected over stdio;
+#   - the debug log reports the server connected over stdio and no memory file loaded;
 #   - an interactive session, in the pinned mode, passes the trust dialog when it shows one, calls
 #     list and exits, and its debug log says that no CLAUDE.md or rules file loaded.
 set -euo pipefail
@@ -48,6 +49,7 @@ fi
 live_assert_plugin_answers "$EX"
 
 live_debug_connected "$EX/debug.log" || live_fail "debug log has no connected line for $LIVE_SERVER_NAME"
+live_assert_no_instructions_loaded "$EX/debug.log" "$EX/memory-lines-headless.txt"
 
 # One interactive round. The TUI occasionally exits right after startup when the CLI's version lock is held by a
 # concurrent session, so the round gets one retry. Each attempt writes its own debug log; the successful one
@@ -55,10 +57,7 @@ live_debug_connected "$EX/debug.log" || live_fail "debug log has no connected li
 run_interactive_round() {
   local session=$1 debug=$2
   live_tmux_start "$session" off "$debug" "$LIST" || return 1
-  if ! live_tmux_wait "$session" "$LIVE_TUI_READY" 10; then
-    live_tmux_accept_trust "$session" 30 || return 1
-    live_tmux_wait "$session" "$LIVE_TUI_READY" 30 || return 1
-  fi
+  live_tmux_wait_ready "$session" || return 1
   live_tmux_send "$session" "$(cat "$EX/prompt-interactive.txt")"
   live_tmux_wait "$session" '● DONE' 45 || return 1
   sleep 1
@@ -79,7 +78,7 @@ for attempt in 1 2; do
   live_tmux_exit "$SESSION"
 done
 if [ "$interactive" -ne 1 ]; then
-  live_fail "interactive session did not show the trust dialog and answer within two attempts"
+  live_fail "interactive session did not take input and answer within two attempts"
 fi
 
 grep -qF "$LIVE_SERVER_NAME" "$EX/pane.txt" || live_fail "pane.txt does not show the MCP server call"

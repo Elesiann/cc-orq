@@ -20,12 +20,10 @@ if [ -z "$SCENARIO" ]; then
   printf 'scenarios: %s\n' "$(cd "$LIVE_DIR/scenarios" && printf '%s ' ./*.sh | sed 's|\./||g; s|\.sh||g')" >&2
   exit 2
 fi
-case "$SCENARIO" in
-  *[!A-Za-z0-9._-]* | .* | *..*)
-    printf 'FAIL %s: invalid scenario name\n' "$SCENARIO"
-    exit 1
-    ;;
-esac
+if ! live_valid_scenario_name "$SCENARIO"; then
+  printf 'FAIL %s: invalid scenario name\n' "$SCENARIO"
+  exit 1
+fi
 
 SCRIPT=$LIVE_DIR/scenarios/$SCENARIO.sh
 if [ ! -f "$SCRIPT" ]; then

@@ -89,14 +89,13 @@ sandbox_cleanup() {
   rm -rf -- "$tmp"
 }
 
-# Put the real tmux in the sandbox's PATH. A call without -S gets the sandbox's own socket; the real tmux
-# without -S would talk to the user's default server.
+# Put the real tmux in the sandbox's PATH. Every call starts with the sandbox's own socket, so none reaches the
+# user's default server; a socket that the call names itself comes later, and the last -S wins.
 use_real_tmux() {
   [ -n "$REAL_TMUX" ] || fail "tmux is not installed"
   rm -f "$TMP/bin/tmux"
   cat > "$TMP/bin/tmux" << EOF
 #!/bin/sh
-case " \$* " in *" -S "*) exec $(printf '%q' "$REAL_TMUX") "\$@" ;; esac
 exec $(printf '%q' "$REAL_TMUX") -S $(printf '%q' "$TMP/tmux.sock") "\$@"
 EOF
   chmod +x "$TMP/bin/tmux"
@@ -520,12 +519,14 @@ check_dw1_slow_footer() {
   live_copy
   export FAKE_TMUX_CASE=slow-footer FAKE_TMUX_FOOTER_DELAY=12
   out=$(run_scenario smoke) || fail "a trusted folder whose TUI shows its status line after ${FAKE_TMUX_FOOTER_DELAY}s fails smoke: $out"
+  [ ! -e "$ORQ_EVIDENCE_DIR/smoke/pane-failed-1.txt" ] || fail "the first interactive attempt failed and only its retry passed"
   grep -qF '● DONE' "$ORQ_EVIDENCE_DIR/smoke/pane.txt" || fail "the interactive round left no answer in pane.txt"
 }
 
 check_dw1_trust_dialog() {
   live_copy
   out=$(FAKE_TMUX_CASE=trust-dialog run_scenario smoke) || fail "smoke does not pass a TUI that asks to trust the folder: $out"
+  [ ! -e "$ORQ_EVIDENCE_DIR/smoke/pane-failed-1.txt" ] || fail "the first interactive attempt failed and only its retry passed"
   grep -q 'send-keys .* Down' "$FAKE_LOG_DIR/tmux-calls.txt" || fail "the harness never moved the selection to Yes"
   grep -qF '● DONE' "$ORQ_EVIDENCE_DIR/smoke/pane.txt" || fail "the interactive round left no answer in pane.txt"
 }
