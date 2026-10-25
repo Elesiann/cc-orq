@@ -1,5 +1,5 @@
 import type { IntegrateGitHooks } from './config.ts'
-import { jobLiveness, readMeta, type CoreEngine } from './engine.ts'
+import { jobIsLive, readMeta, type CoreEngine } from './engine.ts'
 import {
   INTEGRATE_STRATEGIES,
   type GitFailure,
@@ -7,7 +7,7 @@ import {
   type IntegrateStrategy,
   type Integrated,
 } from './contract.ts'
-import { failureSnippet, isRecord, type JobRecord } from './types.ts'
+import { failureSnippet, isRecord, isWithin, shortBranch, type JobRecord } from './types.ts'
 import {
   GIT_TIMEOUT_MS,
   gitDetail,
@@ -37,19 +37,25 @@ const GIT_NAMES_A_HOOK = /^(?:fatal|error): .*\bhooks?\b/im
 /** The line git ends with when a hook refuses a merge commit. orq aborts that merge, so the advice is wrong. */
 const GIT_COMMIT_ADVICE = 'Not committing merge;'
 
-/** The id of the first live job on `branch`: the task's own job first, then the others in id order. */
-async function liveJobOn($: CoreEngine, jobsDir: string, task: JobRecord, branch: string): Promise<string | null> {
+/** A shared launch records no branch, so a job also counts when it runs inside the task's worktree. */
+function worksOnTask(job: JobRecord, branch: string, worktree: string): boolean {
+  if (job.branch !== undefined && shortBranch(job.branch) === shortBranch(branch)) return true
+  return isWithin(job.cwd, worktree)
+}
+
+/** The id of the first live job on the task: the task's own job first, then the others in id order. */
+async function liveJobOn($: CoreEngine, jobsDir: string, task: JobRecord, branch: string, worktree: string): Promise<string | null> {
   const names = (await $.fs.list(jobsDir))
     .filter((entry) => entry.kind === 'dir' && entry.name !== task.id)
     .map((entry) => entry.name)
     .sort()
-  const onBranch = [task]
+  const onTask = [task]
   for (const name of names) {
     const job = await readMeta($, jobsDir, name)
-    if (job !== null && job.branch === branch) onBranch.push(job)
+    if (job !== null && worksOnTask(job, branch, worktree)) onTask.push(job)
   }
-  for (const job of onBranch) {
-    if ((await jobLiveness($, job)) === 'running') return job.id
+  for (const job of onTask) {
+    if (await jobIsLive($, job)) return job.id
   }
   return null
 }
@@ -72,8 +78,8 @@ export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | {
 
 /**
  * Merge a finished task's branch into the checkout it was launched from. Every git call is an explicit
- * argv in the destination, with no force. A job still running on the branch refuses the merge before git
- * runs. A conflict is listed, then aborted; the worktree stays.
+ * argv in the destination, with no force. A job still running on the branch or in the task's worktree refuses
+ * the merge before git runs. A conflict is listed, then aborted; the worktree stays.
  *
  * `gitHooks` says whether `$` runs the checkout's hooks as they are, which only an engine that keeps them on can do.
  * With `run`, a merge that a hook refuses is aborted too, and answers hook_failed.
@@ -90,9 +96,9 @@ export async function integrate($: CoreEngine, jobsDir: string, input: Integrate
       return fail('no_worktree', `task ${job.id} ran without a worktree, so it has no branch to merge`)
     }
 
-    const running = await liveJobOn($, jobsDir, job, branch)
+    const running = await liveJobOn($, jobsDir, job, branch, worktree)
     if (running !== null) {
-      return fail('task_running', `task ${running} is still running on ${branch}; wait for it to finish, or cancel it, then integrate again`)
+      return fail('task_running', `task ${running} is still running on ${branch}, or in its worktree ${worktree}; wait for it to finish, or cancel it, then integrate again`)
     }
 
     const status = await run(statusArgv(repo))

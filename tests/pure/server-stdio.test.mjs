@@ -991,6 +991,46 @@ test('integrate answers task_running with the id of a live job on the branch, be
   assert.equal(git(repo, ['rev-parse', 'HEAD']), merged.json.mergedSha)
 })
 
+test('integrate answers task_running for a live shared job inside the task worktree and for a job that has no pgid yet, and goes on once they are gone', async (t) => {
+  const s = scene({ instances: [{ id: 'claudeAgent', driver: 'claudeAgent' }], bin: { claude: FAKE_WORKER } })
+  t.after(() => s.cleanup())
+  const { repo, launch } = checkoutWithLauncher(s)
+  const server = s.start()
+  t.after(() => server.close())
+  const first = await launch('agent-a')
+  assert.equal((await untilEnded((taskId) => server.call('status', { taskId }), first.id)).status, 'completed')
+  const headBefore = git(repo, ['rev-parse', 'HEAD'])
+  const refuse = async (name) => {
+    const refused = await server.call('integrate', { taskId: first.id })
+    assert.equal(refused.isError, true)
+    assert.equal(refused.json.error.code, 'task_running')
+    assert.match(refused.json.error.message, new RegExp(`task ${name} is still running`))
+    assert.equal(git(repo, ['rev-parse', 'HEAD']), headBefore, 'HEAD did not move')
+    assert.equal(git(repo, ['status', '--porcelain']), '', 'the checkout is clean')
+  }
+
+  const group = s.liveGroup()
+  job(s.jobsDir, 'job-shared', { meta: { kind: 'task', agentId: 'agent-s', cwd: join(first.worktree, 'src') }, files: { pgid: `${group}\n` } })
+  await refuse('job-shared')
+  process.kill(-group, 'SIGKILL')
+  for (let wait = 0; wait < 250; wait += 1) {
+    try {
+      process.kill(-group, 0)
+    } catch {
+      break
+    }
+    await new Promise((done) => setTimeout(done, 20))
+  }
+
+  job(s.jobsDir, 'job-fresh', { startedAt: Date.now(), meta: { kind: 'task', agentId: 'agent-f', cwd: first.worktree } })
+  await refuse('job-fresh')
+  job(s.jobsDir, 'job-fresh', { startedAt: Date.now() - 60_000, meta: { kind: 'task', agentId: 'agent-f', cwd: first.worktree } })
+  const merged = await server.call('integrate', { taskId: first.id })
+  assert.equal(merged.isError, false)
+  assert.equal(merged.json.ok, true)
+  assert.equal(git(repo, ['rev-parse', 'HEAD']), merged.json.mergedSha)
+})
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The tasks/* methods, and what the server reads of the client.
 

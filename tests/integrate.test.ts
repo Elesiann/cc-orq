@@ -15,16 +15,29 @@ const WORKTREE = `${REPO}-wt/${TASK}`
 const PROBE_ALIVE = 11
 const PROBE_GONE = 12
 
+// The clock reads a minute after the fixture jobs began, past the 10 s that a job has to write its pgid.
+const STARTED = 2000000
+const MINUTE = 60_000
+
 type Reply = { exitCode: number; stdout?: string; stderr?: string }
 type State = {
   files: Map<string, string>
   replies: Map<string, Reply>
   gitCalls: string[][]
   live: Set<string>
+  now: number
+  probeBroken: boolean
 }
 
 function fresh(): State {
-  return { files: new Map([[CONFIG_PATH, CONFIG]]), replies: new Map(), gitCalls: [], live: new Set() }
+  return {
+    files: new Map([[CONFIG_PATH, CONFIG]]),
+    replies: new Map(),
+    gitCalls: [],
+    live: new Set(),
+    now: STARTED + MINUTE,
+    probeBroken: false,
+  }
 }
 
 // The git calls the integrate path makes on a clean checkout where the task branch is ahead of HEAD.
@@ -46,7 +59,7 @@ function seedJob(s: State, id: string, fields: Record<string, unknown> = {}) {
       kind: 'manual',
       agentId: 'manual',
       cwd: WORKTREE,
-      startedAt: 2000000,
+      startedAt: STARTED,
       repo: REPO,
       baseSha: 'abc123',
       branch: BRANCH,
@@ -63,12 +76,14 @@ function seedTask(s: State, fields: Record<string, unknown> = {}) {
 
 function runLive(s: State, id: string) {
   s.files.delete(`${JOBS}/${id}/exit`)
+  s.files.set(`${JOBS}/${id}/pgid`, '4242\n')
   s.live.add(id)
 }
 
 /** The part of `$` that integrate calls, over the state of one test. The kit's own `$` has no such members. */
 function engineOf(s: State): any {
   return {
+    clock: { now: async () => s.now },
     ui: { log: async () => undefined },
     env: { get: async () => '/home/test' },
     fs: {
@@ -87,6 +102,7 @@ function engineOf(s: State): any {
     process: {
       run: async (argv: string[]) => {
         if (argv[0] === 'bash') {
+          if (s.probeBroken) throw new Error('spawn bash EAGAIN')
           const id = /cat \S+\/([^/\s]+)\/pgid/.exec(argv[2] ?? '')?.[1] ?? ''
           return { exitCode: s.live.has(id) ? PROBE_ALIVE : PROBE_GONE, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
         }
@@ -411,7 +427,7 @@ test('a live job that took over the task branch is task_running with its id, tho
 test('a live job on another branch, and an ended job on this one, leave the merge alone', async () => {
   const s = fresh()
   seedTask(s)
-  seedJob(s, 'job-other', { branch: 'orq/job-other' })
+  seedJob(s, 'job-other', { branch: 'orq/job-other', cwd: `${REPO}-wt/job-other`, worktree: `${REPO}-wt/job-other` })
   runLive(s, 'job-other')
   seedJob(s, 'job-old')
   clean(s)
@@ -440,4 +456,128 @@ test('a jobs directory that cannot be listed stops integrate instead of skipping
   expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
   expect(r.error.message).toContain('EACCES: jobs')
   expect(s.gitCalls.length).toBe(0)
+})
+
+const ELSEWHERE = '/srv/example/elsewhere'
+
+function seedShared(s: State, id: string, cwd: string) {
+  seedJob(s, id, { cwd, repo: undefined, baseSha: undefined, branch: undefined, worktree: undefined })
+}
+
+test('a live job inside the task worktree is task_running, though a shared launch records no branch', async () => {
+  const s = fresh()
+  seedTask(s)
+  seedShared(s, 'job-shared', `${WORKTREE}/src`)
+  runLive(s, 'job-shared')
+  clean(s)
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK })
+  expect(r).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(r.error.message).toContain('job-shared')
+  expect(r.error.message).toContain(WORKTREE)
+  expect(s.gitCalls.length).toBe(0)
+})
+
+test('a live job whose cwd is the task worktree itself is task_running', async () => {
+  const s = fresh()
+  seedTask(s)
+  seedShared(s, 'job-at-root', WORKTREE)
+  runLive(s, 'job-at-root')
+  clean(s)
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK })
+  expect(r).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(r.error.message).toContain('job-at-root')
+})
+
+test('a live job beside the worktree whose path starts like it, and an ended job inside it, leave the merge alone', async () => {
+  const s = fresh()
+  seedTask(s)
+  seedShared(s, 'job-beside', `${WORKTREE}-other`)
+  runLive(s, 'job-beside')
+  seedShared(s, 'job-ended', `${WORKTREE}/src`)
+  clean(s)
+  const $ = engineOf(s)
+  expect(await integrate($, { taskId: TASK })).toMatchObject({ ok: true, taskId: TASK })
+})
+
+test('a live job on the task branch spelled refs/heads/... is task_running', async () => {
+  const s = fresh()
+  seedTask(s)
+  const next = 'task-2000500-agent-n3x7q1b2'
+  seedJob(s, next, { branch: `refs/heads/${BRANCH}`, cwd: ELSEWHERE })
+  runLive(s, next)
+  clean(s)
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK })
+  expect(r).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(r.error.message).toContain(next)
+})
+
+test('a live job on the plain branch is task_running when the task itself names it as refs/heads/...', async () => {
+  const s = fresh()
+  seedTask(s, { branch: `refs/heads/${BRANCH}` })
+  const next = 'task-2000500-agent-n3x7q1b2'
+  seedJob(s, next, { cwd: ELSEWHERE })
+  runLive(s, next)
+  clean(s)
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK })
+  expect(r).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(r.error.message).toContain(next)
+})
+
+test('a job with no pgid that began a moment ago is running, and one that began a minute ago is gone', async () => {
+  const s = fresh()
+  seedTask(s)
+  s.files.delete(`${JOBS}/${TASK}/exit`)
+  clean(s)
+  const $ = engineOf(s)
+  s.now = STARTED + 2_000
+  const young = await integrate($, { taskId: TASK })
+  expect(young).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(young.error.message).toContain(`task ${TASK} is still running`)
+  expect(s.gitCalls.length).toBe(0)
+  s.now = STARTED + MINUTE
+  expect(await integrate($, { taskId: TASK })).toMatchObject({ ok: true, taskId: TASK })
+})
+
+test('a job just launched on the task branch, with no pgid yet, is task_running with its own id', async () => {
+  const s = fresh()
+  seedTask(s)
+  const next = 'task-2000500-agent-n3x7q1b2'
+  seedJob(s, next, { startedAt: STARTED + 59_000 })
+  s.files.delete(`${JOBS}/${next}/exit`)
+  clean(s)
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK })
+  expect(r).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(r.error.message).toContain(`task ${next} is still running`)
+})
+
+test('a young job whose pgid exists and whose process group is gone is not running', async () => {
+  const s = fresh()
+  seedTask(s)
+  s.files.delete(`${JOBS}/${TASK}/exit`)
+  s.files.set(`${JOBS}/${TASK}/pgid`, '4242\n')
+  clean(s)
+  s.now = STARTED + 2_000
+  const $ = engineOf(s)
+  expect(await integrate($, { taskId: TASK })).toMatchObject({ ok: true, taskId: TASK })
+})
+
+test('a liveness probe that throws counts as running while the job is young, and as gone after that', async () => {
+  const s = fresh()
+  seedTask(s)
+  s.files.delete(`${JOBS}/${TASK}/exit`)
+  s.files.set(`${JOBS}/${TASK}/pgid`, '4242\n')
+  s.probeBroken = true
+  clean(s)
+  const $ = engineOf(s)
+  s.now = STARTED + 2_000
+  const young = await integrate($, { taskId: TASK })
+  expect(young).toMatchObject({ ok: false, error: { code: 'task_running' } })
+  expect(s.gitCalls.length).toBe(0)
+  s.now = STARTED + MINUTE
+  expect(await integrate($, { taskId: TASK })).toMatchObject({ ok: true, taskId: TASK })
 })

@@ -252,10 +252,34 @@ check('a live job that took over the branch is task_running with its own id', ta
 await stopLive(nextGroup)
 check('the task integrates once no job is live on its branch', (await integrate(L)).ok === true)
 
+const V = 'task-v'
+const planV = await startTask(V)
+commit(planV.worktree, 'v.txt', 'task v\n', 'task v work')
+finish(V)
+const headBeforeV = must(repo, 'rev-parse', 'HEAD')
+const callsBeforeV = gitCalls.length
+writeMeta('shared-job', { cwd: `${planV.worktree}/sub` })
+const sharedGroup = startLive('shared-job')
+const inside = await integrate(V)
+check('a live shared job inside the task worktree, which recorded no branch, is task_running and the answer names it', inside.ok === false && inside.error?.code === 'task_running' && inside.error.message.includes('shared-job'))
+await stopLive(sharedGroup)
+writeMeta('spelled-job', { branch: `refs/heads/${planV.branch}`, cwd: `${home}/elsewhere` })
+const spelledGroup = startLive('spelled-job')
+const spelled = await integrate(V)
+check('a live job on the task branch spelled refs/heads/... is task_running', spelled.ok === false && spelled.error?.code === 'task_running' && spelled.error.message.includes('spelled-job'))
+await stopLive(spelledGroup)
+writeMeta('fresh-job', { cwd: planV.worktree })
+const fresh = await integrate(V)
+check('a job that began a moment ago and has no pgid yet is task_running', fresh.ok === false && fresh.error?.code === 'task_running' && fresh.error.message.includes('fresh-job'))
+check('those refusals ran no git call, left HEAD unmoved and the tree clean', gitCalls.length === callsBeforeV && must(repo, 'rev-parse', 'HEAD') === headBeforeV && must(repo, 'status', '--porcelain') === '')
+writeMeta('fresh-job', { cwd: planV.worktree, startedAt: Date.now() - 60000 })
+check('the same job a minute later, still with no pgid, counts as gone, and the task integrates', (await integrate(V, 'merge')).ok === true)
+
 check('an unknown task is task_not_found', (await integrate('task-nope')).error?.code === 'task_not_found')
 const plain = `${home}/plain`
 mkdirSync(plain, { recursive: true })
 writeMeta(D, { repo: plain, cwd: `${plain}-wt/${D}`, baseSha: 'abc123', branch: `orq/${D}`, worktree: `${plain}-wt/${D}` })
+finish(D)
 check('a destination outside any checkout is not_a_repository', (await integrate(D)).error?.code === 'not_a_repository')
 
 console.log(`pass=${passed} fail=${failed}`)
