@@ -534,6 +534,8 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       model: spec.model,
       env: spec.env,
     })
+    // The job files above may have taken longer than the grace, so another launcher may have broken this lock since the last touch.
+    if (held && !(await rearmLock($, held, { force: true }))) return abandon(busyRefusal(spec.kind, spec.cwd, null))
     let startCode: number
     try {
       const r = await $.process.run(['bash', '-c', script], { timeoutMs: PROCESS_TIMEOUT_MS })

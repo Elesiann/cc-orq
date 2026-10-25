@@ -438,6 +438,52 @@ test('a launch whose scan outlasts the grace while a second launcher breaks its 
   }
 })
 
+test('a launch whose job files stall past the grace after its last touch, while a second launcher breaks its lock and starts a job, refuses before its own start, so one job runs', async () => {
+  const { root, jobsDir } = scratch()
+  try {
+    const bin = join(root, 'bin')
+    mkdirSync(bin)
+    writeFileSync(
+      join(bin, 'claude'),
+      `#!/bin/bash\nprintf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"X","usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"m":{}}}'\n`,
+    )
+    chmodSync(join(bin, 'claude'), 0o755)
+    const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+    const real = nodeEngine({ env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, pluginRoot })
+    const repo = checkoutWithSubdirectory(root)
+    const config = { ...defaultConfig(root), jobsDir }
+    const spec = (agentId) => ({
+      kind: 'task', agentId, runner: 'claude', model: 'haiku', cwd: repo, prompt: 'x', env: {}, instanceId: 'claudeAgent', driver: 'claudeAgent', flags: [],
+    })
+    let second
+    const stalledWrites = {
+      ...real,
+      fs: {
+        ...real.fs,
+        write: async (path, text) => {
+          await real.fs.write(path, text)
+          if (path.endsWith('/prompt.txt')) {
+            backdate(join(jobsDir, '.locks', sha256Hex(repo)), 30)
+            second = await launchJob(real, config, spec('agent-second'))
+          }
+        },
+      },
+    }
+    const first = await launchJob(stalledWrites, config, spec('agent-first'))
+    assert.ok('job' in second, JSON.stringify(second))
+    assert.equal('refusal' in first, true, JSON.stringify(first))
+    assert.match(first.refusal, /worktree_busy/)
+    const started = readdirSync(jobsDir).filter((name) => existsSync(join(jobsDir, name, 'pgid')))
+    assert.deepEqual(started, [second.job.id], 'only the second launcher started a supervisor')
+    assert.equal(readFileSync(join(jobsDir, '.locks', sha256Hex(repo), 'owner'), 'utf8').trim(), second.job.id)
+    const abandoned = readdirSync(jobsDir).find((name) => name !== '.locks' && name !== second.job.id)
+    assert.equal(readFileSync(join(jobsDir, abandoned, 'exit'), 'utf8'), '125', 'the refused launch marks its job as one that never started')
+    for (let waited = 0; !existsSync(join(jobsDir, second.job.id, 'exit')) && waited < 100; waited += 1) await sleep(100)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('twenty claims at once on one checkout give exactly one holder, and the others name it', async () => {
   const { root, engine, jobsDir } = scratch()
   try {
