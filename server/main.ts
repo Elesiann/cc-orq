@@ -9,8 +9,9 @@ import { fileURLToPath } from 'node:url'
 import { newCatalogCache } from '../hooks/tools.ts'
 import { isRecord } from '../hooks/types.ts'
 import { nodeEngine } from './node-engine.ts'
+import { jobTasks } from './job-tasks.ts'
 import { registerTaskMethods, TASKS_EXTENSION } from './protocol.ts'
-import { registerTools } from './tools.ts'
+import { configOf, registerTools } from './tools.ts'
 import { McpServer, serveStdio } from './vendor/mcp-sdk.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -30,8 +31,9 @@ function buildServer(): McpServer {
     { name: 'cc-orq', version },
     { capabilities: { tools: {}, extensions: { [TASKS_EXTENSION]: {} } }, instructions: INSTRUCTIONS },
   )
-  registerTools(mcp, engine, catalog)
-  registerTaskMethods(mcp)
+  const tasks = jobTasks(engine, () => configOf(engine))
+  registerTools(mcp, engine, catalog, tasks)
+  registerTaskMethods(mcp, tasks)
   return mcp
 }
 

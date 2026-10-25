@@ -87,6 +87,26 @@ paths. Read them before you attach them to anything.
 `cc-orq:task` is available, that the plugin's function-hook module loaded, and
 that the debug log has no `InstructionsLoaded` line.
 
+`tasks` runs with the mods on, in an interactive session, with a real Codex worker and a real Claude worker. It
+needs logged-in `codex` and `claude` CLIs and costs a few cents. `ORQ_TASKS_CODEX_MODEL` (default `gpt-6-luna`) and
+`ORQ_TASKS_CLAUDE_MODEL` (default `haiku`) name the models. It checks:
+
+- two `delegate` calls become two MCP tasks that run at once, and `/tasks` lists both with their last action, and
+  shows the detail of each
+- the session wakes for each result, one turn that a task notification started per task in the debug log, and
+  each result carries the text that its worker wrote
+- a request above the ceiling opens the approval form, whose first three lines show the level, where the task runs
+  and the worker, model and directory, without expanding it; accepting starts the job at the level that was asked,
+  and the task record has its `approved` marker
+- the debug log of the interactive session says that no `CLAUDE.md` or rules file loaded and never names an
+  excluded path
+
+The Claude worker runs through a `claude` wrapper in the scratch directory that adds the same isolation flags as the
+nested session, so your hooks and connectors stay out of it. The scenario reads your `~/.config/orq/config.json`,
+and refuses to run when its `ceiling.runtime` is already `auto` or `full-access`, since no form could open. It writes
+jobs to your jobs directory, as any session does, and does not call `capabilities`, which would probe every
+configured instance.
+
 ## Isolation and cleanup
 
 The nested CLI always runs with:
