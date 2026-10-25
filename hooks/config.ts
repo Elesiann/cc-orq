@@ -1,4 +1,4 @@
-import type { EngineInterface } from 'claude-code'
+import type { CoreEngine } from './engine.ts'
 
 export type DriverKind = 'codex' | 'opencode' | 'antigravity' | 'claudeAgent'
 
@@ -131,7 +131,7 @@ export function parseConfig(text: string | null, home: string): ParsedConfig {
   return result
 }
 
-export async function loadConfig($: Pick<EngineInterface, 'fs' | 'env'>): Promise<ParsedConfig> {
+export async function loadConfig($: Pick<CoreEngine, 'fs' | 'env'>): Promise<ParsedConfig> {
   const home = ((await $.env.get('HOME')) ?? '').trim()
   if (home === '') {
     return { ...parseConfig(null, '/root'), warning: 'config: HOME is not set, using defaults under /root' }
