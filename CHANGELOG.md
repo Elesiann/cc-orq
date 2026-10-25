@@ -24,8 +24,7 @@ All notable changes to cc-orq are recorded here. The format follows
   holds the request to the permission ceiling, and refuses what is above it with
   the escalation code and what lifts the limit. It takes a prompt of at most
   200,000 characters. Its job has kind `mcp`, the session id as its `agentId`
-  (or `mcp`), and `questions` in `meta.json`. `questions: human` is refused for
-  now, because this version cannot resume a worker with an answer from a form.
+  (or `mcp`), and `questions` in `meta.json`.
 - `delegate` returns an MCP task to a client that declares the tasks extension
   on the request, as the Claude Code CLI does. `/tasks` lists it with the
   worker's instance, model and last action, and the session wakes by itself with
@@ -119,6 +118,14 @@ All notable changes to cc-orq are recorded here. The format follows
   the ceiling opens the same form as `delegate`, or is refused for a client with no
   form. An approval carries over only from the server's own task records of the
   same chain, for the same worker at no higher level, never from `meta.json`.
+- `questions: human`, for a client that declares MCP tasks and form input. A worker
+  that stops on a question puts its task in `input_required`, with a free-text form
+  that shows the worker and its question, and the answer resumes the same worker
+  as a job of the same task, which then ends with the result of the job that
+  finished last. Declining the form, Esc, a worker that cannot be resumed, a
+  continuation that cannot start, and 24 hours end the task with the BLOCKED text,
+  and `answer` can then answer it. `x` on an open form cancels the task, and while
+  a form is open `answer` gets `awaiting_form`. Any other client is refused.
 - The supervisor writes the worker's session id to the file `session` before it
   writes `exit`, and a job with a `resume` file starts the CLI's own resume form
   for that session: `codex exec resume`, `opencode run --session`, `claude -p

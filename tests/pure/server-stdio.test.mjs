@@ -1267,19 +1267,19 @@ test('delegate takes a prompt of at most 200,000 characters, counted as characte
   assert.deepEqual(jobDirs(s), [], 'nothing was launched')
 })
 
-test('delegate refuses questions: human, which needs the answer of a form to resume a worker', async (t) => {
+test('delegate refuses questions: human to a client that cannot show a form', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())
   const { session, repo } = checkout(s)
   const server = startIn(s, session)
   t.after(() => server.close())
-  for (const capabilities of [undefined, CLIENT_WITH_FORMS]) {
+  for (const capabilities of [undefined]) {
     const answer = await server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.', questions: 'human' }, capabilities)
     assert.equal(answer.isError, true)
     assert.equal(answer.json.error.code, 'invalid_request')
     assert.equal(
       answer.json.error.message,
-      'questions: human is not available yet: this version cannot resume a worker with an answer from a form. Leave questions out, and a question the worker asks comes back to you in its result.',
+      'questions: human needs a client that declares MCP tasks and form input, such as the Claude Code CLI, and this one does not. Leave questions out, and a question the worker asks comes back to you in its result.',
     )
   }
   assert.deepEqual(jobDirs(s), [])

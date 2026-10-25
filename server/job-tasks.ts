@@ -26,6 +26,7 @@ import {
   planTaskLaunch,
   readMeta,
   readNext,
+  readSession,
   taskStatusOf,
   writeCancel,
   type ContinuationPlan,
@@ -52,11 +53,16 @@ const TASKS_DIR = '.tasks'
 const APPROVE = 'approve'
 const RESULT_LIMIT_BYTES = 100 * 1024
 const EVENTS_TAIL_BYTES = 32768
-const JOB_FILES = ['meta.json', 'events.jsonl', 'question.txt', 'last.txt', 'cancel', 'exit']
+const JOB_FILES = ['meta.json', 'events.jsonl', 'question.txt', 'last.txt', 'cancel', 'exit', 'next', 'declined']
 
-const HUMAN_REFUSAL =
-  'questions: human is not available yet: this version cannot resume a worker with an answer from a form. ' +
+const HUMAN_NEEDS_FORMS =
+  'questions: human needs a client that declares MCP tasks and form input, such as the Claude Code CLI, and this one does not. ' +
   'Leave questions out, and a question the worker asks comes back to you in its result.'
+
+/** A form left open for this long ends the task with the BLOCKED text. */
+const FORM_WINDOW_MS = 24 * 60 * 60 * 1000
+const QUESTION_KEY = 'q-'
+const ANSWER_MAX_CHARS = 20_000
 
 type Modes = { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
 
@@ -281,6 +287,51 @@ async function finishedTask($: CoreEngine, config: OrqConfig, job: JobRecord, vi
   }
 }
 
+/** The job that a human task stands at: the first job, or the last one that an answer from the form started. */
+async function walkForms($: CoreEngine, config: OrqConfig, first: JobRecord): Promise<{ job: JobRecord; view: JobView } | { starting: true }> {
+  let job = first
+  for (let hops = 0; hops < 64; hops += 1) {
+    const view = await jobView($, job)
+    if (view.status !== 'done' || view.question === null) return { job, view }
+    const next = await readNext($, job)
+    if (next === null || next.via !== 'form') return { job, view }
+    const following = await readMeta($, config.jobsDir, next.jobId)
+    if (following === null) return { starting: true }
+    job = following
+  }
+  return { job, view: await jobView($, job) }
+}
+
+/** The worker's question stays a form until it is declined, the task is cancelled, 24 hours pass, or it has no session to resume. */
+async function formIsOpen($: CoreEngine, job: JobRecord, view: Extract<JobView, { question: string | null }>): Promise<boolean> {
+  if ((await readSession($, job)) === null || (await $.fs.exists(`${job.dir}/declined`))) return false
+  return (await $.clock.now()) - (view.endedAt ?? 0) < FORM_WINDOW_MS
+}
+
+/** The worker chose the question, so its whitespace is folded, it is cut, and its control characters are written out. */
+function plain(text: string, limit: number): string {
+  const folded = text.replace(/\s+/g, ' ').trim()
+  const characters = [...folded]
+  const cut = characters.length > limit ? `${characters.slice(0, limit).join('')}…` : folded
+  return cut.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u{${char.codePointAt(0)?.toString(16)}}`)
+}
+
+/** The first three lines of the message are what Claude Code shows of a form, so the worker and its question come first. */
+function questionRequest(job: JobRecord, question: string): InputRequest {
+  return {
+    method: 'elicitation/create',
+    params: {
+      mode: 'form',
+      message: [`${whoIs(job)} asks:`, plain(question, 600), 'Your answer goes to the same worker, which resumes its session.'].join('\n'),
+      requestedSchema: {
+        type: 'object',
+        properties: { answer: { type: 'string', title: 'Your answer', minLength: 1, maxLength: ANSWER_MAX_CHARS } },
+        required: ['answer'],
+      },
+    },
+  }
+}
+
 async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise<DetailedTask> {
   const now = await $.clock.now()
   if (loaded.kind === 'corrupt') {
@@ -313,8 +364,22 @@ async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise
         statusMessage: 'waiting for your approval to go above the ceiling',
         inputRequests: { [APPROVE]: approvalRequest(stage.approval) },
       }
-    case 'job':
-      return finishedTask($, config, stage.job, await jobView($, stage.job), base)
+    case 'job': {
+      if (record.questions !== 'human') return finishedTask($, config, stage.job, await jobView($, stage.job), base)
+      const walked = await walkForms($, config, stage.job)
+      if ('starting' in walked) return { ...base, status: 'working', statusMessage: 'resuming with your answer' }
+      const { job: tip, view } = walked
+      const here = { ...base, lastUpdatedAt: await newest($, [...touched, ...jobPaths(tip)], record.createdAt) }
+      if (view.status === 'done' && view.question !== null && (await formIsOpen($, tip, view))) {
+        return {
+          ...here,
+          status: 'input_required',
+          statusMessage: `${whoIs(tip)} · waiting for your answer`,
+          inputRequests: { [`${QUESTION_KEY}${tip.id}`]: questionRequest(tip, view.question) },
+        }
+      }
+      return finishedTask($, config, tip, view, here)
+    }
   }
 }
 
@@ -420,6 +485,17 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     return null
   }
 
+  /** Whether the task of this job was cancelled while its form was open. The task is the job's own, or the one its form answers continued. */
+  async function taskCancelled(config: OrqConfig, job: JobRecord): Promise<boolean> {
+    let at: JobRecord | null = job
+    for (let hops = 0; at !== null && hops < 64; hops += 1) {
+      const dir = `${config.jobsDir}/${TASKS_DIR}/${at.id}`
+      if (await $.fs.exists(`${dir}/task.json`)) return $.fs.exists(`${dir}/cancelled`)
+      at = at.parent === undefined ? null : await readMeta($, config.jobsDir, at.parent)
+    }
+    return false
+  }
+
   async function answerCreate(args: unknown, client: ClientInfo): Promise<Created> {
     const config = await getConfig()
     const call = parseAnswerInput(args)
@@ -432,6 +508,9 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     }
     const next = await readNext($, parent)
     if (next !== null) return { result: answerOf(alreadyAnswered(parent.id, next), true) }
+    if (parent.questions === 'human' && (await formIsOpen($, parent, view)) && !(await taskCancelled(config, parent))) {
+      return { result: answerOf(fail('awaiting_form', `the question of ${parent.id} is open in a form that the user sees: the answer comes from the form, or from this tool once it is declined, cancelled or 24 hours old`), true) }
+    }
     const planned = await continuationPlan($, config, parent, await sessionDir())
     if ('failure' in planned) return { result: answerOf(planned.failure, true) }
     const { plan } = planned
@@ -493,7 +572,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     const config = await getConfig()
     const call = parseDelegateInput(args)
     if (isFailure(call)) return { result: answerOf(call, true) }
-    if (call.questions === 'human') return { result: answerOf(fail('invalid_request', HUMAN_REFUSAL), true) }
+    if (call.questions === 'human' && !(client.tasks && client.forms)) return { result: answerOf(fail('invalid_request', HUMAN_NEEDS_FORMS), true) }
     const { header } = call
     const { effective, refusal } = resolveCeiling({
       config: config.ceiling,
@@ -608,6 +687,31 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     await refuse(textOf(await launchRefusal($, launched.refusal)))
   }
 
+  /**
+   * The user answered the question form of a human task, or turned it down. Only the key of the question that is open counts. An
+   * answer resumes the worker as a job of this same task, at the level it had, since the task is the one the user approved.
+   * Declining, Esc, an answer that is blank, and a worker that cannot be resumed end the form: the task gets the BLOCKED text.
+   */
+  async function answerQuestion(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, jobId: string, response: InputResponse): Promise<void> {
+    if (loaded.record.questions !== 'human') return
+    const stage = await stageOf($, config, loaded)
+    if (stage.kind !== 'job') return
+    const walked = await walkForms($, config, stage.job)
+    if ('starting' in walked || walked.job.id !== jobId || walked.view.status !== 'done' || walked.view.question === null) return
+    const tip = walked.job
+    if (!(await formIsOpen($, tip, walked.view))) return
+    const close = async (why: string): Promise<void> => $.fs.write(`${tip.dir}/declined`, `${iso(await $.clock.now())} ${why}\n`)
+    if (response.action !== 'accept') return close('declined')
+    const text = response.content?.answer
+    if (typeof text !== 'string' || text.trim() === '' || [...text].length > ANSWER_MAX_CHARS) return
+    const planned = await continuationPlan($, config, tip, await sessionDir())
+    if ('failure' in planned) return close(planned.failure.error.message)
+    const launched = await launchContinuation($, config, planned.plan, { answer: text, via: 'form', questions: 'human', agentId: await agentId() })
+    if ('job' in launched) return
+    if ('failure' in launched) return launched.failure.error.code === 'already_answered' ? undefined : close(launched.failure.error.message)
+    return close(launched.refusal)
+  }
+
   async function answerForm(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, answer: InputResponse): Promise<void> {
     const stage = await stageOf($, config, loaded)
     if (stage.kind !== 'form') return
@@ -630,11 +734,14 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     async update(taskId, responses) {
       const config = await getConfig()
       const loaded = await load($, config, taskId)
-      const answer = responses[APPROVE]
-      if (loaded.kind !== 'task' || answer === undefined || answering.has(taskId)) return
+      if (loaded.kind !== 'task' || answering.has(taskId)) return
       answering.add(taskId)
       try {
-        await answerForm(config, loaded, answer)
+        const approval = responses[APPROVE]
+        if (approval !== undefined) await answerForm(config, loaded, approval)
+        for (const [key, response] of Object.entries(responses)) {
+          if (key.startsWith(QUESTION_KEY)) await answerQuestion(config, loaded, key.slice(QUESTION_KEY.length), response)
+        }
       } finally {
         answering.delete(taskId)
       }
@@ -644,10 +751,16 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
       const config = await getConfig()
       const loaded = await load($, config, taskId)
       if (loaded.kind === 'corrupt') return
-      const job = loaded.kind === 'job' ? loaded.job : await readMeta($, config.jobsDir, taskId)
-      if (job !== null) {
-        const status = taskStatusOf(await jobView($, job))
-        if (status === 'running' || status === 'waiting') await writeCancel($, job)
+      const first = loaded.kind === 'job' ? loaded.job : await readMeta($, config.jobsDir, taskId)
+      if (first !== null) {
+        const human = loaded.kind === 'task' && loaded.record.questions === 'human'
+        const walked = human ? await walkForms($, config, first) : { job: first, view: await jobView($, first) }
+        if ('starting' in walked) return
+        const status = taskStatusOf(walked.view)
+        if (status === 'running' || status === 'waiting') await writeCancel($, walked.job)
+        else if (human && walked.view.status === 'done' && walked.view.question !== null && (await formIsOpen($, walked.job, walked.view))) {
+          await $.fs.write(`${loaded.dir}/cancelled`, `${iso(await $.clock.now())}\n`)
+        }
         return
       }
       if (loaded.kind !== 'task') return

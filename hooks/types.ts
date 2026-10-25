@@ -47,6 +47,8 @@ export type JobRecord = {
   worktree?: string
   /** The job whose question this job answers, when it resumes that job's worker. */
   parent?: string
+  /** Who answers a question the worker asks: the parent session, or the user through a form. Absent on jobs older than `delegate`. */
+  questions?: 'parent' | 'human'
 }
 
 /** True when path is root or lies under it. Both are resolved paths. */
@@ -96,6 +98,7 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (typeof raw.branch === 'string' && raw.branch !== '') job.branch = raw.branch
   if (typeof raw.worktree === 'string' && raw.worktree !== '') job.worktree = raw.worktree
   if (typeof raw.parent === 'string' && isSafeJobId(raw.parent)) job.parent = raw.parent
+  if (raw.questions === 'parent' || raw.questions === 'human') job.questions = raw.questions
   return job
 }
 

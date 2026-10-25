@@ -377,7 +377,6 @@ test('create answers the other refusals at once, for every client, and records n
   t.after(() => s.cleanup())
   for (const [what, input, code] of [
     ['a field the tool does not have', { ...REQUEST(repo), turbo: 'yes' }, 'invalid_request'],
-    ['questions: human', REQUEST(repo, { questions: 'human' }), 'invalid_request'],
     ['a target that is not configured', REQUEST(repo, { target: 'nope' }), 'provider_unavailable'],
     ['a directory outside the session', REQUEST('/usr', {}), 'cwd_out_of_scope'],
   ]) {
@@ -386,6 +385,8 @@ test('create answers the other refusals at once, for every client, and records n
     assert.equal(created.result.isError, true, what)
     assert.equal(JSON.parse(created.result.content[0].text).error.code, code, what)
   }
+  const noForm = await tasks.create('delegate', REQUEST(repo, { questions: 'human' }), { tasks: true, forms: false })
+  assert.equal(JSON.parse(noForm.result.content[0].text).error.code, 'invalid_request', 'questions: human needs a client with forms')
   const nonRecord = await tasks.create('delegate', null, CLIENT)
   assert.match(nonRecord.result.content[0].text, /^\{"error":\{"code":"invalid_request","message":"delegate needs /)
   assert.deepEqual(jobDirs(s), [])

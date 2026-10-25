@@ -2,7 +2,7 @@
 // the real server over stdio and a fake claude that asks on its first run and quotes what it is told when it is resumed.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
@@ -362,6 +362,88 @@ test('a branch that meta.json names is the task\'s own only when the claims of t
   await until(server, c2)
   assert.equal(meta(s, c2).branch, meta(s, again.id).branch, 'a task whose claims lead to this job keeps its branch through a second answer')
   assert.equal(meta(s, c2).parent, c1)
+})
+
+const FORM = (task) => Object.entries(task.inputRequests ?? {})
+
+test('questions: human shows the question in a form, and the answer resumes the worker inside the same task', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = s.startIn(session)
+
+  const refused = await server.call('delegate', REQUEST(repo, { questions: 'human', sessionMode: 'acceptEdits' }), NO_TASKS)
+  assert.equal(code(refused), 'invalid_request', 'a client without tasks and forms cannot be asked')
+  assert.match(refused.json.error.message, /questions: human/)
+
+  const { task } = await server.call('delegate', REQUEST(repo, { questions: 'human', sessionMode: 'acceptEdits' }), WITH_FORMS)
+  const id = task.taskId
+  const open = await until(server, id, ['working'])
+  assert.equal(open.status, 'input_required', 'the worker asked, and the task waits for the form instead of ending')
+  const [[key, request]] = FORM(open)
+  assert.equal(key, `q-${id}`, 'the key names the job that asked')
+  assert.match(request.params.message, new RegExp(QUESTION.replace('?', '\\?')))
+  assert.equal(request.params.requestedSchema.properties.answer.type, 'string')
+  assert.deepEqual(request.params.requestedSchema.required, ['answer'])
+
+  const early = await server.call('answer', { taskId: id, answer: 'Production.' }, WITH_FORMS)
+  assert.equal(code(early), 'awaiting_form', 'while the form is open it is the way to answer')
+  assert.equal(existsSync(join(s.jobsDir, id, 'next')), false)
+
+  await server.update(id, { [key]: { action: 'accept', content: { answer: 'Production, and tag it v2.' } } })
+  const done = await until(server, id, ['working', 'input_required'])
+  assert.equal(done.status, 'completed', 'the same task ends, with the result of the resumed worker')
+  const [{ text }] = done.result.content
+  assert.ok(text.startsWith('RESUMED: Production, and tag it v2.'), text)
+  const claim = JSON.parse(read(s, id, 'next'))
+  assert.equal(claim.via, 'form')
+  assert.equal(meta(s, claim.jobId).questions, 'human')
+  assert.equal(meta(s, claim.jobId).branch, meta(s, id).branch)
+  assert.ok(text.includes(`Branch orq/${id}.`) && text.includes(claim.jobId), 'the merge hint names the job that finished')
+  assert.equal(existsSync(join(s.jobsDir, '.tasks', claim.jobId)), false, 'the answer through the form is no new task')
+})
+
+test('a declined form, Esc, a cancel and 24 hours end the task with BLOCKED, and then the answer tool works', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = s.startIn(session)
+  const ask = async () => {
+    const { task } = await server.call('delegate', REQUEST(repo, { questions: 'human', sessionMode: 'acceptEdits' }), WITH_FORMS)
+    const open = await until(server, task.taskId, ['working'])
+    return { id: task.taskId, key: FORM(open)[0][0] }
+  }
+
+  const declined = await ask()
+  await server.update(declined.id, { [declined.key]: { action: 'decline' } })
+  const ended = await server.get(declined.id)
+  assert.equal(ended.status, 'completed')
+  assert.equal(ended.result.isError, false)
+  assert.match(ended.result.content[0].text, /^BLOCKED on a question .*Answer it with the answer tool/s)
+  const viaTool = await server.call('answer', { taskId: declined.id, answer: 'Production.' }, WITH_FORMS)
+  assert.ok(viaTool.task !== undefined, 'a declined form frees the answer tool')
+  await until(server, viaTool.task.taskId)
+
+  const escaped = await ask()
+  await server.update(escaped.id, { [escaped.key]: { action: 'cancel' } })
+  assert.equal((await server.get(escaped.id)).status, 'completed')
+
+  const cancelled = await ask()
+  await server.cancel(cancelled.id)
+  assert.equal((await server.get(cancelled.id)).status, 'cancelled', 'x in /tasks on an open form cancels the task')
+  const freed = await server.call('answer', { taskId: cancelled.id, answer: 'Production.' }, WITH_FORMS)
+  assert.ok(freed.task !== undefined, 'a cancelled task frees the answer tool')
+  await until(server, freed.task.taskId)
+
+  const stale = await ask()
+  const day = (Date.now() - 25 * 3600 * 1000) / 1000
+  utimesSync(join(s.jobsDir, stale.id, 'exit'), day, day)
+  const lapsed = await server.get(stale.id)
+  assert.equal(lapsed.status, 'completed', 'after 24 hours the form is gone and the task ends with BLOCKED')
+  assert.match(lapsed.result.content[0].text, /^BLOCKED on a question/)
+  const late = await server.call('answer', { taskId: stale.id, answer: 'Production.' }, WITH_FORMS)
+  assert.ok(late.task !== undefined, 'and the answer tool can answer it')
+  await until(server, late.task.taskId)
 })
 
 test('a client without tasks gets the id of the continuation at once and reads it with status', async (t) => {

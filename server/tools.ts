@@ -64,7 +64,7 @@ const DELEGATE_INPUT = {
     questions: {
       type: 'string',
       enum: [...QUESTION_MODES],
-      description: 'Who answers a question the worker asks. parent (default): the job ends with BLOCKED in its result, for you to answer. human is not available yet.',
+      description: 'Who answers a question the worker asks. parent (default): the job ends with BLOCKED in its result, for you to answer with the answer tool. human: the user sees the question in a form and the same task goes on with their answer; only for a client with MCP tasks and forms, such as the Claude Code CLI.',
     },
     prompt: {
       type: 'string',
@@ -135,7 +135,7 @@ const DELEGATE_DESCRIPTION =
   'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode, which counts as far as the cc-orq hook supplies it. ' +
   'runtime and interaction ask for less. A request above the ceiling opens a form that asks the user to allow it for this task only, when the client has tasks and forms; ' +
   'otherwise it is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
-  'questions parent, the default, ends a job that asks a question with BLOCKED in its result, which you answer with the answer tool; questions human is not available yet. ' +
+  'questions parent, the default, ends a job that asks a question with BLOCKED in its result, which you answer with the answer tool; questions human shows the question to the user in a form, and the same task goes on with their answer, which only a client with MCP tasks and forms can do. ' +
   'Input: {"target", "model", "cwd", "prompt"}, and optionally effort, isolation, role, runtime, interaction and questions.'
 const ANSWER_DESCRIPTION =
   'Answer the question that a worker stopped on, a job whose result starts with BLOCKED on a question. The same worker resumes its own session, ' +
