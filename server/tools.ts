@@ -17,6 +17,7 @@ import { integrate, integratePayload, parseIntegrateInput } from '../hooks/integ
 import { parentRuntimeModeFromPermissionMode } from '../hooks/target.ts'
 import { CANCEL_REASON_MAX, cancelAnswer, capabilitiesAnswer, statusAnswer, type CatalogCache } from '../hooks/tools.ts'
 import { isRecord } from '../hooks/types.ts'
+import { nodeEngine } from './node-engine.ts'
 import type { CallToolResult, McpServer, StandardSchemaWithJSON } from './vendor/mcp-sdk.mjs'
 
 const LIST_DEFAULT = 20
@@ -201,7 +202,11 @@ export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCac
     { description: INTEGRATE_DESCRIPTION, inputSchema: advertise(INTEGRATE_INPUT_SCHEMA) },
     guarded($, INTEGRATE_TOOL, async (input) => {
       const parsed = parseIntegrateInput(input)
-      const payload = integratePayload('failure' in parsed ? parsed : await integrate($, (await configOf($)).jobsDir, parsed.input))
+      if ('failure' in parsed) return textResult(integratePayload(parsed), true)
+      const config = await configOf($)
+      const { gitHooks } = config.integrate
+      const engine = gitHooks === 'run' ? nodeEngine({ pluginRoot: $.plugin.root, gitHooks: 'repository' }) : $
+      const payload = integratePayload(await integrate(engine, config.jobsDir, parsed.input, gitHooks))
       return textResult(payload, !payload.ok)
     }),
   )

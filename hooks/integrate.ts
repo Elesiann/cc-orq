@@ -1,4 +1,5 @@
-import { readMeta, type CoreEngine } from './engine.ts'
+import type { IntegrateGitHooks } from './config.ts'
+import { jobLiveness, readMeta, type CoreEngine } from './engine.ts'
 import {
   INTEGRATE_STRATEGIES,
   type GitFailure,
@@ -6,7 +7,7 @@ import {
   type IntegrateStrategy,
   type Integrated,
 } from './contract.ts'
-import { isRecord } from './types.ts'
+import { failureSnippet, isRecord, type JobRecord } from './types.ts'
 import {
   GIT_TIMEOUT_MS,
   gitDetail,
@@ -30,6 +31,35 @@ function isStrategy(value: unknown): value is IntegrateStrategy {
   return INTEGRATE_STRATEGIES.some((s) => s === value)
 }
 
+/** A fatal or error line of git that names a hook, such as `fatal: ref updates aborted by hook`. */
+const GIT_NAMES_A_HOOK = /^(?:fatal|error): .*\bhooks?\b/im
+
+/** The line git ends with when a hook refuses a merge commit. orq aborts that merge, so the advice is wrong. */
+const GIT_COMMIT_ADVICE = 'Not committing merge;'
+
+/** The id of the first live job on `branch`: the task's own job first, then the others in id order. */
+async function liveJobOn($: CoreEngine, jobsDir: string, task: JobRecord, branch: string): Promise<string | null> {
+  const names = (await $.fs.list(jobsDir))
+    .filter((entry) => entry.kind === 'dir' && entry.name !== task.id)
+    .map((entry) => entry.name)
+    .sort()
+  const onBranch = [task]
+  for (const name of names) {
+    const job = await readMeta($, jobsDir, name)
+    if (job !== null && job.branch === branch) onBranch.push(job)
+  }
+  for (const job of onBranch) {
+    if ((await jobLiveness($, job)) === 'running') return job.id
+  }
+  return null
+}
+
+/** The hook's output from what the refused merge printed: redacted, cut to its last 20 lines, without git's advice. */
+function hookOutput(stderr: string): string {
+  const lines = stderr.split('\n').filter((line) => !line.startsWith(GIT_COMMIT_ADVICE))
+  return failureSnippet(lines.join('\n').trim())
+}
+
 /** The tool input as the model sent it: a job id, and a strategy that defaults to ff-only. */
 export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | { failure: GitFailure } {
   if (!isRecord(raw) || typeof raw.taskId !== 'string' || raw.taskId === '') {
@@ -42,9 +72,13 @@ export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | {
 
 /**
  * Merge a finished task's branch into the checkout it was launched from. Every git call is an explicit
- * argv in the destination, with no force. A conflict is listed, then aborted; the worktree stays.
+ * argv in the destination, with no force. A job still running on the branch refuses the merge before git
+ * runs. A conflict is listed, then aborted; the worktree stays.
+ *
+ * `gitHooks` says whether `$` runs the checkout's hooks as they are, which only an engine that keeps them on can do.
+ * With `run`, a merge that a hook refuses is aborted too, and answers hook_failed.
  */
-export async function integrate($: CoreEngine, jobsDir: string, input: IntegrateInput): Promise<IntegrateOutcome> {
+export async function integrate($: CoreEngine, jobsDir: string, input: IntegrateInput, gitHooks: IntegrateGitHooks = 'off'): Promise<IntegrateOutcome> {
   const run = (argv: string[]) => $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
   try {
     const job = await readMeta($, jobsDir, input.taskId)
@@ -54,6 +88,11 @@ export async function integrate($: CoreEngine, jobsDir: string, input: Integrate
     const worktree = job.worktree
     if (repo === undefined || branch === undefined || worktree === undefined) {
       return fail('no_worktree', `task ${job.id} ran without a worktree, so it has no branch to merge`)
+    }
+
+    const running = await liveJobOn($, jobsDir, job, branch)
+    if (running !== null) {
+      return fail('task_running', `task ${running} is still running on ${branch}; wait for it to finish, or cancel it, then integrate again`)
     }
 
     const status = await run(statusArgv(repo))
@@ -81,6 +120,12 @@ export async function integrate($: CoreEngine, jobsDir: string, input: Integrate
       }
       if (files.length > 0) {
         return fail('merge_conflict', `${branch} conflicts with ${repo} in ${files.length} file(s); the merge was aborted`, files)
+      }
+      if (gitHooks === 'run' && (pending || GIT_NAMES_A_HOOK.test(merged.stderr))) {
+        const output = hookOutput(merged.stderr)
+        const refused = `a git hook refused the merge of ${branch} into ${repo}${pending ? '; the merge was aborted' : ''}`
+        const said = output === '' ? "The checkout's hook printed nothing." : `Output of the checkout's hook:\n${output}`
+        return fail('hook_failed', `${refused}. A hook has to pass before the task can merge: fix what it checks, then integrate again.\n${said}`)
       }
       const code = input.strategy === 'ff-only' ? 'not_fast_forward' : 'git_failed'
       const aborted = pending ? '; the merge was aborted' : ''

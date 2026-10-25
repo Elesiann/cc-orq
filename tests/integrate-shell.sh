@@ -1,7 +1,9 @@
 #!/bin/bash
 # integrate against real git: a temporary checkout under .ref/tmp, worktrees cut from it by the real
-# prepareWorktree, and the real integrate function, the one the MCP server serves, run over a process.run that
-# calls git. Git reads no global or system config here, so the host's merge settings cannot change the result.
+# prepareWorktree, and the real integrate function, the one the MCP server serves. The engines are the ones the
+# server builds: the node engine with git hooks off, which integrate uses by default, and the one that keeps the
+# checkout's hooks on, which it uses once the config says `integrate.gitHooks: run`. Git reads no global or system
+# config here, so the host's merge settings cannot change the result.
 # Usage: bash tests/integrate-shell.sh
 set -e -o pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,36 +22,29 @@ git -C "$REPO" add shared.txt
 git -C "$REPO" commit -q -m base
 
 cat > "$T/driver.mjs" <<'JS'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 const [repo, home] = process.argv.slice(2)
 const ROOT = process.env.ORQ_ROOT
 const { prepareWorktree } = await import(pathToFileURL(`${ROOT}/hooks/engine.ts`).href)
 const { integrate: integrateTask, integratePayload, parseIntegrateInput } = await import(pathToFileURL(`${ROOT}/hooks/integrate.ts`).href)
+const { nodeEngine } = await import(pathToFileURL(`${ROOT}/server/node-engine.ts`).href)
 const jobsDir = `${home}/.cache/orq/jobs`
 
-const dollar = {
+const launching = nodeEngine({ pluginRoot: ROOT })
+const keepingHooks = nodeEngine({ pluginRoot: ROOT, gitHooks: 'repository' })
+const gitCalls = []
+const spy = (engine) => ({
+  ...engine,
   process: {
-    run: async (argv, init) => {
-      if (argv[0] !== 'git') throw new Error(`the driver runs git only, got ${argv[0]}`)
-      const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: init?.timeoutMs ?? 30000 })
-      return { exitCode: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false }
+    run: (argv, init) => {
+      if (argv[0] === 'git') gitCalls.push(argv)
+      return engine.process.run(argv, init)
     },
   },
-  fs: {
-    read: async (p) => readFileSync(p, 'utf8'),
-    exists: async (p) => existsSync(p),
-    list: async (dir) => readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, kind: d.isDirectory() ? 'dir' : 'file' })),
-    write: async (p, text) => writeFileSync(p, text),
-    stat: async (p) => { const st = statSync(p); return { kind: st.isDirectory() ? 'dir' : 'file', size: st.size, mtimeMs: st.mtimeMs, isLink: false } },
-  },
-  clock: { now: async () => Date.now() },
-  env: { get: async (name) => process.env[name] },
-  plugin: { root: ROOT },
-  ui: { log: async () => {} },
-}
+})
 
 const git = (cwd, ...args) => {
   const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
@@ -73,16 +68,18 @@ const check = (label, ok) => {
   }
 }
 
-// The answer of the tool for one task, as the server sends it to the model: the payload of the outcome as JSON.
-async function integrate(taskId, strategy) {
+// The answer of the tool for one task, as the server sends it to the model: the payload of the outcome as JSON. `hooks`
+// is what the config says, and the server picks the engine that keeps the checkout's hooks only for `run`.
+async function integrate(taskId, strategy, hooks = 'off') {
   const parsed = parseIntegrateInput(strategy === undefined ? { taskId } : { taskId, strategy })
-  const outcome = 'failure' in parsed ? parsed : await integrateTask(dollar, jobsDir, parsed.input)
+  const engine = spy(hooks === 'run' ? keepingHooks : launching)
+  const outcome = 'failure' in parsed ? parsed : await integrateTask(engine, jobsDir, parsed.input, hooks)
   return JSON.parse(JSON.stringify(integratePayload(outcome)))
 }
 
 // A task as the launch writes it: the worktree from prepareWorktree, and the meta.json beside it.
 async function startTask(taskId) {
-  const r = await prepareWorktree(dollar, repo, taskId)
+  const r = await prepareWorktree(launching, repo, taskId)
   if ('failure' in r) throw new Error(`prepareWorktree refused ${taskId}: ${r.failure.code}`)
   writeMeta(taskId, { repo, baseSha: r.plan.baseSha, branch: r.plan.branch, worktree: r.plan.worktree, cwd: r.plan.worktree })
   return r.plan
@@ -93,12 +90,56 @@ function writeMeta(taskId, fields) {
   writeFileSync(`${jobsDir}/${taskId}/meta.json`, JSON.stringify({ id: taskId, kind: 'manual', agentId: 'manual', startedAt: Date.now(), ...fields }))
 }
 
+function installHook(name, body) {
+  const path = `${repo}/.git/hooks/${name}`
+  writeFileSync(path, `#!/bin/sh\n${body}\n`)
+  chmodSync(path, 0o755)
+  return path
+}
+
 // A commit by a fake worker, or by someone working in the destination.
 function commit(cwd, file, text, message) {
   writeFileSync(`${cwd}/${file}`, text)
   must(cwd, 'add', file)
   must(cwd, 'commit', '-q', '-m', message)
 }
+
+const finish = (taskId) => writeFileSync(`${jobsDir}/${taskId}/exit`, '0')
+
+// A detached child leads its own process group, so its pid is the pgid that the job records.
+const groups = []
+const alive = (pid) => {
+  try {
+    process.kill(-pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+function startLive(taskId) {
+  const child = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' })
+  child.unref()
+  groups.push(child.pid)
+  writeFileSync(`${jobsDir}/${taskId}/pgid`, `${child.pid}\n`)
+  return child.pid
+}
+async function stopLive(pid) {
+  try {
+    process.kill(-pid, 'SIGKILL')
+  } catch {
+    // The group is already gone.
+  }
+  for (let wait = 0; wait < 250 && alive(pid); wait += 1) await new Promise((done) => setTimeout(done, 20))
+}
+process.on('exit', () => {
+  for (const pid of groups) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      // The group is already gone.
+    }
+  }
+})
 
 const A = 'task-a'
 const B = 'task-b'
@@ -111,6 +152,7 @@ check('three worktrees sit beside the checkout on their own branches', [planA, p
 commit(planA.worktree, 'a.txt', 'task a\n', 'task a work')
 commit(planB.worktree, 'shared.txt', 'task b\n', 'task b work')
 commit(planC.worktree, 'c.txt', 'task c\n', 'task c work')
+for (const id of [A, B, C]) finish(id)
 
 const first = await integrate(A)
 const headAfterA = must(repo, 'rev-parse', 'HEAD')
@@ -135,19 +177,80 @@ const merged = await integrate(C, 'merge')
 check('strategy merge makes a merge commit with both parents', merged.ok === true && must(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length === 3 && merged.mergedSha !== headBeforeC)
 check('the merged checkout holds both sides', must(repo, 'show', 'HEAD:a.txt') === 'task a' && must(repo, 'show', 'HEAD:c.txt') === 'task c')
 
-// A pre-merge-commit hook refuses the merge commit. git leaves the merge pending, so integrate must abort it.
+// The checkout has a pre-merge-commit hook that refuses the merge while the flag file exists, and a post-merge hook
+// that writes a marker. git leaves the merge pending when pre-merge-commit refuses the merge commit, so integrate must abort it.
+const flag = `${home}/refuse-merges`
+const marker = `${home}/post-merge-ran`
+installHook('pre-merge-commit', `if [ -e "${flag}" ]; then echo "lint: the merge is refused" >&2; exit 1; fi`)
+installHook('post-merge', `echo "squash=$1" > "${marker}"`)
+writeFileSync(flag, '')
+
 const E = 'task-e'
 const planE = await startTask(E)
 commit(planE.worktree, 'e.txt', 'task e\n', 'task e work')
+finish(E)
 commit(repo, 'main.txt', 'main moves on\n', 'main moves on')
-const headBeforeE = must(repo, 'rev-parse', 'HEAD')
-const hook = `${repo}/.git/hooks/pre-merge-commit`
-writeFileSync(hook, '#!/bin/sh\nexit 1\n')
-chmodSync(hook, 0o755)
-const refused = await integrate(E, 'merge')
-check('a merge refused by pre-merge-commit is git_failed, with no MERGE_HEAD, a clean tree and HEAD unmoved', refused.error?.code === 'git_failed' && !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '' && must(repo, 'rev-parse', 'HEAD') === headBeforeE)
-rmSync(hook)
-check('the same task merges once the hook is gone, so the hook was the only cause', (await integrate(E, 'merge')).ok === true)
+const byDefault = await integrate(E, 'merge')
+check('by default integrate runs no hook of the checkout: the refusing pre-merge-commit hook does not stop the merge', byDefault.ok === true)
+check('by default the post-merge hook of the checkout does not run either', !existsSync(marker))
+
+const F = 'task-f'
+const planF = await startTask(F)
+commit(planF.worktree, 'f.txt', 'task f\n', 'task f work')
+finish(F)
+commit(repo, 'main2.txt', 'main moves on again\n', 'main moves on again')
+const headBeforeF = must(repo, 'rev-parse', 'HEAD')
+const refused = await integrate(F, 'merge', 'run')
+check('with the opt-in, a merge refused by pre-merge-commit is hook_failed and carries the output of the checkout hook', refused.ok === false && refused.error?.code === 'hook_failed' && refused.error.message.includes('lint: the merge is refused') && refused.error.message.includes("the checkout's hook"))
+check('the refused merge leaves no MERGE_HEAD, a clean tree and HEAD unmoved', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '' && must(repo, 'rev-parse', 'HEAD') === headBeforeF)
+check('a merge that a hook refused ran no post-merge hook', !existsSync(marker))
+rmSync(flag)
+check('the same task merges once the hook lets go, so the hook was the only cause', (await integrate(F, 'merge', 'run')).ok === true)
+check('with the opt-in, the post-merge hook of the checkout wrote its marker after the merge', existsSync(marker) && readFileSync(marker, 'utf8') === 'squash=0\n')
+
+// A post-merge hook runs after either strategy and cannot fail the merge.
+const G = 'task-g'
+const planG = await startTask(G)
+commit(planG.worktree, 'g.txt', 'task g\n', 'task g work')
+finish(G)
+rmSync(marker, { force: true })
+const viaHook = await integrate(G, undefined, 'run')
+check('with the opt-in, ff-only merges and the post-merge hook runs', viaHook.ok === true && viaHook.mergedSha === must(repo, 'rev-parse', 'HEAD') && existsSync(marker))
+
+// A reference-transaction hook that refuses the ref update leaves no merge pending, and git's fatal line names the hook.
+const R = 'task-r'
+const guard = `${home}/ref-guard-on`
+installHook('reference-transaction', `if [ "$1" = prepared ] && [ -e "${guard}" ]; then echo "ref guard: no updates" >&2; exit 1; fi`)
+const planR = await startTask(R)
+commit(planR.worktree, 'r.txt', 'task r\n', 'task r work')
+finish(R)
+const headBeforeR = must(repo, 'rev-parse', 'HEAD')
+writeFileSync(guard, '')
+const guarded = await integrate(R, undefined, 'run')
+check('with the opt-in, a fast-forward refused by a reference-transaction hook is hook_failed with the hook output', guarded.ok === false && guarded.error?.code === 'hook_failed' && guarded.error.message.includes('ref guard: no updates'))
+check('the refused fast-forward leaves a clean tree and HEAD unmoved', must(repo, 'status', '--porcelain') === '' && must(repo, 'rev-parse', 'HEAD') === headBeforeR)
+check('by default the same refusing hook is not run, and the task fast-forwards', (await integrate(R)).ok === true)
+rmSync(guard)
+
+const L = 'task-l'
+const L2 = 'task-l2'
+const planL = await startTask(L)
+commit(planL.worktree, 'l.txt', 'task l\n', 'task l work')
+const ownGroup = startLive(L)
+const headBeforeL = must(repo, 'rev-parse', 'HEAD')
+const callsBeforeL = gitCalls.length
+const running = await integrate(L)
+check('a live job on the branch is task_running, and the answer names it', running.ok === false && running.error?.code === 'task_running' && running.error.message.includes(L))
+check('task_running touches nothing: no git call, HEAD unmoved, a clean tree, no merge pending', gitCalls.length === callsBeforeL && must(repo, 'rev-parse', 'HEAD') === headBeforeL && must(repo, 'status', '--porcelain') === '' && !existsSync(`${repo}/.git/MERGE_HEAD`))
+check('with the opt-in, a live job on the branch is task_running as well', (await integrate(L, undefined, 'run')).error?.code === 'task_running')
+await stopLive(ownGroup)
+finish(L)
+writeMeta(L2, { repo, baseSha: planL.baseSha, branch: planL.branch, worktree: planL.worktree, cwd: planL.worktree })
+const nextGroup = startLive(L2)
+const taken = await integrate(L)
+check('a live job that took over the branch is task_running with its own id', taken.ok === false && taken.error?.code === 'task_running' && taken.error.message.includes(L2))
+await stopLive(nextGroup)
+check('the task integrates once no job is live on its branch', (await integrate(L)).ok === true)
 
 check('an unknown task is task_not_found', (await integrate('task-nope')).error?.code === 'task_not_found')
 const plain = `${home}/plain`
