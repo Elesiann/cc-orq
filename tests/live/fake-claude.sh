@@ -7,7 +7,9 @@
 # Environment:
 #   FAKE_CLAUDE_CASE  ok (default), error-result (list answers an error), bad-shape (list answers JSON
 #                     without "jobs"), not-json (list answers plain text), connector (the connectors load
-#                     whatever --settings says), auto-mode (init reports the auto mode)
+#                     whatever --settings says), auto-mode (init reports the auto mode), foreign-server (init
+#                     lists an MCP server of the user's own), no-source (the servers carry no source),
+#                     memory-loaded (the debug log has the line Claude Code writes when it loads a memory file)
 #   FAKE_LOG_DIR      when set, each call appends its working directory to cwd.txt and keeps its arguments
 set -uo pipefail
 
@@ -40,6 +42,10 @@ reported=default
 if jq -e '.disableAllHooks == true' <<< "$settings" > /dev/null 2>&1; then mods=0; fi
 if jq -e '.disableClaudeAiConnectors == true' <<< "$settings" > /dev/null 2>&1; then connectors=0; fi
 [ "$case_" = connector ] && connectors=1
+foreign=0
+[ "$case_" = foreign-server ] && foreign=1
+sourced=1
+[ "$case_" = no-source ] && sourced=0
 case $mode in '' | manual | default) ;; *) reported=$mode ;; esac
 [ "$case_" = auto-mode ] && reported=auto
 
@@ -47,19 +53,28 @@ if [ -n "$debug" ]; then
   {
     echo 'MCP server "plugin:cc-orq:orq": Successfully connected (transport: stdio) in 12 ms'
     if [ "$mods" -eq 1 ]; then echo 'hooks module cc-orq@inline loaded'; fi
+    if [ "$case_" = memory-loaded ]; then
+      echo '2026-10-25T00:00:00.000Z [DEBUG] hooks module cc-plugin-sec-default@builtin classic.InstructionsLoaded settled in 12.1ms (native link, next() included)'
+    fi
   } > "$debug"
 fi
 
 prompt=$(cat)
 
-jq -c -n --argjson mods "$mods" --argjson connectors "$connectors" --arg mode "$reported" --arg cwd "$(pwd -P)" '
+jq -c -n --argjson mods "$mods" --argjson connectors "$connectors" --argjson foreign "$foreign" \
+  --argjson sourced "$sourced" --arg mode "$reported" --arg cwd "$(pwd -P)" '
   (["capabilities", "list", "status", "cancel", "integrate"] | map("mcp__plugin_cc-orq_orq__" + .)) as $plugin
+  | ([{name: "plugin:cc-orq:orq", status: "connected", source: "plugin"}]
+       + (if $mods == 1 then [{name: "cc-orq", status: "connected", source: "plugin"}] else [] end)
+       + (if $connectors == 1 then [{name: "claude.ai Gmail", status: "connected", source: "claudeai"},
+                                    {name: "claude.ai Supabase", status: "needs-auth", source: "claudeai"}] else [] end)
+       + (if $foreign == 1 then [{name: "local-notes", status: "connected", source: "user"}] else [] end)
+       | if $sourced == 1 then . else map(del(.source)) end) as $servers
   | {type: "system", subtype: "init", cwd: $cwd, session_id: "fake",
      tools: (["Bash", "Read"] + $plugin
        + (if $mods == 1 then ["mcp__cc-orq__wait"] else [] end)
        + (if $connectors == 1 then ["mcp__claude_ai_Gmail__send", "mcp__claude_ai_Supabase__run_sql"] else [] end)),
-     mcp_servers: ([{name: "plugin:cc-orq:orq", status: "connected"}]
-       + (if $connectors == 1 then [{name: "claude.ai Gmail", status: "connected"}, {name: "claude.ai Supabase", status: "needs-auth"}] else [] end)),
+     mcp_servers: $servers,
      agents: (["general-purpose"] + (if $mods == 1 then ["cc-orq:task"] else [] end)),
      permissionMode: $mode, claude_code_version: "fake"}'
 

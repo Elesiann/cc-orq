@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks of the live harness itself. They need no login, network or model: the harness runs against a fake
 # claude and either a fake tmux or a tmux server on a private socket, in a sandbox of its own for each check, so
-# they never touch a session, process or directory of the user. Names start with the review finding they cover.
+# they never touch a session, process or directory of the user. Names start with the review finding they cover;
+# a d in front marks a finding of the delta review, whose numbers repeat the first review's.
 #
 # Usage: bash tests/live/check.sh [CHECK...]
 #   LIVE_UNDER_TEST  the directory with lib.sh, run.sh, headless.sh and scenarios/ to check (default: this one)
@@ -31,6 +32,12 @@ ALL=(
   i3_executable
   i5_stable_scratch
   s1_private_scratch_root s2_private_tmux_socket s3_no_server_kill
+  dw1_slow_footer dw1_trust_dialog
+  dw2_dotdot_root dw2_scenario_name dw2_work_inside_root
+  di1_tmux_wrapper
+  di2_headless_memory
+  di3_foreign_server
+  di4_existing_root
 )
 
 fail() {
@@ -52,6 +59,7 @@ pids_under() {
 sandbox() {
   TMP=$1
   mkdir -p "$TMP"/{home,tmp,bin,plugin/.claude-plugin,ev,scratch,fake,log}
+  chmod 700 "$TMP/scratch"
   printf '{"name":"cc-orq"}\n' > "$TMP/plugin/.claude-plugin/plugin.json"
   ln -s "$HERE/fake-claude.sh" "$TMP/bin/claude"
   ln -s "$HERE/fake-tmux.sh" "$TMP/bin/tmux"
@@ -506,6 +514,119 @@ check_s3_no_server_kill() {
   files=("$UNDER"/*.sh "$UNDER"/scenarios/*.sh "$HERE"/check.sh "$HERE"/fake-*.sh)
   hits=$(grep -n 'kill-serve[r]' "${files[@]}" | grep -v -E '^[^:]+:[0-9]+:[[:space:]]*#' || true)
   [ -z "$hits" ] || fail "a tmux server kill: $hits"
+}
+
+check_dw1_slow_footer() {
+  live_copy
+  export FAKE_TMUX_CASE=slow-footer FAKE_TMUX_FOOTER_DELAY=12
+  out=$(run_scenario smoke) || fail "a trusted folder whose TUI shows its status line after ${FAKE_TMUX_FOOTER_DELAY}s fails smoke: $out"
+  grep -qF '● DONE' "$ORQ_EVIDENCE_DIR/smoke/pane.txt" || fail "the interactive round left no answer in pane.txt"
+}
+
+check_dw1_trust_dialog() {
+  live_copy
+  out=$(FAKE_TMUX_CASE=trust-dialog run_scenario smoke) || fail "smoke does not pass a TUI that asks to trust the folder: $out"
+  grep -q 'send-keys .* Down' "$FAKE_LOG_DIR/tmux-calls.txt" || fail "the harness never moved the selection to Yes"
+  grep -qF '● DONE' "$ORQ_EVIDENCE_DIR/smoke/pane.txt" || fail "the interactive round left no answer in pane.txt"
+}
+
+check_dw2_dotdot_root() {
+  live_copy
+  mkdir -p "$TMP/scratch/sub"
+  for root in "$TMP/scratch/sub/.." "$TMP/scratch/odd..name"; do
+    ORQ_LIVE_SCRATCH_DIR=$root expect_fail noop "contains '\.\.'" "the scratch directory $root was used"
+  done
+  left=$(find "$TMP/scratch" -mindepth 1 -maxdepth 1 ! -name sub)
+  [ -z "$left" ] || fail "a refused scratch directory still got files: $left"
+}
+
+check_dw2_scenario_name() {
+  local name
+  for name in '../escape' 'a/b' 'a b' '.hidden' 'x..y' ''; do
+    out=$( (
+      source "$UNDER/lib.sh"
+      live_acquire "$name"
+    ) 2>&1) && fail "live_acquire took the scenario name '$name'"
+  done
+  left=$(find "$TMP/scratch" -mindepth 1)
+  [ -z "$left" ] || fail "a refused scenario name left files in the scratch directory: $left"
+  left=$(find "$TMP" -maxdepth 1 \( -name 'escape-*' -o -name '-*' \))
+  [ -z "$left" ] || fail "a scenario name made the harness create files outside the scratch directory: $left"
+  out=$( (
+    source "$UNDER/lib.sh"
+    live_acquire 'my_scenario-2.x'
+  ) 2>&1) || fail "live_acquire refused a plain scenario name: $out"
+}
+
+check_dw2_work_inside_root() {
+  out=$( (
+    source "$UNDER/lib.sh"
+    # shellcheck disable=SC2317 # live_acquire calls it
+    live_scratch_path() { printf '%s\n' "$TMP/outside-1"; }
+    live_acquire anything
+  ) 2>&1) && fail "live_acquire took a work directory outside the scratch directory"
+  left=$(find "$TMP" -maxdepth 1 -name 'outside-*')
+  [ -z "$left" ] || fail "live_acquire created files outside the scratch directory: $left"
+}
+
+check_di1_tmux_wrapper() {
+  local call
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/call.$$"\n' "$TMP" > "$TMP/recorder.sh"
+  chmod +x "$TMP/recorder.sh"
+  (
+    REAL_TMUX=$TMP/recorder.sh
+    use_real_tmux
+    tmux new-session -d -s orq-chk-di1 'sleep 9 -S y'
+    tmux has-session -t 'a -S b'
+    tmux -f /dev/null list-sessions
+  )
+  [ "$(find "$TMP" -maxdepth 1 -name 'call.*' | wc -l)" -eq 3 ] || fail "the wrapper did not pass its three calls on"
+  for call in "$TMP"/call.*; do
+    if [ "$(sed -n 1p "$call")" != -S ] || [ "$(sed -n 2p "$call")" != "$TMP/tmux.sock" ]; then
+      fail "a call reached tmux without the sandbox socket first: $(tr '\n' ' ' < "$call")"
+    fi
+  done
+
+  use_real_tmux
+  mkdir "$TMP/own"
+  tmux -f /dev/null -S "$TMP/own/tmux.sock" new-session -d -s orq-chk-di1 -c "$TMP" 'sleep 300' ||
+    fail "a call that names its own socket failed"
+  "$REAL_TMUX" -f /dev/null -S "$TMP/own/tmux.sock" has-session -t =orq-chk-di1 2> /dev/null ||
+    fail "a call that names its own socket did not reach it"
+  ! "$REAL_TMUX" -f /dev/null -S "$TMP/tmux.sock" has-session -t =orq-chk-di1 2> /dev/null ||
+    fail "a call that names its own socket also reached the sandbox socket"
+}
+
+check_di2_headless_memory() {
+  live_copy
+  for scenario in smoke smoke-mods; do
+    FAKE_CLAUDE_CASE=memory-loaded expect_fail "$scenario" 'InstructionsLoaded' "a headless session that loaded a memory file passed $scenario"
+  done
+}
+
+check_di3_foreign_server() {
+  live_copy
+  for scenario in smoke smoke-mods; do
+    FAKE_CLAUDE_CASE=foreign-server expect_fail "$scenario" 'does not come from the plugin' "a session with an MCP server of the user passed $scenario"
+    FAKE_CLAUDE_CASE=no-source expect_fail "$scenario" 'does not come from the plugin' "a session whose servers name no source passed $scenario"
+  done
+}
+
+check_di4_existing_root() {
+  local root=$ORQ_LIVE_SCRATCH_DIR mode
+  live_copy
+  for mode in 755 750 705 777; do
+    chmod "$mode" "$root"
+    expect_fail noop 'group or others' "a scratch directory with mode $mode was used"
+    [ "$(stat -c %a "$root")" = "$mode" ] ||
+      fail "the harness changed the mode of a scratch directory it did not create: $mode to $(stat -c %a "$root")"
+  done
+  chmod 700 "$root"
+  out=$(run_scenario noop) || fail "an existing scratch directory with mode 700 was refused: $out"
+  [ "$(stat -c %a "$root")" = 700 ] || fail "the mode of an existing private scratch directory changed to $(stat -c %a "$root")"
+  rm -rf "$TMP/fresh"
+  out=$( (umask 000 && ORQ_LIVE_SCRATCH_DIR=$TMP/fresh/root run_scenario noop)) || fail "run.sh failed under a new scratch directory and umask 000: $out"
+  [ "$(stat -c %a "$TMP/fresh/root")" = 700 ] || fail "a new scratch directory got mode $(stat -c %a "$TMP/fresh/root") under umask 000"
 }
 
 selected=("$@")

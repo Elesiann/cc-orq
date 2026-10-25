@@ -9,7 +9,10 @@
 #   FAKE_TMUX_DIR   where the sessions live (required)
 #   FAKE_TMUX_CASE  ok (default), silent (the pane stays empty), memory-loaded (the session's debug log does not
 #                   say that no memory file loaded), auto-footer (the status line says auto mode whatever the
-#                   command line asked for)
+#                   command line asked for), slow-footer (the pane shows no status line until
+#                   FAKE_TMUX_FOOTER_DELAY seconds after the session started), trust-dialog (the pane asks to
+#                   trust the folder, with "No, exit" selected, until Down and Enter chose "Yes")
+#   FAKE_TMUX_FOOTER_DELAY  seconds before the slow-footer case shows the status line (default: 12)
 #   FAKE_LOG_DIR    when set, each call appends its arguments to tmux-calls.txt, and new-session appends the
 #                   directory it was given to tmux-cwd.txt
 set -uo pipefail
@@ -69,10 +72,40 @@ footer() {
   esac
 }
 
+dialog_pending() {
+  [ "${FAKE_TMUX_CASE:-ok}" = trust-dialog ] && [ ! -e "$dir/$1.trusted" ]
+}
+
+footer_pending() {
+  local started
+  [ "${FAKE_TMUX_CASE:-ok}" = slow-footer ] || return 1
+  started=$(cat "$dir/$1.started" 2> /dev/null || echo 0)
+  [ "$(($(date +%s) - started))" -lt "${FAKE_TMUX_FOOTER_DELAY:-12}" ]
+}
+
+# The dialog as Claude Code draws it: the selection starts on "No, exit", and the screen has no status line.
+dialog() {
+  local n=$1 no='❯ No, exit' yes='  Yes, I trust this folder'
+  if [ "$(cat "$dir/$n.sel" 2> /dev/null)" = yes ]; then
+    no='  No, exit'
+    yes='❯ Yes, I trust this folder'
+  fi
+  printf '\n────\n Accessing workspace:\n\n %s\n\n Quick safety check: Is this a project you created or one you trust?\n\n Security guide\n\n %s\n %s\n\n Enter to confirm · Esc to cancel\n' \
+    "$(cat "$dir/$n.cwd" 2> /dev/null)" "$no" "$yes"
+}
+
 # One write, as tmux does: a reader that stops at the first match must not break the writer's pipe.
 pane() {
   local n=$1 text
+  if dialog_pending "$n"; then
+    dialog "$n"
+    return
+  fi
   text=$(printf ' ▐▛███▛█   Claude Code vfake\n ▝▝   ▝▝   %s\n\n' "$(cat "$dir/$n.cwd" 2> /dev/null)")
+  if footer_pending "$n"; then
+    printf '%s\n' "$text"
+    return
+  fi
   if [ -e "$dir/$n.submitted" ]; then
     text+=$(printf '\n❯ %s\n\n  Called plugin:cc-orq:orq (ctrl+o to expand)\n\n● DONE\n' "$(cat "$dir/$n.typed")")
   fi
@@ -89,6 +122,7 @@ case $command in
     fi
     printf '%s\n' "${words[*]:-}" > "$dir/$name.session"
     printf '%s\n' "$cwd" > "$dir/$name.cwd"
+    date +%s > "$dir/$name.started"
     if [ -n "${FAKE_LOG_DIR:-}" ]; then printf '%s\n' "$cwd" >> "$FAKE_LOG_DIR/tmux-cwd.txt"; fi
     debug=$(grep -o -- '--debug-file [^ ]*' "$dir/$name.session" | head -1 | cut -d' ' -f2)
     if [ -n "$debug" ]; then
@@ -115,6 +149,18 @@ case $command in
     n=$(resolve "$target") || exit 1
     if [ "$literal" -eq 1 ]; then
       printf '%s' "${words[*]}" > "$dir/$n.typed"
+    elif dialog_pending "$n"; then
+      case ${words[0]:-} in
+        Down) echo yes > "$dir/$n.sel" ;;
+        Up) echo no > "$dir/$n.sel" ;;
+        Enter)
+          if [ "$(cat "$dir/$n.sel" 2> /dev/null)" = yes ]; then
+            touch "$dir/$n.trusted"
+          else
+            rm -f "$dir/$n".*
+          fi
+          ;;
+      esac
     elif [ "${words[0]:-}" = Enter ]; then
       if [ "$(cat "$dir/$n.typed" 2> /dev/null)" = /exit ]; then
         rm -f "$dir/$n".*
