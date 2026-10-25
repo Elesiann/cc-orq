@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p .",
+    "typecheck": "tsc -p . && tsc -p server",
     "test": "node --test tests/pure/*.test.mjs",
     "test:plugin": "claude plugin test .",
     "test:shell": "bash tests/runners-shell.sh",

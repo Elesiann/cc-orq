@@ -1,9 +1,6 @@
 {
   "extends": "./.claude-plugin/types/tsconfig.json",
   "compilerOptions": {
-    "allowImportingTsExtensions": true,
-    "typeRoots": ["./.claude-plugin/types", "./node_modules/@types"],
-    "types": ["claude-code", "claude-code-tools", "claude-code-mcp", "node"]
-  },
-  "include": ["hooks", "types", "tests", "server"]
+    "allowImportingTsExtensions": true
+  }
 }
