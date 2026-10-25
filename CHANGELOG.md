@@ -49,8 +49,7 @@ All notable changes to cc-orq are recorded here. The format follows
   holds the request to the permission ceiling, and refuses what is above it with
   the escalation code and what lifts the limit. It takes a prompt of at most
   200,000 characters. Its job has kind `mcp`, the session id as its `agentId`
-  (or `mcp`), and `questions` in `meta.json`. `questions: human` is refused for
-  now, because this version cannot resume a worker with an answer from a form.
+  (or `mcp`), and `questions` in `meta.json`.
 - `delegate` returns an MCP task to a client that declares the tasks extension
   on the request, as the Claude Code CLI does. `/tasks` lists it with the
   worker's instance, model and last action, and the session wakes by itself with
@@ -121,6 +120,54 @@ All notable changes to cc-orq are recorded here. The format follows
   stderr. The README says what the opt-in risks: a worker that can write the
   checkout's shared git directory, or a hooks path in the work tree, decides what
   runs. Any other value, and the default, run no hook.
+- The tool `answer` answers the question of a worker that stopped on one. The same
+  worker resumes its own session in a new job, in the same directory, worktree
+  and branch, with the answer as its next message, so it keeps what it had read
+  and done instead of starting again from the brief. A client with MCP tasks gets a
+  task of its own for the continuation, and any other client gets `{"taskId",
+  "status": "running"}`. The first answer claims the question with the file `next`,
+  created whole and only when absent, so two answers at once start one worker and
+  the second gets `already_answered` with the id of the continuation. A job that
+  recorded no session, or whose instance, `CODEX_HOME` or directory changed,
+  answers `resume_unavailable`, and `delegate` with the brief and the answer is
+  the way left. The continuation never runs above its worker's level, and it is
+  checked as a launch is: its directory must be in scope, a worktree counts as the
+  task's own only when its branch is `orq/ID` of a job that does not run and whose
+  `next` claims lead to this job (or of this job itself), its checkout is in scope,
+  its path is the one a launch computes for that ID, `git worktree list` of the
+  recorded checkout lists it on that branch, its directory resolves, links followed,
+  to where a launch put it and inside the worktree, and no other live job holds the
+  branch (else the worker
+  runs, is scoped and is locked as a shared one, in a resolved directory that is
+  never the path `meta.json` names), and a level above
+  the ceiling opens the same form as `delegate`, or is refused for a client with no
+  form. An approval carries over only from the server's own task records of the
+  same chain, for the same worker at no higher level, never from `meta.json`. A
+  worker below `auto` cannot write its question outside its directory (measured
+  with a Claude worker at `manual` and `acceptEdits`, which could not), so only a
+  worker that could write it reaches `answer`.
+- `questions: human`, for a client that declares MCP tasks and form input. A worker
+  that stops on a question puts its task in `input_required`, with a free-text form
+  that shows the worker and its question, and the answer resumes the same worker
+  as a job of the same task, which then ends with the result of the job that
+  finished last, held to the ceiling again as `answer` is (the config now, and
+  the session mode the server last saw, since `tasks/update` carries none). Declining
+  the form, Esc, a worker that cannot be resumed, a continuation that cannot start,
+  a level above the ceiling, and 24 hours end the task with the BLOCKED text,
+  and `answer` can then answer it. `x` on an open form cancels the task, and while
+  a form is open `answer` gets `awaiting_form`. Any other client is refused.
+- The supervisor writes the worker's session id to the file `session` before it
+  writes `exit`, and a job with a `resume` file starts the CLI's own resume form
+  for that session: `codex exec resume`, `opencode run --session`, `claude -p
+  --resume` or `agy --conversation`. `codex exec resume` takes no `-s`, `-C` or
+  `--approve-for-me`, so the sandbox and the approval settings travel as `-c`
+  values; a resume that names no sandbox falls back to the user's `config.toml`
+  (measured on codex-cli 0.162.1). A resumed job says which argv it ran in
+  `child.log`, without the prompt. The OpenCode and Antigravity resumes follow
+  their `--help` and were not run.
+- `status` names the job that a continuation answers (`parent`) and the job that
+  took a question over (`next`). `list` fills `parent`, and its `question` is
+  true only while nobody has answered.
 - A conformance job for the task layer. `tests/conformance/` serves the seven
   fixtures of the MCP conformance suite (`greet`, `slow_compute`, `failing_job`,
   `protocol_error_job`, `confirm_delete`, `multi_input` and `test_tool_with_task`)

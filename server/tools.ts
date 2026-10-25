@@ -15,7 +15,7 @@ import {
   type Failure,
   type TaskStatus,
 } from '../hooks/contract.ts'
-import { LIST_LIMIT, jobView, listJobs, taskStatusOf, type CoreEngine, type QuestionMode } from '../hooks/engine.ts'
+import { LIST_LIMIT, jobView, listJobs, readNext, taskStatusOf, type CoreEngine, type QuestionMode } from '../hooks/engine.ts'
 import { integrate, integratePayload, parseIntegrateInput } from '../hooks/integrate.ts'
 import { parseTaskHeader, type TaskHeader } from '../hooks/task-header.ts'
 import { CANCEL_REASON_MAX, cancelAnswer, capabilitiesAnswer, statusAnswer, type CatalogCache } from '../hooks/tools.ts'
@@ -30,6 +30,7 @@ const ISOLATIONS = ['worktree', 'shared']
 const ROLES = ['implementation', 'research', 'review', 'design', 'test', 'general']
 export const QUESTION_MODES = ['parent', 'human'] as const satisfies readonly QuestionMode[]
 const PROMPT_MAX_CHARS = 200_000
+const ANSWER_MAX_CHARS = 20_000
 
 const SESSION_MODE_INPUT = { type: 'string', description: 'Filled by the cc-orq hook; leave it out.' }
 const SESSION_MODE_REFUSAL = 'sessionMode must be text; the cc-orq hook fills it, so leave it out'
@@ -63,7 +64,7 @@ const DELEGATE_INPUT = {
     questions: {
       type: 'string',
       enum: [...QUESTION_MODES],
-      description: 'Who answers a question the worker asks. parent (default): the job ends with BLOCKED in its result, for you to answer. human is not available yet.',
+      description: 'Who answers a question the worker asks. parent (default): the job ends with BLOCKED in its result, for you to answer with the answer tool. human: the user sees the question in a form and the same task goes on with their answer; only for a client with MCP tasks and forms, such as the Claude Code CLI.',
     },
     prompt: {
       type: 'string',
@@ -74,6 +75,22 @@ const DELEGATE_INPUT = {
     sessionMode: SESSION_MODE_INPUT,
   },
   required: ['target', 'model', 'cwd', 'prompt'],
+  additionalProperties: false,
+}
+const ANSWER_FIELDS = ['taskId', 'answer'] as const
+const ANSWER_INPUT = {
+  type: 'object',
+  properties: {
+    taskId: { type: 'string', description: 'The taskId in the BLOCKED text of the job that asked the question.' },
+    answer: {
+      type: 'string',
+      minLength: 1,
+      maxLength: ANSWER_MAX_CHARS,
+      description: 'The answer, at most 20,000 characters. The worker gets it as its next message, in the session it already has.',
+    },
+    sessionMode: SESSION_MODE_INPUT,
+  },
+  required: ['taskId', 'answer'],
   additionalProperties: false,
 }
 const TASK_ID_INPUT = {
@@ -118,8 +135,15 @@ const DELEGATE_DESCRIPTION =
   'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode, which counts as far as the cc-orq hook supplies it. ' +
   'runtime and interaction ask for less. A request above the ceiling opens a form that asks the user to allow it for this task only, when the client has tasks and forms; ' +
   'otherwise it is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
-  'questions parent, the default, ends a job that asks a question with BLOCKED in its result; questions human is not available yet. ' +
+  'questions parent, the default, ends a job that asks a question with BLOCKED in its result, which you answer with the answer tool; questions human shows the question to the user in a form, and the same task goes on with their answer, which only a client with MCP tasks and forms can do. ' +
   'Input: {"target", "model", "cwd", "prompt"}, and optionally effort, isolation, role, runtime, interaction and questions.'
+const ANSWER_DESCRIPTION =
+  'Answer the question that a worker stopped on, a job whose result starts with BLOCKED on a question. The same worker resumes its own session, ' +
+  'in the same worktree and on the same branch, with your answer as its next message, in a new job. A client with MCP tasks gets a new background task ' +
+  'that wakes the session with the result: end your turn, and do not poll. Any other client gets {"taskId", "status": "running"} at once. ' +
+  'The job is held to the ceiling again, at the level its worker ran at. A job that was answered already answers already_answered with the id of its continuation; ' +
+  'a job that cannot be resumed answers resume_unavailable, and then a new delegate with the brief and the answer is the way. ' +
+  'Input: {"taskId", "answer"}; sessionMode is filled by the cc-orq hook, so leave it out.'
 const STATUS_DESCRIPTION =
   "Read one orq task's state from its job directory: status (queued, running, waiting, completed, failed, cancelled or interrupted), " +
   'workState (working or result_available), and once it has ended its result or error; a task blocked on a question has the BLOCKED text as its result. ' +
@@ -128,7 +152,7 @@ const LIST_DESCRIPTION =
   'List orq jobs, newest first, whoever started them: a cc-orq:task agent, /orq launch, or an earlier session. ' +
   `Input: {"limit": <1 to ${LIST_LIMIT}, default ${LIST_DEFAULT}>}. The answer is {"jobs": [...]}, and each job has taskId, ` +
   'status (as in the status tool), kind, instanceId, model, startedAt (ISO text), durationMs (null for an interrupted job), cwd, ' +
-  'branch (null without a worktree), parent (null) and question (true when the job ended blocked on a question). ' +
+  'branch (null without a worktree), parent (the job whose question it answers, or null) and question (true while the job ended blocked on a question that nobody has answered). ' +
   'Pass a taskId to status for the result of a job.'
 const CANCEL_DESCRIPTION =
   `Cancel a running or waiting orq task. Input: {"taskId": "<id>", "reason": "<optional, up to ${CANCEL_REASON_MAX} characters>"}. ` +
@@ -190,7 +214,7 @@ export type JobRow = {
   durationMs: number | null
   cwd: string
   branch: string | null
-  parent: null
+  parent: string | null
   question: boolean
 }
 
@@ -218,8 +242,8 @@ async function listAnswer($: CoreEngine, config: OrqConfig, input: unknown): Pro
         durationMs: view.endedAt !== null ? whole(view.endedAt - job.startedAt) : running ? whole(now - job.startedAt) : null,
         cwd: job.cwd,
         branch: job.branch ?? null,
-        parent: null,
-        question: 'question' in view && view.question !== null,
+        parent: job.parent ?? null,
+        question: 'question' in view && view.question !== null && (await readNext($, job)) === null,
       }
     }),
   )
@@ -311,6 +335,26 @@ export function parseDelegateInput(input: unknown): DelegateCall | Failure {
   return { header, questions, sessionMode, request }
 }
 
+export type AnswerCall = { taskId: string; answer: string; sessionMode: string | undefined }
+
+export function parseAnswerInput(input: unknown): AnswerCall | Failure {
+  if (!isRecord(input)) return fail('invalid_request', 'answer needs {"taskId": "<id>", "answer": "<the answer>"}')
+  for (const key of Object.keys(input)) {
+    if (key !== 'sessionMode' && !ANSWER_FIELDS.some((field) => field === key)) {
+      return fail('invalid_request', `answer has no field "${key}"; its fields are ${ANSWER_FIELDS.join(', ')}`)
+    }
+  }
+  const { taskId, answer } = input
+  if (typeof taskId !== 'string' || taskId === '') return fail('invalid_request', 'taskId must be the id of the job that asked the question')
+  if (typeof answer !== 'string') return fail('invalid_request', 'answer must be text')
+  if (answer.trim() === '') return fail('invalid_request', 'answer must not be blank')
+  const length = characterCount(answer)
+  if (length > ANSWER_MAX_CHARS) return fail('invalid_request', `answer must be at most ${ANSWER_MAX_CHARS} characters, got ${length}`)
+  const sessionMode = sessionModeOf(input)
+  if (isFailure(sessionMode)) return sessionMode
+  return { taskId, answer, sessionMode }
+}
+
 export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCache, tasks: TaskSource): void {
   mcp.registerTool(
     'capabilities',
@@ -328,6 +372,11 @@ export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCac
     'delegate',
     { description: DELEGATE_DESCRIPTION, inputSchema: advertise(DELEGATE_INPUT) },
     guarded($, 'delegate', taskTool(tasks, 'delegate')),
+  )
+  mcp.registerTool(
+    'answer',
+    { description: ANSWER_DESCRIPTION, inputSchema: advertise(ANSWER_INPUT) },
+    guarded($, 'answer', taskTool(tasks, 'answer')),
   )
   mcp.registerTool(
     'status',

@@ -107,6 +107,20 @@ and refuses to run when its `ceiling.runtime` is already `auto` or `full-access`
 jobs to your jobs directory, as any session does, and does not call `capabilities`, which would probe every
 configured instance.
 
+`question-parent` and `question-human` need a logged-in `claude` CLI as the worker and cost a few cents. The worker
+runs at `full-access`, which is above the default ceiling, so the scenarios open the approval form and accept it, and
+they refuse to run when your `ceiling.runtime` is already `full-access`. A worker below `auto` cannot write its
+question outside its directory, so it could not ask. `ORQ_TASKS_CLAUDE_MODEL` (default `haiku`) names the model, and
+`ORQ_LIVE_TIMEOUT=480` gives them time. They check:
+
+- `question-parent`: the worker stops on a question, the task ends with the BLOCKED text, and the session calls `answer`
+  with the id in it. The continuation job names the first as its parent, has the same branch, and `child.log` shows the
+  resume argv with the session id the first job recorded. The worker's final message repeats the answer, and the answer
+  needed no second form, since the server's task record holds the approval.
+- `question-human`: with `questions: human` the question opens a form (`question-form.txt` is the screen as text), the
+  answer typed into it resumes the same worker as a job of the same task (`next` says `form`, and the continuation has
+  no task record), and the worker's final message repeats the answer.
+
 ## Isolation and cleanup
 
 The nested CLI always runs with:

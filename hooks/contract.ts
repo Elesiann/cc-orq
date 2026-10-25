@@ -107,6 +107,10 @@ export type TaskStatusResult = {
   result?: string
   /** Why a failed or interrupted task ended. */
   error?: string
+  /** The job whose question this one answers. */
+  parent?: string
+  /** The job that took over this job's question, once it was answered. */
+  next?: string
 }
 
 export type TaskCancelResult = { taskId: string; status: 'cancel_requested' }
@@ -153,6 +157,12 @@ export const FAILURE_CODES = [
   'hook_failed',
   // git failed in a way no other code names.
   'git_failed',
+  // The answer tool named a job that already has a continuation; the message names it.
+  'already_answered',
+  // A question of questions: human whose form is still open, so the form is the way to answer it.
+  'awaiting_form',
+  // The job cannot be resumed: it has no recorded session, its instance changed, or its worktree is gone. The message says what to do instead.
+  'resume_unavailable',
 ] as const
 
 export type FailureCode = (typeof FAILURE_CODES)[number]

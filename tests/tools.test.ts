@@ -241,11 +241,12 @@ test('status answers a job that exited 0 after a question as completed, with the
   seedJob(s, 'job-blk', 1000000)
   s.files.set(`${JOBS}/job-blk/question.txt`, 'Which branch?\n')
   s.files.set(`${JOBS}/job-blk/exit`, '0')
+  s.files.set(`${JOBS}/job-blk/session`, 'ses-blk\n')
   s.files.set(`${JOBS}/job-blk/last.txt`, 'BLOCKED: Which branch?')
   const $ = engineOf(s)
   const answer = await status($, { taskId: 'job-blk' })
   expect(answer).toMatchObject({ status: 'completed', workState: 'result_available' })
-  expect(answer.result).toBe('BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.')
+  expect(answer.result).toBe('BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it with the answer tool; the same worker resumes its session.')
 })
 
 test('status answers a failed job with the exit code and the redacted stderr tail', async () => {

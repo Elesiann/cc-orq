@@ -15,15 +15,21 @@ import {
   type TaskIsolation,
 } from '../hooks/contract.ts'
 import {
+  alreadyAnswered,
   composeAnswer,
+  continuationPlan,
   jobView,
+  launchContinuation,
   launchTaskFromHeader,
   launchTaskJob,
   newJobId,
   planTaskLaunch,
   readMeta,
+  readNext,
+  readSession,
   taskStatusOf,
   writeCancel,
+  type ContinuationPlan,
   type CoreEngine,
   type JobView,
   type TaskLaunchSpec,
@@ -42,17 +48,22 @@ import {
   type TaskResult,
   type TaskSource,
 } from './protocol.ts'
-import { QUESTION_MODES, parseDelegateInput } from './tools.ts'
+import { QUESTION_MODES, parseAnswerInput, parseDelegateInput } from './tools.ts'
 
 const TASKS_DIR = '.tasks'
 const APPROVE = 'approve'
 const RESULT_LIMIT_BYTES = 100 * 1024
 const EVENTS_TAIL_BYTES = 32768
-const JOB_FILES = ['meta.json', 'events.jsonl', 'question.txt', 'last.txt', 'cancel', 'exit']
+const JOB_FILES = ['meta.json', 'events.jsonl', 'question.txt', 'last.txt', 'cancel', 'exit', 'next', 'declined']
 
-const HUMAN_REFUSAL =
-  'questions: human is not available yet: this version cannot resume a worker with an answer from a form. ' +
+const HUMAN_NEEDS_FORMS =
+  'questions: human needs a client that declares MCP tasks and form input, such as the Claude Code CLI, and this one does not. ' +
   'Leave questions out, and a question the worker asks comes back to you in its result.'
+
+/** A form left open for this long ends the task with the BLOCKED text. */
+const FORM_WINDOW_MS = 24 * 60 * 60 * 1000
+const QUESTION_KEY = 'q-'
+const ANSWER_MAX_CHARS = 20_000
 
 type Modes = { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
 
@@ -68,15 +79,18 @@ type Approval = {
 }
 
 const ISOLATIONS: readonly TaskIsolation[] = ['worktree', 'shared']
+const TASK_TOOLS = ['delegate', 'answer'] as const
 
 /** `task.json` is written once, before the task is answered, and never changed. */
 type TaskRecord = {
   taskId: string
   createdAt: string
-  tool: 'delegate'
+  tool: 'delegate' | 'answer'
   questions: (typeof QUESTION_MODES)[number]
   request: Record<string, string>
   toolUseId?: string
+  /** The permission mode of the session that started the task, as the hook gave it. */
+  sessionMode?: string
   approval?: Approval
 }
 
@@ -100,8 +114,9 @@ function parseApproval(raw: unknown): Approval | null {
 }
 
 function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
-  if (!isRecord(raw) || raw.taskId !== taskId || raw.tool !== 'delegate') return null
-  const { createdAt, questions, request, toolUseId, approval } = raw
+  const tool = isRecord(raw) ? TASK_TOOLS.find((candidate) => candidate === raw.tool) : undefined
+  if (!isRecord(raw) || raw.taskId !== taskId || tool === undefined) return null
+  const { createdAt, questions, request, toolUseId, sessionMode, approval } = raw
   const mode = QUESTION_MODES.find((candidate) => candidate === questions)
   if (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt)) || mode === undefined || !isRecord(request)) return null
   const text: Record<string, string> = {}
@@ -114,10 +129,11 @@ function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
   return {
     taskId,
     createdAt,
-    tool: 'delegate',
+    tool,
     questions: mode,
     request: text,
     ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+    ...(typeof sessionMode === 'string' ? { sessionMode } : {}),
     ...(parsedApproval !== undefined ? { approval: parsedApproval } : {}),
   }
 }
@@ -296,6 +312,81 @@ async function finishedTask($: CoreEngine, config: OrqConfig, job: JobRecord, vi
   }
 }
 
+/** The job that a human task stands at: the first job, or the last one that an answer from the form started. */
+async function walkForms($: CoreEngine, config: OrqConfig, first: JobRecord): Promise<{ job: JobRecord; view: JobView | Starting } | { resuming: true }> {
+  let job = first
+  for (let hops = 0; hops < 64; hops += 1) {
+    const view = await viewOf($, job)
+    if (view.status !== 'done' || view.question === null) return { job, view }
+    const next = await readNext($, job)
+    if (next === null || next.via !== 'form') return { job, view }
+    const following = await readMeta($, config.jobsDir, next.jobId)
+    if (following === null) return { resuming: true }
+    job = following
+  }
+  return { job, view: await viewOf($, job) }
+}
+
+/** The worker's question stays a form until it is declined, the task is cancelled, 24 hours pass, or it has no session to resume. */
+async function formIsOpen($: CoreEngine, job: JobRecord, view: Extract<JobView, { question: string | null }>): Promise<boolean> {
+  if ((await readSession($, job)) === null || (await $.fs.exists(`${job.dir}/declined`))) return false
+  return (await $.clock.now()) - (view.endedAt ?? 0) < FORM_WINDOW_MS
+}
+
+/** The worker chose the question, so its whitespace is folded and its control characters are written out. */
+function plain(text: string): string {
+  const folded = text.replace(/\s+/g, ' ').trim()
+  return folded.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u{${char.codePointAt(0)?.toString(16)}}`)
+}
+
+/** At most `lines` lines of `width` characters, broken at spaces; what does not fit is cut with an ellipsis. */
+function wrapped(text: string, width: number, lines: number): string[] {
+  const out: string[] = []
+  let rest = text
+  while (rest !== '' && out.length < lines) {
+    if ([...rest].length <= width) {
+      out.push(rest)
+      rest = ''
+      break
+    }
+    const room = [...rest].slice(0, width).join('')
+    const cut = room.lastIndexOf(' ')
+    const line = cut > width / 2 ? room.slice(0, cut) : room
+    out.push(line)
+    rest = rest.slice(line.length).trimStart()
+  }
+  const last = out.length - 1
+  return rest === '' || last < 0 ? out : [...out.slice(0, last), `${[...(out[last] ?? '')].slice(0, width - 1).join('')}…`]
+}
+
+/**
+ * Claude Code shows the first three lines of the message and cuts a longer line at the screen width, so the worker comes first
+ * and the question takes the two lines left, wrapped; what does not fit stays in the BLOCKED text. The field's description is
+ * shown under it.
+ */
+function questionRequest(job: JobRecord, question: string): InputRequest {
+  return {
+    method: 'elicitation/create',
+    params: {
+      mode: 'form',
+      message: [`${whoIs(job)} asks:`, ...wrapped(plain(question), 140, 2)].join('\n'),
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          answer: {
+            type: 'string',
+            title: 'Your answer',
+            description: 'It goes to the same worker, which resumes its session.',
+            minLength: 1,
+            maxLength: ANSWER_MAX_CHARS,
+          },
+        },
+        required: ['answer'],
+      },
+    },
+  }
+}
+
 async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise<DetailedTask> {
   const now = await $.clock.now()
   if (loaded.kind === 'corrupt') {
@@ -328,8 +419,22 @@ async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise
         statusMessage: 'waiting for your approval to go above the ceiling',
         inputRequests: { [APPROVE]: approvalRequest(stage.approval) },
       }
-    case 'job':
-      return finishedTask($, config, stage.job, await viewOf($, stage.job), base)
+    case 'job': {
+      if (record.questions !== 'human') return finishedTask($, config, stage.job, await viewOf($, stage.job), base)
+      const walked = await walkForms($, config, stage.job)
+      if ('resuming' in walked) return { ...base, status: 'working', statusMessage: 'resuming with your answer' }
+      const { job: tip, view } = walked
+      const here = { ...base, lastUpdatedAt: await newest($, [...touched, ...jobPaths(tip)], record.createdAt) }
+      if (view.status === 'done' && view.question !== null && (await formIsOpen($, tip, view))) {
+        return {
+          ...here,
+          status: 'input_required',
+          statusMessage: `${whoIs(tip)} · waiting for your answer`,
+          inputRequests: { [`${QUESTION_KEY}${tip.id}`]: questionRequest(tip, view.question) },
+        }
+      }
+      return finishedTask($, config, tip, view, here)
+    }
   }
 }
 
@@ -364,11 +469,42 @@ function isWhatWasShown(spec: TaskLaunchSpec, approval: Approval): boolean {
   )
 }
 
+/** The ceiling refusal, said for a worker that is resumed rather than launched: an answer has no level to ask for less. */
+function aboveCeilingNow(refusal: Failure, modes: Modes): Failure {
+  const level = refusal.error.code === 'interaction_mode_escalation_denied' ? `interaction mode ${modes.interactionMode}` : `runtime mode ${modes.runtimeMode}`
+  const message = refusal.error.message.replace(/otherwise ask for [^.]* at most\.$/, 'otherwise delegate the task anew within the ceiling.')
+  return fail(refusal.error.code, `the worker ran with ${level}, which is above the ceiling now, so it is not resumed. ${message}`)
+}
+
+/** The worker is the one the user was shown, and no more than the level they allowed. */
+function withinApproval(approval: Approval, plan: ContinuationPlan): boolean {
+  return (
+    approval.target === plan.instance.id &&
+    approval.model === plan.model &&
+    approval.cwd === plan.requestCwd &&
+    approval.isolation === plan.isolation &&
+    runtimeModeRank(plan.modes.runtimeMode) <= runtimeModeRank(approval.launch.runtimeMode) &&
+    interactionModeRank(plan.modes.interactionMode) <= interactionModeRank(approval.launch.interactionMode)
+  )
+}
+
+/** A launch that did not start, said as the typed code it carries when it names one. */
+async function continuationRefusal($: CoreEngine, text: string): Promise<TaskResult> {
+  const named = /^orq: mcp refused: ([a-z_]+): ([\s\S]*)$/.exec(text)
+  const code = FAILURE_CODES.find((candidate) => candidate === named?.[1])
+  if (code !== undefined && named?.[2] !== undefined) return answerOf(fail(code, named[2]), true)
+  const failure = `orq: answer failed: ${text}`
+  await $.ui.log(failure)
+  return { content: [{ type: 'text', text: failure }], isError: true }
+}
+
 const widest = <Mode extends string>(asked: Mode | undefined, effective: Mode, rank: (mode: Mode) => number): Mode =>
   asked !== undefined && rank(asked) > rank(effective) ? asked : effective
 
 export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): TaskSource {
   const answering = new Set<string>()
+  /** tasks/update carries no session mode, so a form answer is judged by the last mode a hooked call (delegate, answer) brought. */
+  let lastSessionMode: string | undefined
 
   async function agentId(): Promise<string> {
     return (await $.env.get('CLAUDE_CODE_SESSION_ID')) || 'mcp'
@@ -382,11 +518,120 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     await $.fs.write(`${config.jobsDir}/${TASKS_DIR}/${record.taskId}/task.json`, JSON.stringify(record))
   }
 
+  /**
+   * What the user approved in a form for the task this worker belongs to, read from the server's own task records and never
+   * from meta.json, which the worker can write. The record of the job names the approval, or, for the task of an answer,
+   * the job it answered, and the walk goes on from there. A record without the `approved` marker approves nothing.
+   */
+  async function approvalOfChain(config: OrqConfig, jobId: string): Promise<Approval | null> {
+    let id = jobId
+    for (let hops = 0; hops < 64; hops += 1) {
+      const dir = `${config.jobsDir}/${TASKS_DIR}/${id}`
+      if (!isSafeJobId(id) || !(await $.fs.exists(`${dir}/task.json`))) return null
+      let record: TaskRecord | null
+      try {
+        record = parseRecord(JSON.parse(await $.fs.read(`${dir}/task.json`)), id)
+      } catch {
+        return null
+      }
+      if (record === null) return null
+      if (record.approval !== undefined) return (await $.fs.exists(`${dir}/approved`)) ? record.approval : null
+      if (record.tool !== 'answer') return null
+      id = record.request.taskId ?? ''
+    }
+    return null
+  }
+
+  /** Whether the task of this job was cancelled while its form was open. The task is the job's own, or the one its form answers continued. */
+  async function taskCancelled(config: OrqConfig, job: JobRecord): Promise<boolean> {
+    let at: JobRecord | null = job
+    for (let hops = 0; at !== null && hops < 64; hops += 1) {
+      const dir = `${config.jobsDir}/${TASKS_DIR}/${at.id}`
+      if (await $.fs.exists(`${dir}/task.json`)) return $.fs.exists(`${dir}/cancelled`)
+      at = at.parent === undefined ? null : await readMeta($, config.jobsDir, at.parent)
+    }
+    return false
+  }
+
+  async function answerCreate(args: unknown, client: ClientInfo): Promise<Created> {
+    const config = await getConfig()
+    const call = parseAnswerInput(args)
+    if (isFailure(call)) return { result: answerOf(call, true) }
+    if (call.sessionMode !== undefined) lastSessionMode = call.sessionMode
+    const parent = await readMeta($, config.jobsDir, call.taskId)
+    if (parent === null) return { result: answerOf(fail('task_not_found', `no task ${call.taskId}`), true) }
+    const view = await jobView($, parent)
+    if (view.status !== 'done' || view.question === null) {
+      return { result: answerOf(fail('invalid_request', `task ${parent.id} has not stopped on a question (it is ${taskStatusOf(view)}), so there is nothing to answer`), true) }
+    }
+    const next = await readNext($, parent)
+    if (next !== null) return { result: answerOf(alreadyAnswered(parent.id, next), true) }
+    if (parent.questions === 'human' && (await formIsOpen($, parent, view)) && !(await taskCancelled(config, parent))) {
+      return { result: answerOf(fail('awaiting_form', `the question of ${parent.id} is open in a form that the user sees: the answer comes from the form, or from this tool once it is declined, cancelled or 24 hours old`), true) }
+    }
+    const planned = await continuationPlan($, config, parent, await sessionDir())
+    if ('failure' in planned) return { result: answerOf(planned.failure, true) }
+    const { plan } = planned
+    const now = await $.clock.now()
+    const { refusal } = resolveCeiling({ config: config.ceiling, session: sessionCeiling(call.sessionMode), isolation: plan.isolation, request: plan.modes })
+    if (refusal !== null) {
+      // As for a launch: above the ceiling, a client with forms asks the user, and any other is refused. An earlier approval counts
+      // only when the server recorded it for this chain and the worker is the one it was given for.
+      const earlier = await approvalOfChain(config, parent.id)
+      if (earlier === null || !withinApproval(earlier, plan)) {
+        const above = aboveCeilingNow(refusal, plan.modes)
+        if (!client.tasks || !client.forms) return { result: answerOf(above, true) }
+        const taskId = newJobId('mcp', now, await agentId())
+        const approval: Approval = {
+          target: plan.instance.id,
+          model: plan.model,
+          cwd: plan.requestCwd,
+          isolation: plan.isolation,
+          launch: plan.modes,
+          config: configCeiling(config.ceiling, plan.isolation),
+          session: sessionCeiling(call.sessionMode),
+          refusal: above,
+        }
+        await writeRecord(config, {
+          taskId,
+          createdAt: iso(now),
+          tool: 'answer',
+          questions: 'parent',
+          request: { taskId: parent.id, answer: call.answer },
+          approval,
+          ...(client.toolUseId !== undefined ? { toolUseId: client.toolUseId } : {}),
+        })
+        return { taskId }
+      }
+    }
+    const launched = await launchContinuation($, config, plan, { answer: call.answer, via: 'answer', questions: 'parent', agentId: await agentId() })
+    if ('failure' in launched) return { result: answerOf(launched.failure, true) }
+    if ('refusal' in launched) return { result: await continuationRefusal($, launched.refusal) }
+    const taskId = launched.job.id
+    const running = { result: answerOf({ taskId, status: 'running' }, false) }
+    if (!client.tasks) return running
+    try {
+      await writeRecord(config, {
+        taskId,
+        createdAt: iso(now),
+        tool: 'answer',
+        questions: 'parent',
+        request: { taskId: parent.id },
+        ...(client.toolUseId !== undefined ? { toolUseId: client.toolUseId } : {}),
+      })
+    } catch (err) {
+      await $.ui.log(`orq: answer started ${taskId} but could not write its task record: ${String(err)}`)
+      return running
+    }
+    return { taskId }
+  }
+
   async function create(args: unknown, client: ClientInfo): Promise<Created> {
     const config = await getConfig()
     const call = parseDelegateInput(args)
     if (isFailure(call)) return { result: answerOf(call, true) }
-    if (call.questions === 'human') return { result: answerOf(fail('invalid_request', HUMAN_REFUSAL), true) }
+    if (call.sessionMode !== undefined) lastSessionMode = call.sessionMode
+    if (call.questions === 'human' && !(client.tasks && client.forms)) return { result: answerOf(fail('invalid_request', HUMAN_NEEDS_FORMS), true) }
     const { header } = call
     const { effective, refusal } = resolveCeiling({
       config: config.ceiling,
@@ -402,6 +647,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
       questions: call.questions,
       request: call.request,
       ...(client.toolUseId !== undefined ? { toolUseId: client.toolUseId } : {}),
+      ...(call.sessionMode !== undefined ? { sessionMode: call.sessionMode } : {}),
     } as const
     if (refusal !== null) {
       if (!client.tasks || !client.forms) return { result: answerOf(refusal, true) }
@@ -447,10 +693,35 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     return { taskId }
   }
 
+  /** The form of a continuation was accepted: the worker resumes under the id the task has, if it is still what the form showed. */
+  async function launchApprovedAnswer(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, approval: Approval): Promise<void> {
+    const { record, dir } = loaded
+    const refuse = (failure: Failure): Promise<void> => $.fs.write(`${dir}/refused`, JSON.stringify(failure))
+    const parent = await readMeta($, config.jobsDir, record.request.taskId ?? '')
+    if (parent === null) return refuse(fail('task_not_found', `no task ${record.request.taskId ?? ''}`))
+    const planned = await continuationPlan($, config, parent, await sessionDir())
+    if ('failure' in planned) return refuse(planned.failure)
+    if (!withinApproval(approval, planned.plan)) return refuse(fail('invalid_request', CHANGED_SINCE_SHOWN))
+    const launched = await launchContinuation($, config, planned.plan, {
+      answer: record.request.answer ?? '',
+      via: 'answer',
+      questions: 'parent',
+      agentId: await agentId(),
+      reservedId: record.taskId,
+    })
+    if ('job' in launched) {
+      if (await $.fs.exists(`${dir}/cancelled`)) await writeCancel($, launched.job, 'cancelled while it started')
+      return
+    }
+    if ('failure' in launched) return refuse(launched.failure)
+    await $.fs.write(`${dir}/refused`, textOf(await continuationRefusal($, launched.refusal)))
+  }
+
   async function launchApproved(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, approval: Approval): Promise<void> {
     const { record, dir } = loaded
     const refuse = (text: string): Promise<void> => $.fs.write(`${dir}/refused`, text)
     await $.fs.write(`${dir}/approved`, `${iso(await $.clock.now())}\n`)
+    if (record.tool === 'answer') return launchApprovedAnswer(config, loaded, approval)
     const call = parseDelegateInput(record.request)
     if (isFailure(call)) return refuse(JSON.stringify(call))
     const effective = effectiveOf(approval)
@@ -476,6 +747,43 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     await refuse(textOf(await launchRefusal($, launched.refusal)))
   }
 
+  /**
+   * The user answered the question form of a human task, or turned it down. Only the key of the question that is open counts. An
+   * answer resumes the worker as a job of this same task, held to the ceiling again. Declining, Esc, a level above the ceiling, a
+   * worker that cannot be resumed and a continuation that cannot start end the form: the task gets the BLOCKED text. A blank answer
+   * leaves the form open.
+   */
+  async function answerQuestion(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, jobId: string, response: InputResponse): Promise<void> {
+    if (loaded.record.questions !== 'human') return
+    const stage = await stageOf($, config, loaded)
+    if (stage.kind !== 'job') return
+    const walked = await walkForms($, config, stage.job)
+    if ('resuming' in walked || walked.job.id !== jobId || walked.view.status !== 'done' || walked.view.question === null) return
+    const tip = walked.job
+    if (!(await formIsOpen($, tip, walked.view))) return
+    const close = async (why: string): Promise<void> => $.fs.write(`${tip.dir}/declined`, `${iso(await $.clock.now())} ${why}\n`)
+    if (response.action !== 'accept') return close('declined')
+    const text = response.content?.answer
+    if (typeof text !== 'string' || text.trim() === '' || [...text].length > ANSWER_MAX_CHARS) return
+    const planned = await continuationPlan($, config, tip, await sessionDir())
+    if ('failure' in planned) return close(planned.failure.error.message)
+    // As an answer is: held to the ceiling again, by the config now and the session mode last seen, unless the user approved this worker.
+    const { refusal } = resolveCeiling({
+      config: config.ceiling,
+      session: sessionCeiling(lastSessionMode ?? loaded.record.sessionMode),
+      isolation: planned.plan.isolation,
+      request: planned.plan.modes,
+    })
+    if (refusal !== null) {
+      const earlier = await approvalOfChain(config, loaded.record.taskId)
+      if (earlier === null || !withinApproval(earlier, planned.plan)) return close(aboveCeilingNow(refusal, planned.plan.modes).error.message)
+    }
+    const launched = await launchContinuation($, config, planned.plan, { answer: text, via: 'form', questions: 'human', agentId: await agentId() })
+    if ('job' in launched) return
+    if ('failure' in launched) return launched.failure.error.code === 'already_answered' ? undefined : close(launched.failure.error.message)
+    return close(launched.refusal)
+  }
+
   async function answerForm(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, answer: InputResponse): Promise<void> {
     const stage = await stageOf($, config, loaded)
     if (stage.kind !== 'form') return
@@ -485,6 +793,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
 
   return {
     async create(tool, args, client) {
+      if (tool === 'answer') return answerCreate(args, client)
       if (tool !== 'delegate') throw new Error(`orq: no task tool named ${tool}`)
       return create(args, client)
     },
@@ -497,11 +806,14 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     async update(taskId, responses) {
       const config = await getConfig()
       const loaded = await load($, config, taskId)
-      const answer = responses[APPROVE]
-      if (loaded.kind !== 'task' || answer === undefined || answering.has(taskId)) return
+      if (loaded.kind !== 'task' || answering.has(taskId)) return
       answering.add(taskId)
       try {
-        await answerForm(config, loaded, answer)
+        const approval = responses[APPROVE]
+        if (approval !== undefined) await answerForm(config, loaded, approval)
+        for (const [key, response] of Object.entries(responses)) {
+          if (key.startsWith(QUESTION_KEY)) await answerQuestion(config, loaded, key.slice(QUESTION_KEY.length), response)
+        }
       } finally {
         answering.delete(taskId)
       }
@@ -511,10 +823,19 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
       const config = await getConfig()
       const loaded = await load($, config, taskId)
       if (loaded.kind === 'corrupt') return
-      const job = loaded.kind === 'job' ? loaded.job : await readMeta($, config.jobsDir, taskId)
-      if (job !== null) {
-        const view = await viewOf($, job)
-        if (view.status === 'starting' || ['running', 'waiting'].includes(taskStatusOf(view))) await writeCancel($, job)
+      const first = loaded.kind === 'job' ? loaded.job : await readMeta($, config.jobsDir, taskId)
+      if (first !== null) {
+        const human = loaded.kind === 'task' && loaded.record.questions === 'human'
+        const walked = human ? await walkForms($, config, first) : { job: first, view: await viewOf($, first) }
+        if ('resuming' in walked) {
+          if (loaded.kind === 'task') await $.fs.write(`${loaded.dir}/cancelled`, `${iso(await $.clock.now())}\n`)
+          return
+        }
+        const { job: tip, view } = walked
+        if (view.status === 'starting' || ['running', 'waiting'].includes(taskStatusOf(view))) await writeCancel($, tip)
+        else if (human && view.status === 'done' && view.question !== null && (await formIsOpen($, tip, view))) {
+          await $.fs.write(`${loaded.dir}/cancelled`, `${iso(await $.clock.now())}\n`)
+        }
         return
       }
       if (loaded.kind !== 'task') return

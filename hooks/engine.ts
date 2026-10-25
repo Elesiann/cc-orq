@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
+import { EFFORT_OPTION, fail, isFailure, type Failure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
 import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
 import { LAUNCH_GRACE_MS, claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
@@ -27,7 +27,9 @@ import {
   GIT_TIMEOUT_MS,
   branchDeleteArgv,
   branchFor,
+  gitArgv,
   gitDetail,
+  NO_HOOKS,
   revParseHeadArgv,
   revParseToplevelArgv,
   WORKTREE_INCLUDE_DEADLINE_S,
@@ -78,6 +80,17 @@ export type LaunchSpec = {
   isolation?: 'worktree'
   /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
   worktreeScope?: string[]
+  /** Set for a job that resumes the worker of another: `cwd` is that job's, and no worktree is made or removed for it. */
+  continuation?: Continuation
+}
+
+/** What a job that answers a question takes over from the job that asked it. */
+export type Continuation = {
+  parent: string
+  /** The session id of the worker, which the supervisor resumes. */
+  session: string
+  /** The worktree of the task, which the job keeps working in; absent for a task that ran in the checkout itself. */
+  worktree?: Pick<WorktreePlan, 'repo' | 'baseSha' | 'branch' | 'worktree'>
 }
 
 export type TaskLaunchSpec = {
@@ -463,6 +476,7 @@ export function newJobId(kind: string, now: number, agentId: string): string {
 
 /** Create a job directory, write meta.json and prompt.txt, and start the supervisor detached. */
 export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
+  const resumed = spec.continuation
   const now = await $.clock.now()
   const supervise = `${$.plugin.root}/scripts/supervise.sh`
   const ownerOf = ownerStateProbe($, config.jobsDir)
@@ -490,7 +504,9 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       if (held) await releaseLock($, held, ownerOf)
       return { refusal }
     }
-    if (spec.isolation === 'worktree') {
+    if (resumed?.worktree !== undefined) {
+      // The worktree is the task's, and no other job runs in it, so there is nothing to create, lock or undo.
+    } else if (spec.isolation === 'worktree') {
       const prepared = await prepareWorktree($, spec.cwd, id, spec.worktreeScope)
       if ('failure' in prepared) {
         return abandon(`orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}`)
@@ -511,7 +527,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
     }
     const worktreeFields = plan
       ? { repo: plan.repo, baseSha: plan.baseSha, branch: plan.branch, worktree: plan.worktree }
-      : {}
+      : (resumed?.worktree ?? {})
     const startedAtIso = new Date(now).toISOString()
     const meta = {
       id,
@@ -529,6 +545,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
       ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
       ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
+      ...(resumed !== undefined ? { parent: resumed.parent } : {}),
       ...worktreeFields,
     }
     try {
@@ -537,6 +554,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       if (spec.flags !== undefined && spec.flags.length > 0) {
         await $.fs.write(`${dir}/flags`, spec.flags.map((flag) => `${flag}\n`).join(''))
       }
+      if (resumed !== undefined) await $.fs.write(`${dir}/resume`, `${resumed.session}\n`)
     } catch (err) {
       return abandon(`orq: ${spec.kind} could not write its job directory: ${String(err)}`)
     }
@@ -580,6 +598,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       driver: spec.driver,
       ...(spec.env.CODEX_HOME !== undefined ? { codexHome: spec.env.CODEX_HOME } : {}),
       ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+      ...(resumed !== undefined ? { parent: resumed.parent } : {}),
       ...worktreeFields,
     }
     if (pgid) job.pgid = pgid
@@ -797,16 +816,23 @@ export function notEndedText(id: string, status: 'running' | 'cancelling' | 'int
   return `orq: ${id} was interrupted: its supervisor is gone and it left no exit file`
 }
 
-/** The answer for a job that stopped on a question. The parent answers it in a new task, not in this one. */
-export function blockedText(id: string, question: string): string {
-  return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.`
+/**
+ * The answer for a job that stopped on a question. The parent answers it with the answer tool, which resumes the same worker
+ * in a new job, so this job's text stays as it is. A job that recorded no session cannot be resumed, and the old way, a new
+ * task with the brief and the answer, is the one left.
+ */
+export function blockedText(id: string, question: string, resumable: boolean): string {
+  const way = resumable
+    ? 'Answer it with the answer tool; the same worker resumes its session.'
+    : 'This worker cannot be resumed (it recorded no session), so answer it in a new delegate with the original brief plus the answer.'
+  return `BLOCKED on a question (taskId ${id}): ${question}\n\n${way}`
 }
 
 export async function composeAnswer($: CoreEngine, config: OrqConfig, job: JobRecord, knownView?: JobView): Promise<string> {
   const view = knownView ?? (await jobView($, job))
   if (!('exitCode' in view)) return notEndedText(job.id, view.status)
   if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
-  if (view.question !== null) return blockedText(job.id, view.question)
+  if (view.question !== null) return blockedText(job.id, view.question, (await readSession($, job)) !== null)
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return `orq: ${job.id} failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '')
@@ -889,6 +915,7 @@ export async function readJobStatus($: CoreEngine, config: OrqConfig, jobId: str
   if (!job) return null
   const view = await jobView($, job)
   const status = taskStatusOf(view)
+  const next = await readNext($, job)
   const answer: TaskStatusResult = {
     taskId: job.id,
     status,
@@ -898,12 +925,273 @@ export async function readJobStatus($: CoreEngine, config: OrqConfig, jobId: str
     ...(job.instanceId ? { instanceId: job.instanceId } : {}),
     ...(job.model ? { model: job.model } : {}),
     ...(view.endedAt !== null ? { finishedAtIso: new Date(view.endedAt).toISOString() } : {}),
+    ...(job.parent !== undefined ? { parent: job.parent } : {}),
+    ...(next !== null ? { next: next.jobId } : {}),
   }
-  if (view.status === 'done') return { ...answer, result: view.question !== null ? blockedText(job.id, view.question) : view.lastText }
+  if (view.status === 'done') {
+    return { ...answer, result: view.question !== null ? blockedText(job.id, view.question, (await readSession($, job)) !== null) : view.lastText }
+  }
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return { ...answer, error: `failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '') }
   }
   if (view.status === 'interrupted') return { ...answer, error: INTERRUPTED_ERROR }
   return answer
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Answering a question: the same worker resumes its session in a new job, on the same branch.
+
+export type NextVia = 'form' | 'answer'
+
+/** `next` in a job directory: the job that took over the question of this one, and how it was answered. */
+export type Next = { jobId: string; via: NextVia }
+
+const NEXT_FILE = 'next'
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** The continuation that claimed this job's question; null when none did, or when the file cannot be read as one. */
+export async function readNext($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<Next | null> {
+  const raw = await readText($, `${job.dir}/${NEXT_FILE}`)
+  if (raw === null) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!isRecord(parsed) || typeof parsed.jobId !== 'string' || !isSafeJobId(parsed.jobId)) return null
+    const via = parsed.via === 'form' || parsed.via === 'answer' ? parsed.via : null
+    return via === null ? null : { jobId: parsed.jobId, via }
+  } catch {
+    return null
+  }
+}
+
+/** The session id the supervisor recorded for the worker of this job; null when it recorded none. */
+export async function readSession($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<string | null> {
+  const text = ((await readText($, `${job.dir}/session`)) ?? '').trim()
+  return SESSION_ID.test(text) ? text : null
+}
+
+export type Claim = { claimed: true } | { claimed: false; existing: Next | null }
+
+/**
+ * The one answer that may continue a job. `fs.write` cannot create a file only when it is absent, so the claim is a hard
+ * link: the content is written whole to a temporary file, and `ln` fails when `next` exists, so a reader never sees half of
+ * it and two answers at once cannot both win.
+ */
+export async function claimNext($: CoreEngine, job: Pick<JobRecord, 'dir'>, next: Next): Promise<Claim> {
+  const script =
+    `# orq:claim\ntmp=$(mktemp "$1/.next.XXXXXX") || exit 12\n` +
+    `printf '%s' "$2" > "$tmp" || { rm -f "$tmp"; exit 12; }\n` +
+    `if ln "$tmp" "$1/${NEXT_FILE}" 2>/dev/null; then rm -f "$tmp"; exit 0; fi\n` +
+    `rm -f "$tmp"\n[ -e "$1/${NEXT_FILE}" ] && exit 9\nexit 12`
+  const r = await $.process.run(['bash', '-c', script, 'orq-claim', job.dir, JSON.stringify(next)], { timeoutMs: PROCESS_TIMEOUT_MS })
+  if (r.exitCode === 0) return { claimed: true }
+  if (r.exitCode === 9) return { claimed: false, existing: await readNext($, job) }
+  throw new Error(`could not claim the question of ${job.dir} (exit ${r.exitCode})`)
+}
+
+/** Gives the claim back after a launch that did not start, so the question can be answered again. */
+async function releaseNext($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<void> {
+  try {
+    await $.process.run(['rm', '-f', `${job.dir}/${NEXT_FILE}`], { timeoutMs: PROCESS_TIMEOUT_MS })
+  } catch {
+    /* a claim that stays reads as answered; the refusal that follows names the launch's own failure */
+  }
+}
+
+export function alreadyAnswered(jobId: string, existing: Next | null): Failure {
+  return fail(
+    'already_answered',
+    existing === null
+      ? `the question of ${jobId} was answered a moment ago by another call`
+      : `the question of ${jobId} was already answered: its worker continues in taskId ${existing.jobId}, so read that one with status`,
+  )
+}
+
+/** What a continuation needs of the job it resumes, checked against the config as it is now. */
+export type ContinuationPlan = {
+  parent: JobRecord
+  session: string
+  instance: InstanceConfig
+  model: string
+  modes: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+  flags: string[]
+  /** `worktree` only for a worktree that git lists for the task; anything else runs, and is locked, as a shared task. */
+  isolation: TaskIsolation
+  /** The directory the task was asked to work in, resolved: the checkout of a worktree task, the directory itself of a shared one. */
+  requestCwd: string
+  /** Where the worker resumes: the resolved, checked directory, never the one meta.json names. */
+  cwd: string
+  worktree?: NonNullable<Continuation['worktree']>
+}
+
+/** The real path of a path that exists, with every link followed; null when it does not exist. No realpath command: macOS has none with -e. */
+async function realPath($: CoreEngine, path: string): Promise<string | null> {
+  try {
+    return (await $.fs.stat(path, { resolve: true })).realPath ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Whether the `next` claims of the server lead from job `from` to job `to`: the chain of answers that a task is. */
+async function chainReaches($: CoreEngine, jobsDir: string, from: string, to: string): Promise<boolean> {
+  let id = from
+  for (let hops = 0; hops < 64; hops += 1) {
+    if (id === to) return true
+    const next = await readNext($, { dir: `${jobsDir}/${id}` })
+    if (next === null) return false
+    id = next.jobId
+  }
+  return false
+}
+
+/** Whether a live job other than `except` works on this branch, as far as its meta.json says. */
+async function branchHeldByAnother($: CoreEngine, jobsDir: string, branch: string, except: string): Promise<boolean> {
+  let entries: { name: string; kind: string }[]
+  try {
+    entries = await $.fs.list(jobsDir)
+  } catch {
+    return false
+  }
+  for (const entry of entries) {
+    if (entry.kind !== 'dir' || entry.name === except) continue
+    const other = await readMeta($, jobsDir, entry.name)
+    if (other?.branch === branch && (await jobIsLive($, other))) return true
+  }
+  return false
+}
+
+type OwnWorktree = { fields: NonNullable<Continuation['worktree']>; cwd: string }
+
+/**
+ * The worktree of a job, when it is the one the server made for the task, and the directory to resume in. meta.json is the
+ * job's own file, and a worker that can write outside its directory can change it, so nothing in it is taken as it stands: the
+ * branch must be `orq/ID` of a job that does not run and whose `next` claims lead to this job (or of this job itself), the
+ * checkout git reports must lie in scope as a launch requires, the worktree must be the path that a launch computes for that
+ * ID, git must list it on that branch, and the directory must resolve, links followed, to where a launch from the recorded
+ * directory would have put it, inside the worktree. Anything else is not the task's own worktree, and the job runs, is scoped
+ * and is locked as a shared one.
+ */
+async function ownWorktree($: CoreEngine, config: OrqConfig, sessionDir: string, job: JobRecord): Promise<OwnWorktree | null> {
+  const { repo, baseSha, branch } = job
+  if (repo === undefined || baseSha === undefined || branch === undefined || job.worktree === undefined) return null
+  const rootId = branch.startsWith('orq/') ? branch.slice('orq/'.length) : ''
+  if (!isSafeJobId(rootId) || branchFor(rootId) !== branch) return null
+  try {
+    const top = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'rev-parse', '--show-toplevel'), { timeoutMs: GIT_TIMEOUT_MS })
+    if (top.exitCode !== 0) return null
+    const toplevel = await realPath($, top.stdout.trim())
+    const worktree = await realPath($, worktreePathFor(top.stdout.trim(), rootId))
+    if (toplevel === null || worktree === null || (await realPath($, job.worktree)) !== worktree) return null
+    if ('refusal' in (await scopedCwd($, config, sessionDir, toplevel))) return null
+    const listed = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'worktree', 'list', '--porcelain'), { timeoutMs: GIT_TIMEOUT_MS })
+    if (listed.exitCode !== 0) return null
+    let registered = false
+    for (const block of listed.stdout.split('\n\n')) {
+      const lines = block.split('\n')
+      const path = lines.find((line) => line.startsWith('worktree '))?.slice('worktree '.length)
+      if (path !== undefined && lines.includes(`branch refs/heads/${branch}`) && (await realPath($, path)) === worktree) registered = true
+    }
+    if (!registered) return null
+    const asked = await realPath($, repo)
+    if (asked === null) return null
+    const subdir = asked !== toplevel && isWithin(asked, toplevel) ? asked.slice(toplevel.length) : ''
+    const cwd = await realPath($, `${worktree}${subdir}`)
+    if (cwd === null || !isWithin(cwd, worktree) || (await realPath($, job.cwd)) !== cwd) return null
+    if (rootId !== job.id && !(await chainReaches($, config.jobsDir, rootId, job.id))) return null
+    if (await branchHeldByAnother($, config.jobsDir, branch, job.id)) return null
+    return { fields: { repo, baseSha, branch, worktree }, cwd }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether the worker of a job that stopped on a question can be resumed, and with what. The job must have recorded its
+ * session, its worker and its modes, its instance must still be the one it ran on (the session lives in that instance's
+ * CODEX_HOME), and its directory must still be there. The flags are the ones a launch at the same modes would write.
+ */
+export async function continuationPlan(
+  $: CoreEngine,
+  config: OrqConfig,
+  parent: JobRecord,
+  sessionDir: string,
+): Promise<{ plan: ContinuationPlan } | { failure: Failure }> {
+  const unavailable = (why: string): { failure: Failure } => ({
+    failure: fail('resume_unavailable', `${parent.id} cannot be resumed: ${why}. Delegate a new task that carries the brief and the answer instead.`),
+  })
+  const session = await readSession($, parent)
+  if (session === null) return unavailable('its worker left no session id')
+  const { driver, model, runtimeMode, interactionMode } = parent
+  if (driver === undefined || model === undefined || runtimeMode === undefined || interactionMode === undefined) {
+    return unavailable('the job did not record its worker or its permission modes')
+  }
+  const instance = config.instances.find((candidate) => candidate.id === parent.instanceId)
+  if (instance === undefined || instance.driver !== driver) return unavailable(`the instance ${parent.instanceId ?? 'it ran on'} is no longer configured as it was`)
+  if (instance.env?.CODEX_HOME !== parent.codexHome) return unavailable('the CODEX_HOME of its instance changed, so its session is not where the worker left it')
+  if (!plainArgument(model)) return unavailable('its model is not one word')
+  if (!(await isDirectory($, parent.cwd))) return unavailable(`its directory ${parent.cwd} is gone`)
+  const own = await ownWorktree($, config, sessionDir, parent)
+  // The scope is judged as a launch judges it: on the directory the task was asked to work in.
+  const scoped = await scopedCwd($, config, sessionDir, own === null ? parent.cwd : own.fields.repo)
+  if ('refusal' in scoped) {
+    const body = scoped.refusal.slice(`${TASK_REFUSAL}: `.length)
+    const outside = /^cwd_out_of_scope: ([\s\S]*)$/.exec(body)
+    return outside?.[1] !== undefined ? { failure: fail('cwd_out_of_scope', outside[1]) } : unavailable(body)
+  }
+  const policy = runnerPolicy(driver, runtimeMode, interactionMode)
+  if (isFailure(policy)) return unavailable(policy.error.message)
+  const effort = parent.effort === undefined ? [] : effortFlag(driver, [{ id: EFFORT_OPTION, value: parent.effort }])
+  return {
+    plan: {
+      parent,
+      session,
+      instance,
+      model,
+      modes: { runtimeMode, interactionMode },
+      flags: [...policy.flags, ...effort],
+      isolation: own === null ? 'shared' : 'worktree',
+      requestCwd: scoped.cwd,
+      cwd: own === null ? scoped.cwd : own.cwd,
+      ...(own !== null ? { worktree: own.fields } : {}),
+    },
+  }
+}
+
+export type ContinuationInput = { answer: string; via: NextVia; questions: QuestionMode; agentId: string; reservedId?: string }
+
+/**
+ * Claims the question and starts the continuation under the id the claim names: the worker resumes its session on the same
+ * branch, in the same directory, with the answer as its next message. A launch that does not start gives the claim back.
+ */
+export async function launchContinuation(
+  $: CoreEngine,
+  config: OrqConfig,
+  plan: ContinuationPlan,
+  input: ContinuationInput,
+): Promise<{ job: JobRecord } | { refusal: string } | { failure: Failure }> {
+  const { parent, session, instance, model, modes, flags, worktree } = plan
+  const id = input.reservedId ?? newJobId('mcp', await $.clock.now(), input.agentId)
+  const claim = await claimNext($, parent, { jobId: id, via: input.via })
+  if (!claim.claimed) return { failure: alreadyAnswered(parent.id, claim.existing) }
+  const launched = await launchJob($, config, {
+    kind: 'mcp',
+    reservedId: id,
+    agentId: input.agentId,
+    runner: DRIVER_RUNNER[instance.driver],
+    model,
+    cwd: plan.cwd,
+    prompt: taskPrompt(input.answer, undefined),
+    env: instance.env ?? {},
+    instanceId: instance.id,
+    driver: instance.driver,
+    flags,
+    runtimeMode: modes.runtimeMode,
+    interactionMode: modes.interactionMode,
+    ...(parent.effort !== undefined ? { effort: parent.effort } : {}),
+    questions: input.questions,
+    continuation: { parent: parent.id, session, ...(worktree !== undefined ? { worktree } : {}) },
+  })
+  if (!('job' in launched)) await releaseNext($, parent)
+  return launched
 }

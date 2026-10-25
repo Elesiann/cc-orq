@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """orq event extractor: stream a CLI JSONL log, print one JSON summary line.
 
-Usage: extract.py <events.jsonl> <codex|opencode|agy|claude>
+Usage: extract.py <events.jsonl> <codex|opencode|agy|claude> [<session-file>]
 
 Prints: {"tid": "<thread/session id or ''>", "in": <int or null>,
          "out": <int or null>, "error": <bool>} plus an optional "model" key
@@ -10,14 +10,19 @@ when the stream names the model (agy `init.init.model`, claude the first
 token counts, so a caller can tell zero tokens from unknown ones. Reads line
 by line, so logs larger than the mod's read cap are fine.
 Per-line parse failures are skipped; only a missing/unreadable file exits
-nonzero.
+nonzero. With <session-file>, a session id that is safe to pass to a CLI as one
+argument (letters, digits and . _ : -, not starting with a symbol) is also written
+there, so the supervisor can record it for a later answer to resume.
 """
 import json
+import re
 import sys
+
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 def main() -> int:
-    if len(sys.argv) != 3 or sys.argv[2] not in ("codex", "opencode", "agy", "claude"):
+    if len(sys.argv) not in (3, 4) or sys.argv[2] not in ("codex", "opencode", "agy", "claude"):
         print(json.dumps({"tid": "", "in": 0, "out": 0, "error": False}))
         return 2
     path, runner = sys.argv[1], sys.argv[2]
@@ -113,6 +118,12 @@ def main() -> int:
     out = {"tid": tid, "in": in_tok, "out": out_tok, "error": error}
     if model:
         out["model"] = model
+    if len(sys.argv) == 4 and SESSION_ID.match(tid):
+        try:
+            with open(sys.argv[3], "w", encoding="utf-8") as session:
+                session.write(tid + "\n")
+        except OSError:
+            pass
     print(json.dumps(out))
     return 0
 

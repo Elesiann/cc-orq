@@ -473,12 +473,13 @@ test('a task that exits 0 after writing question.txt hands back BLOCKED with the
   await step($, agentId)
   const dir = jobDir(s)
   s.files.set(`${dir}/question.txt`, 'Which branch should I target?\n')
+  s.files.set(`${dir}/session`, 'ses-asked\n')
   finish(s, 'BLOCKED: Which branch should I target?')
   const chunks = await step($, agentId, 1)
   expect(chunks[0].name).toBe('SubagentHandback')
   const answer = answerOf(chunks)
   expect(answer).toContain(`BLOCKED on a question (taskId ${dir.split('/').pop()}): Which branch should I target?`)
-  expect(answer).toContain('Answer it in a new cc-orq:task')
+  expect(answer).toContain('Answer it with the answer tool')
 })
 
 test('a second step after the handback answers with text, not a second handback', async ($, on) => {

@@ -436,7 +436,8 @@ test('create launches within the ceiling and answers the id of the job, whose ta
   const { taskId } = created
   assert.deepEqual(jobDirs(s), [taskId], 'the id of the task is the id of its job')
   const record = JSON.parse(readFileSync(join(taskDir(taskId), 'task.json'), 'utf8'))
-  assert.deepEqual(Object.keys(record).sort(), ['createdAt', 'questions', 'request', 'taskId', 'tool', 'toolUseId'])
+  assert.deepEqual(Object.keys(record).sort(), ['createdAt', 'questions', 'request', 'sessionMode', 'taskId', 'tool', 'toolUseId'])
+  assert.equal(record.sessionMode, 'acceptEdits', 'the record keeps the session mode, which a form answer is judged by when its own request carries none')
   assert.equal(record.taskId, taskId)
   assert.equal(record.toolUseId, 'toolu_01')
   assert.equal(record.request.prompt, 'Go.')
@@ -477,7 +478,6 @@ test('create answers the other refusals at once, for every client, and records n
   t.after(() => s.cleanup())
   for (const [what, input, code] of [
     ['a field the tool does not have', { ...REQUEST(repo), turbo: 'yes' }, 'invalid_request'],
-    ['questions: human', REQUEST(repo, { questions: 'human' }), 'invalid_request'],
     ['a target that is not configured', REQUEST(repo, { target: 'nope' }), 'provider_unavailable'],
     ['a directory outside the session', REQUEST('/usr', {}), 'cwd_out_of_scope'],
   ]) {
@@ -486,10 +486,14 @@ test('create answers the other refusals at once, for every client, and records n
     assert.equal(created.result.isError, true, what)
     assert.equal(JSON.parse(created.result.content[0].text).error.code, code, what)
   }
+  const noForm = await tasks.create('delegate', REQUEST(repo, { questions: 'human' }), { tasks: true, forms: false })
+  assert.equal(JSON.parse(noForm.result.content[0].text).error.code, 'invalid_request', 'questions: human needs a client with forms')
   const nonRecord = await tasks.create('delegate', null, CLIENT)
   assert.match(nonRecord.result.content[0].text, /^\{"error":\{"code":"invalid_request","message":"delegate needs /)
   assert.deepEqual(jobDirs(s), [])
-  await assert.rejects(() => tasks.create('answer', {}, CLIENT), /no task tool named answer/)
+  const noAnswer = await tasks.create('answer', {}, CLIENT)
+  assert.equal(JSON.parse(noAnswer.result.content[0].text).error.code, 'invalid_request', 'answer is a task tool, and an empty call is refused as input')
+  await assert.rejects(() => tasks.create('wait', {}, CLIENT), /no task tool named wait/)
 })
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -951,7 +951,7 @@ a header.
 | `isolation` | no | `worktree` (the default) or `shared` |
 | `role` | no | `implementation`, `research`, `review`, `design`, `test` or `general` |
 | `runtime`, `interaction` | no | A mode at most as broad as the ceiling. Left out, the task gets the ceiling |
-| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result, which you answer with [`answer`](#mcp__plugin_cc-orq_orq__answer). `human` is refused for now: the form that would take the answer is not in this version |
+| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result, which you answer with [`answer`](#mcp__plugin_cc-orq_orq__answer). `human`: the user sees the question in a form, and the same task goes on with their answer (see [Questions in a form](#questions-in-a-form)); a client without MCP tasks and form input is refused with `invalid_request` |
 | `sessionMode` | no | Filled by the cc-orq hook; leave it out |
 
 A call checks, in this order, its fields, `questions`, the ceiling, the target and
@@ -985,7 +985,7 @@ before.
 | Task status | Meaning |
 | --- | --- |
 | `working` | The job runs, including while a cancel is pending, or the launch that you approved is starting. The message is the card's line: instance, model, the worker's last action and the time |
-| `input_required` | A request above the ceiling waits for your form, under the key `approve` |
+| `input_required` | A request above the ceiling waits for your form, under the key `approve`, or the question of a `questions: human` worker waits for your answer, under the key `q-JOBID` |
 | `completed` | The job ended, or the request was refused after you answered. `result` is what `status` gives, the worker's final message and the footer, and for a worktree job the branch and the `integrate` call, cut at 100 KB, with `isError: true` for a worker that failed or was lost. A worker that stopped on a question gives `BLOCKED on a question`, which `answer` resumes |
 | `cancelled` | The job exited 124, or the task was cancelled before it started |
 | `failed` | The record of the task cannot be read. A worker that fails is `completed` with `isError`, since `failed` is for protocol errors |
@@ -996,6 +996,27 @@ which Claude Code sends twice; each is acked, the job gets its cancel marker and
 ends `cancelled`, and a cancel of a task that ended changes nothing.
 `tasks/update` answers the form, and an answer to a key that is not outstanding is
 acked and ignored. `tasks/result` and `tasks/list` do not exist, and answer -32601.
+
+#### Questions in a form
+
+With `questions: human`, a worker that stops on a question is not the end of the task. The task goes to
+`input_required` with one free-text field, `answer`, under the key `q-JOBID` of the job that asked, and
+the first line of the form is the worker and its model, and the two that follow are the question (folded,
+wrapped, cut with an ellipsis and escaped, since the worker wrote it); Claude Code shows three lines of a
+message and cuts a longer line at the screen width. Answering resumes the same worker, as in `answer`, as
+a job of the same task: the task stays one task in `/tasks`, and it ends with the result of the job that
+finished last, whose id the merge hint names. The worker may ask again, and each question is a form. The
+task goes on at the level the worker had, held to the ceiling again as `answer` is: by the config as it is
+now and by the session mode that the server saw last, which is the one the latest `delegate` or `answer`
+call brought, since `tasks/update` carries none. A level above that ceiling closes the form, unless you
+approved that worker in a form: the task ends with the BLOCKED text, and the `declined` file says why.
+
+Declining the form, Esc, a worker that cannot be resumed (no `session`), a continuation that cannot start and 24
+hours after the job ended all end the task `completed` with the `BLOCKED on a question` text, and then
+`answer` can answer it. Cancelling the task with `x` while the form is open ends it `cancelled`, which
+frees `answer` too. While the form is open, `answer` gets `awaiting_form`. An answer to a key that is not
+the open question is acked and ignored, as is a blank one, which leaves the form open. Only a client
+with MCP tasks and form input gets `human`; others are refused.
 
 ### `mcp__plugin_cc-orq_orq__answer`
 
@@ -1025,13 +1046,33 @@ starts:
 | --- | --- |
 | `invalid_request` | A field is not valid, or the job did not stop on a question (it still runs, failed, was cancelled or ended with an answer) |
 | `task_not_found` | No job has that id |
+| `awaiting_form` | The job belongs to a `questions: human` task whose form is still open, and the form is the way to answer. A declined form, Esc, a cancelled task or 24 hours free `answer` |
 | `already_answered` | The question already has a continuation, and the message names it. Two answers at once start one worker: the first claims the question with the file `next`, created whole and only when absent, and the other gets this |
 | `resume_unavailable` | The worker cannot be resumed: the job recorded no `session` (jobs from before this version have none), its instance is no longer configured as it was or its `CODEX_HOME` changed, or its directory is gone. The message says to `delegate` again with the brief and the answer, which is what 0.1 did. A refusal does not claim the question |
-| `runtime_mode_escalation_denied`, `interaction_mode_escalation_denied` | The level the worker ran at is above the ceiling now. The continuation never runs above its worker's level, and nothing lets `answer` ask for more. It is held to the ceiling again, unless you allowed that level in a form for the task that started the worker, which covers its continuations |
+| `runtime_mode_escalation_denied`, `interaction_mode_escalation_denied` | The level the worker ran at is above the ceiling now, as it is for a launch, and the client has no form to ask you in |
+| `cwd_out_of_scope`, `worktree_busy` | The directory is outside the session directory and the allowed roots, or a shared worker's checkout has a live job, as for a launch |
 
 The continuation takes from the job that asked its repository, base commit,
 branch, worktree and directory, its instance, model, effort, and its runtime and
 interaction modes, and runs with the flags that a launch at those modes writes.
+It never runs above its worker's level, and nothing lets `answer` ask for more.
+It is checked as a launch is: the directory must lie in the session directory or
+an allowed root, a worktree counts as the task's own only when `git worktree
+list` of the recorded checkout lists it on the recorded branch (otherwise the
+worker runs, and is locked, as a shared one), and a level above the ceiling opens
+the same form as `delegate` for a client with tasks and forms, and is refused for
+any other. The worker resumes in a directory the server resolved and checked, never
+in the path `meta.json` names: a worktree is the task's own only when its branch is
+`orq/ID` of a job that does not run and whose `next` claims lead to this job (or of this
+job itself), its checkout lies in scope as a launch requires, its path is the one a launch
+computes for that ID, git lists it on that branch, the directory resolves, links followed,
+to where a launch from the recorded directory put it and lies inside the worktree, and no
+other live job holds the branch. Anything else runs as a shared task, scoped and locked as
+one. The directory of a worktree task is not run through the scope check itself, since a
+worktree sits beside its checkout, which is where the scope is judged. An earlier approval carries over only from the task records the
+server wrote for the same chain of tasks, and only for the same worker (instance,
+model, directory and isolation) at no higher level; the `parent` in a job's
+`meta.json` never gives one, since a worker can write that file.
 Its prompt is your answer, then the question protocol, so it can ask again.
 `status` and `list` show the link: `parent` on the continuation, `next` on the
 job that asked, and `question` in `list` is true only while nobody has answered.
@@ -1126,9 +1167,9 @@ answers `invalid_request`. Each job is one row:
 `status` is the one of the `status` tool. `durationMs` runs to the job's `exit`
 file, or to now while the job runs, and is `null` for an interrupted job.
 `instanceId`, `model` and `branch` are `null` when the job did not record them,
-and `branch` is set only for a worktree job. `parent` names the job that a
-continuation answers, and is `null` otherwise. `question` is `true` while the job
-is blocked on a question that nobody has answered. The server reads
+and `branch` is set only for a worktree job. `parent` names the job whose question a
+continuation answers, and is `null` otherwise.
+`question` is `true` when the job ended blocked on a question that nobody has answered. The server reads
 every job's metadata, and checks whether a job is alive only for the rows it
 returns.
 
@@ -1312,7 +1353,8 @@ for both the kind and the agent suffix, for example
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
 | `session` | `supervise.sh` | The worker's session id, taken from its event stream and written before `exit`. A job whose stream names none has no `session`, and cannot be resumed. |
 | `resume` | `answer` | A continuation only: the session id the CLI resumes, as its first line. The supervisor starts no worker when it is not a plain id. |
-| `next` | `answer` | `{"jobId", "via"}`: the job that took over this job's question. It is created whole and only when absent, so it is the claim that lets one answer through. |
+| `declined` | the task source | A `questions: human` question that the user declined, or that could not be resumed. The form is gone, and the task ends with BLOCKED. |
+| `next` | `answer`, the question form | `{"jobId", "via"}`, `via` being `answer` or `form`: the job that took over this job's question. It is created whole and only when absent, so it is the claim that lets one answer through. |
 | `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
 | `flags` | `cc-orq:task`, `delegate` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
@@ -1525,6 +1567,7 @@ habits.
 | A task reads `working` with `starting after your approval` and nothing runs | The server stopped between your answer and the start of the job. Stop the task with `x` in `/tasks` |
 | A call to `delegate`, `answer` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
+| `answer` answers `awaiting_form` | The question of a `questions: human` task is open in a form. Answer it there, or decline it, cancel the task with `x`, or wait 24 hours |
 | `answer` answers `already_answered` | The question has a continuation: read the job the message names with `status` |
 | `answer` answers `resume_unavailable` | The worker cannot be resumed, and the message says why. Delegate again with the brief and the answer |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
@@ -1539,12 +1582,15 @@ habits.
 - macOS is experimental and tested only in CI. See [macOS (experimental)](#macos-experimental).
 - Only a question can resume a worker: `answer` continues the session of a job
   that stopped on one. A review round, or any other follow-up, is a new task that
-  carries the earlier brief.
+  carries the earlier brief. A worker below `auto` cannot write its question to
+  `question.txt` outside its directory (measured with a Claude worker at
+  `manual` and `acceptEdits`, which could not), so the question only reaches
+  `answer` from a worker that could write it.
 - A client without MCP tasks gets the job's id and no wake-up, and reads the job
   with `status`. A subagent is one (measured on 2.1.310). Claude Code's
   documentation names the VS Code extension, the desktop app and a one-shot
   `claude -p` as others. Such a client cannot be asked for approval, so a request
-  above the ceiling is refused there. `questions: human` is refused.
+  above the ceiling is refused there, and so is `questions: human`.
 - Closing Claude Code stops the server and leaves the workers running. The exit
   dialog lists an MCP task as one that stops on exit, but no exit option cancels
   it on the server, and the option that moves the session to the background left
