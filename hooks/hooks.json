@@ -1,18 +1,4 @@
 {
-  "description": "orq function hooks, and the SessionStart hook that delivers the orchestration instructions",
-  "modules": ["./register.ts"],
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|clear|compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
+  "description": "The orq mod: function hooks that serve /orq, /orq-panel, the task card and the cc-orq:task agent",
+  "modules": ["./register.ts"]
 }

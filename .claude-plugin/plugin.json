@@ -1,11 +1,12 @@
 {
   "name": "cc-orq",
   "version": "0.1.1",
-  "description": "Delegate tasks to external coding agents (Codex, OpenCode, Claude) from Claude Code with T3 Code style orchestration tools: capabilities, status, cancel, integrate.",
+  "description": "Delegate tasks to external coding agents (Codex, OpenCode, Antigravity, Claude) from Claude Code. A stdio MCP server serves the orchestration tools capabilities, status, list, cancel and integrate; the mod adds the cc-orq:task agent, the task card, /orq-panel and /orq.",
   "author": { "name": "Elesiann" },
   "license": "MIT",
   "keywords": ["claude-code", "plugin", "orchestration", "codex", "opencode", "subagents"],
   "types": "./types/index.d.ts",
+  "mcpServers": { "orq": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server/main.mjs"] } },
   "userConfig": {
     "cardDisplay": {
       "type": "string",

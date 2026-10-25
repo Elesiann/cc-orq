@@ -9,7 +9,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 DIRS='.claude-plugin .github docs hooks opencode scripts server tests types'
-FILES='.gitignore .worktreeinclude CHANGELOG.md CONTRIBUTING.md LICENSE NOTICE README.md SECURITY.md instructions.md package-lock.json package.json tsconfig.json'
+FILES='.gitignore .worktreeinclude CHANGELOG.md CONTRIBUTING.md LICENSE NOTICE README.md SECURITY.md package-lock.json package.json tsconfig.json'
 
 listing=$(mktemp)
 trap 'rm -f "$listing"' EXIT

@@ -93,7 +93,7 @@ export type CapabilitiesResult = {
 export type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
 export type WorkState = 'working' | 'waiting_for_children' | 'result_available'
 
-/** What `mcp__cc-orq__status` answers for one task, read from its job directory. */
+/** What `mcp__plugin_cc-orq_orq__status` answers for one task, read from its job directory. */
 export type TaskStatusResult = {
   taskId: string
   status: TaskStatus
@@ -133,7 +133,7 @@ export const FAILURE_CODES = [
   'worktree_busy',
   // No meta.json for the task id.
   'task_not_found',
-  // mcp__cc-orq__cancel on a task that has ended or is interrupted.
+  // mcp__plugin_cc-orq_orq__cancel on a task that has ended or is interrupted.
   'task_not_cancellable',
   // The capability probe found the provider unable to run a child task.
   'capability_denied',
@@ -169,9 +169,8 @@ export function isFailure(value: unknown): value is Failure {
 /** The failure of a worktree or integrate step; integrate answers it as `{ ok: false, error }`. */
 export type GitFailure = { code: FailureCode; message: string; files?: string[] }
 
-/** The tool names and the input of `integrate`. */
+/** The name and the input of the `integrate` tool. */
 export const INTEGRATE_TOOL = 'integrate'
-export const INTEGRATE_TOOL_NAME = 'mcp__cc-orq__integrate'
 
 export const INTEGRATE_STRATEGIES = ['ff-only', 'merge'] as const
 export type IntegrateStrategy = (typeof INTEGRATE_STRATEGIES)[number]

@@ -26,11 +26,19 @@ const WAIT_SCHEMA = {
   required: ['job'],
   additionalProperties: false,
 }
+// Everything the parent needs to start a task and handle its answer. The guidance for the orq tools is the MCP
+// server's instructions (server/instructions.md), so it is not repeated here.
 const TASK_AGENT_DESCRIPTION =
   'Runs one self-contained task on a configured orq instance (Codex, OpenCode, Antigravity or Claude) in the background. ' +
-  'The prompt starts with two required header lines, `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]` and ' +
-  '`cwd: /absolute/path`, then optionally `isolation: worktree | shared` (default worktree: a new branch in its own git worktree, so cwd must be in a git checkout) and `role: implementation | research | review | design | test | general`, ' +
-  'then the task. runtime and interaction can narrow the session, never widen it. The answer arrives when the job ends.'
+  'Spawn it with `run_in_background: true`. The child gets no history, so the prompt carries the whole brief: the goal, the files it may touch, and the check that shows it worked. ' +
+  'The prompt starts with header lines, in any order. Required: `target: <instance> <model> [effort=<value>] [runtime=<mode>] [interaction=<mode>]` ' +
+  '(runtime and interaction can narrow the session, never widen it) and `cwd: /absolute/path` (inside the session directory or an allowed root). ' +
+  'Optional: `isolation: worktree | shared` (default worktree: a new branch in its own git worktree, so cwd must be in a git checkout; use shared only for a task that edits nothing) ' +
+  'and `role: implementation | research | review | design | test | general`. ' +
+  "Never pass the Agent tool's own `isolation` option. " +
+  'After spawning, end the turn and do not poll: the answer arrives when the job ends, and its footer carries `taskId <id>`. ' +
+  'A handback that starts `BLOCKED on a question` is answered by a new `cc-orq:task` with the original brief plus the answer: settle the question yourself when the brief and the conversation do, and ask the user when they do not. ' +
+  'A review round is a new task too, run by a different model family than the implementer.'
 const ONE_LINE_PROMPT =
   'An orq runner: the orq plugin serves your steps and runs your task on the external CLI its target line names. Call mcp__cc-orq__wait with the job id until the job finishes.'
 
