@@ -29,6 +29,7 @@ const LIST_DEFAULT = 20
 const ISOLATIONS = ['worktree', 'shared']
 const ROLES = ['implementation', 'research', 'review', 'design', 'test', 'general']
 const QUESTION_MODES = ['parent', 'human'] as const satisfies readonly QuestionMode[]
+const PROMPT_MAX_CHARS = 200_000
 
 const SESSION_MODE_INPUT = { type: 'string', description: 'Filled by the cc-orq hook; leave it out.' }
 const SESSION_MODE_REFUSAL = 'sessionMode must be text; the cc-orq hook fills it, so leave it out'
@@ -66,7 +67,9 @@ const DELEGATE_INPUT = {
     },
     prompt: {
       type: 'string',
-      description: 'The whole brief: the worker has no history, so give the goal, the files it may touch and the check that shows it worked.',
+      maxLength: PROMPT_MAX_CHARS,
+      description:
+        'The whole brief, at most 200,000 characters: the worker has no history, so give the goal, the files it may touch and the check that shows it worked.',
     },
     sessionMode: SESSION_MODE_INPUT,
   },
@@ -109,7 +112,7 @@ const CAPABILITIES_DESCRIPTION =
 const DELEGATE_DESCRIPTION =
   'Start one orq job: a Codex, OpenCode, Antigravity or Claude CLI working on one self-contained task in the background. ' +
   'The answer comes at once, as {"taskId", "status": "running"}; read the job with status until it ends. ' +
-  'The worker has no history, so the prompt carries the whole brief. ' +
+  'The worker has no history, so the prompt carries the whole brief, at most 200,000 characters. ' +
   'isolation worktree, the default, gives the worker its own git worktree on a new branch: tell it to commit, because integrate merges commits only. ' +
   'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode. ' +
   'runtime and interaction ask for less; a request above the ceiling is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
@@ -269,6 +272,13 @@ function headerText(text: Record<string, string>): string {
   return `${lines.join('\n')}\n\n${text.prompt ?? ''}`
 }
 
+/** Characters as the schema's maxLength counts them: code points, so an emoji is one. */
+function characterCount(text: string): number {
+  let count = 0
+  for (const _ of text) count += 1
+  return count
+}
+
 type DelegateCall = { header: TaskHeader; questions: QuestionMode; sessionMode: string | undefined }
 
 function parseDelegateInput(input: unknown): DelegateCall | Failure {
@@ -287,6 +297,8 @@ function parseDelegateInput(input: unknown): DelegateCall | Failure {
     if (typeof value !== 'string') return fail('invalid_request', key === 'sessionMode' ? SESSION_MODE_REFUSAL : `${key} must be text`)
     text[key] = value
   }
+  const promptLength = characterCount(text.prompt ?? '')
+  if (promptLength > PROMPT_MAX_CHARS) return fail('invalid_request', `prompt must be at most ${PROMPT_MAX_CHARS} characters, got ${promptLength}`)
   for (const key of ONE_WORD_FIELDS) {
     if (/\s/.test(text[key] ?? '')) return fail('invalid_request', `${key} must be one word, without spaces or line breaks`)
   }

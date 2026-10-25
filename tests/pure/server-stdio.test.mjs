@@ -999,6 +999,7 @@ test('the delegate input schema takes the header fields, requires four, and take
   assert.deepEqual(schema.properties.runtime.enum, ENUMS('target: a b runtime=nope\ncwd: /x\n\np'))
   assert.deepEqual(schema.properties.interaction.enum, ENUMS('target: a b interaction=nope\ncwd: /x\n\np'))
   assert.deepEqual(schema.properties.questions.enum, ['parent', 'human'])
+  assert.equal(schema.properties.prompt.maxLength, 200000, 'the schema advertises the cap that the handler enforces')
   for (const phrase of ['{"taskId", "status": "running"}', 'commit', 'integrate', 'status', 'ceiling', 'worktree', 'questions']) {
     assert.ok(delegate.description.includes(phrase), `the description names ${phrase}`)
   }
@@ -1066,6 +1067,33 @@ test('delegate refuses what the cc-orq:task header refuses, with the same code a
   )
   assert.deepEqual(jobDirs(s), [], 'nothing was launched')
   assert.equal(server.garbage.length, 0)
+})
+
+test('delegate takes a prompt of at most 200,000 characters, counted as characters and not as UTF-16 units, and refuses more', async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const call = (prompt) => server.call('delegate', { target: 'nope', model: 'haiku', cwd: repo, prompt })
+  const unknownInstance = FAILURE('provider_unavailable', 'Provider instance nope is not configured.')
+  for (const [name, prompt] of [
+    ['exactly 200,000 characters', 'x'.repeat(200000)],
+    ['100,001 emoji, which are 200,002 UTF-16 units and 100,001 characters', '😀'.repeat(100001)],
+    ['200,000 emoji, the most in characters', '😀'.repeat(200000)],
+  ]) {
+    assert.deepEqual((await call(prompt)).json, unknownInstance, `${name} goes on to the next check`)
+  }
+  for (const [name, prompt, count] of [
+    ['one character over', 'x'.repeat(200001), 200001],
+    ['an emoji over', '😀'.repeat(200001), 200001],
+    ['a megabyte', 'y'.repeat(1_000_000), 1_000_000],
+  ]) {
+    const answer = await call(prompt)
+    assert.equal(answer.isError, true, name)
+    assert.deepEqual(answer.json, FAILURE('invalid_request', `prompt must be at most 200000 characters, got ${count}`), name)
+  }
+  assert.deepEqual(jobDirs(s), [], 'nothing was launched')
 })
 
 test('delegate refuses questions: human, which needs tasks and forms that this server does not offer yet', async (t) => {
