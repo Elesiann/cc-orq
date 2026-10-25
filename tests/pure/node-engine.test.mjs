@@ -67,6 +67,14 @@ async function goneWithin(pid, ms) {
   }
 }
 
+function withTimeout(promise, ms) {
+  let timer
+  const late = new Promise((_, fail) => {
+    timer = setTimeout(() => fail(new Error(`still pending after ${ms} ms`)), ms)
+  })
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer))
+}
+
 test('stdin text reaches the child, and a child with no stdin reads end of file at once', async () => {
   const $ = nodeEngine({ env: baseEnv() })
   const echo = 'let text = ""; process.stdin.on("data", (d) => { text += d }); process.stdin.on("end", () => process.stdout.write(JSON.stringify(text)))'
@@ -187,7 +195,7 @@ test('git runs with repository hooks off, so a post-checkout hook does not run t
   assert.equal(existsSync(marker), false, 'git through the shim left the hook unrun')
 })
 
-test('git keeps the config entries the base environment already counts, and adds its hooksPath pair after them', async (t) => {
+test('git keeps the config entries the base environment already counts, and adds its hooksPath and fsmonitor pairs after them', async (t) => {
   const dir = tempDir(t)
   const repo = join(dir, 'repo')
   git(['init', '-q', '-b', 'main', repo])
@@ -200,6 +208,49 @@ test('git keeps the config entries the base environment already counts, and adds
   assert.equal(name.stdout, 'from-the-base-env\n')
   const hooks = await $.process.run(['git', 'config', '--get', 'core.hooksPath'])
   assert.equal(hooks.stdout, '/dev/null\n')
+  const fsmonitor = await $.process.run(['git', 'config', '--get', 'core.fsmonitor'])
+  assert.equal(fsmonitor.stdout, 'false\n')
+})
+
+test('git through the shim does not run a checkout\'s core.fsmonitor program, and reads back both config values', async (t) => {
+  const dir = tempDir(t)
+  const repo = join(dir, 'repo')
+  const marker = join(dir, 'fsmonitor-ran')
+  git(['init', '-q', '-b', 'main', repo])
+  writeFileSync(join(repo, 'shared.txt'), 'base\n')
+  git(['-C', repo, 'add', 'shared.txt'])
+  git(['-C', repo, 'commit', '-q', '-m', 'base'])
+  const monitor = join(dir, 'monitor.sh')
+  writeFileSync(monitor, `#!/bin/sh\ntouch "${marker}"\n`)
+  chmodSync(monitor, 0o755)
+  git(['-C', repo, 'config', 'core.fsmonitor', monitor])
+
+  git(['-C', repo, 'status', '--porcelain'])
+  assert.equal(existsSync(marker), true, 'plain git runs the core.fsmonitor program')
+  rmSync(marker)
+
+  const $ = nodeEngine({ cwd: repo, env: GIT_ENV })
+  const status = await $.process.run(['git', 'status', '--porcelain'])
+  assert.equal(status.exitCode, 0, status.stderr)
+  assert.equal(existsSync(marker), false, 'git through the shim left the core.fsmonitor program unrun')
+  const fsmonitor = await $.process.run(['git', 'config', '--get', 'core.fsmonitor'])
+  assert.equal(fsmonitor.stdout, 'false\n')
+  const hooks = await $.process.run(['git', 'config', '--get', 'core.hooksPath'])
+  assert.equal(hooks.stdout, '/dev/null\n')
+})
+
+test('a command that is not git gets no GIT_CONFIG_* variables from the shim', async () => {
+  const $ = nodeEngine({ env: baseEnv() })
+  const bare = await $.process.run(['env'])
+  assert.equal(bare.exitCode, 0)
+  assert.doesNotMatch(bare.stdout, /^GIT_CONFIG_/m)
+
+  const counted = nodeEngine({
+    env: baseEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'from-the-base-env' }),
+  })
+  const seen = await counted.process.run(['env'])
+  const config = seen.stdout.split('\n').filter((line) => line.startsWith('GIT_CONFIG_'))
+  assert.deepEqual(config.sort(), ['GIT_CONFIG_COUNT=1', 'GIT_CONFIG_KEY_0=user.name', 'GIT_CONFIG_VALUE_0=from-the-base-env'])
 })
 
 test('fs.write creates parent folders, replaces an existing file, and leaves no temporary file behind', async (t) => {
@@ -220,6 +271,30 @@ test('fs.read rejects a missing file and a file over 4 MiB, and reads a file of 
   assert.equal((await $.fs.read('exact.txt')).length, LIMIT)
   writeFileSync(join(dir, 'big.txt'), 'x'.repeat(LIMIT + 1))
   await assert.rejects($.fs.read('big.txt'), /larger than 4 MiB/)
+})
+
+test('fs.read rejects a FIFO within a second instead of blocking on it', { timeout: 5000 }, async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  assert.equal(spawnSync('mkfifo', [join(dir, 'fifo')]).status, 0)
+  await assert.rejects(withTimeout($.fs.read('fifo'), 1000), /fifo.*not a regular file/)
+})
+
+test('fs.read rejects a symlink to /dev/zero and a directory, because neither is a regular file', { timeout: 5000 }, async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  symlinkSync('/dev/zero', join(dir, 'zero'))
+  mkdirSync(join(dir, 'folder'))
+  await assert.rejects(withTimeout($.fs.read('zero'), 1000), /zero.*not a regular file/)
+  await assert.rejects(withTimeout($.fs.read('folder'), 1000), /folder.*not a regular file/)
+})
+
+test('fs.read follows a symlink to a regular file and returns its text', async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  writeFileSync(join(dir, 'target.txt'), 'linked text, héllo\n')
+  symlinkSync('target.txt', join(dir, 'link.txt'))
+  assert.equal(await $.fs.read('link.txt'), 'linked text, héllo\n')
 })
 
 test('fs.stat reports kinds and isLink, a dangling link as other, realPath with resolve, and rejects a missing path', async (t) => {

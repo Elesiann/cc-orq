@@ -2,7 +2,7 @@
 // semantics that the generated d.ts documents.
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import type { Dirent, Stats } from 'node:fs'
+import { constants, type Dirent, type Stats } from 'node:fs'
 import * as fsp from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Readable } from 'node:stream'
@@ -60,10 +60,23 @@ export function nodeEngine(options: NodeEngineOptions = {}): CoreEngine {
   }
 }
 
+// O_NONBLOCK keeps the open of a FIFO from waiting for a writer; the fstat then refuses it before any read.
 async function readText(path: string): Promise<string> {
-  const { size } = await fsp.stat(path)
-  if (size > READ_LIMIT_BYTES) throw new Error(`${path} is larger than 4 MiB, so fs.read refuses it`)
-  return fsp.readFile(path, 'utf8')
+  const handle = await fsp.open(path, constants.O_RDONLY | constants.O_NONBLOCK)
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(`${path} is not a regular file, so fs.read refuses it`)
+    const buffer = Buffer.allocUnsafe(READ_LIMIT_BYTES + 1)
+    let total = 0
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, buffer.length - total, null)
+      if (bytesRead === 0) break
+      total += bytesRead
+    }
+    if (total > READ_LIMIT_BYTES) throw new Error(`${path} is larger than 4 MiB, so fs.read refuses it`)
+    return buffer.toString('utf8', 0, total)
+  } finally {
+    await handle.close()
+  }
 }
 
 async function writeText(path: string, text: string): Promise<void> {
@@ -173,16 +186,18 @@ function childEnv(base: Env, extra: Record<string, string> | undefined): Record<
   return { ...env, ...extra }
 }
 
-// Git runs with repository hooks off, as the host runs it, through git's GIT_CONFIG_COUNT pairs.
+// Git runs a checkout's core.fsmonitor program, so fsmonitor is turned off along with the hooks.
 function withoutGitHooks(file: string, env: Record<string, string>): Record<string, string> {
   if (basename(file) !== 'git') return env
   const raw = env.GIT_CONFIG_COUNT ?? '0'
   const n = /^\d+$/.test(raw) ? Number(raw) : 0
   return {
     ...env,
-    GIT_CONFIG_COUNT: String(n + 1),
+    GIT_CONFIG_COUNT: String(n + 2),
     [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath',
     [`GIT_CONFIG_VALUE_${n}`]: '/dev/null',
+    [`GIT_CONFIG_KEY_${n + 1}`]: 'core.fsmonitor',
+    [`GIT_CONFIG_VALUE_${n + 1}`]: 'false',
   }
 }
 
