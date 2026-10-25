@@ -18,7 +18,7 @@ cc-orq runs other coding agents on your machine, so these are in scope:
 
 - a `cc-orq:task`, or a `delegate` or `answer` call, that runs with a broader
   runtime or interaction mode than the parent session's permission ceiling allows;
-- a `cc-orq:task` or `delegate` whose requested `cwd`, or the git checkout that
+- a `cc-orq:task`, `delegate` or `answer` whose requested `cwd`, or the git checkout that
   holds it, lies outside the session's directory and its `allowedRoots`, and still
   runs;
 - a secret from an instance's `env`, or from a job's stderr, written to disk or

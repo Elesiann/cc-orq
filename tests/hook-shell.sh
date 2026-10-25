@@ -23,6 +23,7 @@ PASS=0; FAIL=0; RUNS=0; DECISIONS=0
 
 ok() { PASS=$((PASS+1)); echo "ok: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
+now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 
 # Every run is held to the rule that no branch prints a permission decision: it would approve the call.
 no_decision() {
@@ -121,7 +122,7 @@ sys.exit(0 if json.loads(out)["hookSpecificOutput"]["updatedInput"] == {"prompt"
 # The hook cannot read its input: exit 2 blocks the call, and a one-line reason goes to stderr.
 blocked() { # name hook_input_text
   run_hook "$2"
-  if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && [ "$(wc -l < "$T/err")" = 1 ] && grep -q '^cc-orq: ' "$T/err"; then ok "$1"; else bad "$1 (exit $(cat "$T/code"), out: $(head -c 200 "$T/out"), err: $(head -c 200 "$T/err"))"; fi
+  if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && [ "$(wc -l < "$T/err")" -eq 1 ] && grep -q '^cc-orq: ' "$T/err"; then ok "$1"; else bad "$1 (exit $(cat "$T/code"), out: $(head -c 200 "$T/out"), err: $(head -c 200 "$T/err"))"; fi
 }
 # permission_mode is present but not a usable mode: the session's limit would be lost, so the call is blocked.
 blocked blocks-an-empty-permission_mode "{\"permission_mode\":\"\",\"tool_input\":$FORGED}"
@@ -155,13 +156,13 @@ tail = b"\"}}"
 sys.stdout.buffer.write(head + b"x" * (8 * 1024 * 1024 - len(head) - len(tail)) + tail)' > "$T/exact-8-mib.json"
 set +e; bash "$HOOK" < "$T/exact-8-mib.json" > "$T/out" 2> "$T/err"; echo $? > "$T/code"; set -e
 no_decision "the run on exactly 8 MiB"
-if [ "$(wc -c < "$T/exact-8-mib.json")" = 8388608 ] && [ "$(cat "$T/code")" = 0 ] && check 'import json
+if [ "$(wc -c < "$T/exact-8-mib.json")" -eq 8388608 ] && [ "$(cat "$T/code")" = 0 ] && check 'import json
 got = json.loads(out)["hookSpecificOutput"]["updatedInput"]
 sys.exit(0 if len(got["prompt"]) > 8000000 and got["sessionMode"] == "auto" else 1)'; then ok reads-exactly-8-MiB; else bad "reads-exactly-8-MiB (exit $(cat "$T/code"))"; fi
 printf ' ' >> "$T/exact-8-mib.json"
 set +e; bash "$HOOK" < "$T/exact-8-mib.json" > "$T/out" 2> "$T/err"; echo $? > "$T/code"; set -e
 no_decision "the run on 8 MiB and a byte"
-if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && [ "$(wc -l < "$T/err")" = 1 ] && grep -q 'the input is over 8 MiB' "$T/err"; then ok blocks-8-MiB-and-a-byte; else bad "blocks-8-MiB-and-a-byte (exit $(cat "$T/code"), err: $(head -c 200 "$T/err"))"; fi
+if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && [ "$(wc -l < "$T/err")" -eq 1 ] && grep -q 'the input is over 8 MiB' "$T/err"; then ok blocks-8-MiB-and-a-byte; else bad "blocks-8-MiB-and-a-byte (exit $(cat "$T/code"), err: $(head -c 200 "$T/err"))"; fi
 set +e; head -c 20000000 /dev/zero | bash "$HOOK" > "$T/out" 2> "$T/err"; echo $? > "$T/code"; set -e
 no_decision "the run on 20 MB of zeros"
 if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && grep -q 'the input is over 8 MiB' "$T/err"; then ok blocks-20-MB-without-reading-it-all; else bad "blocks-20-MB-without-reading-it-all (exit $(cat "$T/code"))"; fi
@@ -191,9 +192,9 @@ set -e
 if [ "$code" = 0 ] && [ ! -e "$T/marker" ] && check 'import json
 sys.exit(0 if json.loads(out)["hookSpecificOutput"]["updatedInput"]["sessionMode"] == "auto" else 1)'; then ok runs-python-isolated; else bad "runs-python-isolated (exit $code, planted module loaded: $([ -e "$T/marker" ] && echo yes || echo no))"; fi
 
-start=$(date +%s%N)
+start=$(now_ns)
 for _ in 1 2 3 4 5; do printf '%s' "$(input '"auto"' "$PLAIN")" | bash "$HOOK" > /dev/null; done
-elapsed_ms=$(( ($(date +%s%N) - start) / 5000000 ))
+elapsed_ms=$(( ($(now_ns) - start) / 5000000 ))
 if [ "$elapsed_ms" -lt 500 ]; then ok "runs-quickly (${elapsed_ms} ms a run)"; else bad "runs-quickly (${elapsed_ms} ms a run)"; fi
 
 wait "$STALL_RUN"
@@ -202,7 +203,7 @@ STALL_WRITER=
 seconds=$(cat "$T/stall-seconds")
 cp "$T/stall-out" "$T/out"; cp "$T/stall-err" "$T/err"
 no_decision "the run on a stdin that never ends"
-if [ "$(cat "$T/stall-code")" = 2 ] && [ ! -s "$T/stall-out" ] && [ "$(wc -l < "$T/stall-err")" = 1 ] && grep -q 'it did not finish within 20 s' "$T/stall-err" && [ "$seconds" -ge 19 ] && [ "$seconds" -le 27 ]; then ok "gives-up-on-a-stalled-input-after-20-s (${seconds} s)"; else bad "gives-up-on-a-stalled-input-after-20-s (exit $(cat "$T/stall-code"), ${seconds} s, err: $(head -c 200 "$T/stall-err"))"; fi
+if [ "$(cat "$T/stall-code")" = 2 ] && [ ! -s "$T/stall-out" ] && [ "$(wc -l < "$T/stall-err")" -eq 1 ] && grep -q 'it did not finish within 20 s' "$T/stall-err" && [ "$seconds" -ge 19 ] && [ "$seconds" -le 27 ]; then ok "gives-up-on-a-stalled-input-after-20-s (${seconds} s)"; else bad "gives-up-on-a-stalled-input-after-20-s (exit $(cat "$T/stall-code"), ${seconds} s, err: $(head -c 200 "$T/stall-err"))"; fi
 
 if [ "$DECISIONS" -eq 0 ]; then ok "never-prints-a-permission-decision (in $RUNS runs of every branch)"; fi
 

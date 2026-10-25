@@ -183,8 +183,8 @@ answer, and `cancel` and `launch` print one line.
 
 ### `/orq list`
 
-Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed` and `cwd`.
-Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
+Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed`, `origin` and
+`cwd`. Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
 `cancelled`. A `waiting` job has a non-blank `question.txt`, its supervisor is still
 running, and it waits for an answer (see [Child questions](#child-questions)). An `interrupted` job has no `exit` file and no
 live supervisor. A finished job keeps the elapsed time it had when its `exit` file
@@ -192,6 +192,22 @@ was written.
 
 ```
 /orq list
+```
+
+The `origin` column says where a job came from. A job that continues another one
+records that job's id as `parent` in its `meta.json`, and its origin is `↳`
+followed by that id. Any other job shows `delegate` when the `delegate` tool started
+it (kind `mcp`), `agent` when the `cc-orq:task` agent did (kind `task`), and
+`manual` otherwise, which includes `/orq launch`. A `parent` that is not a safe job
+id is ignored, and the job shows the origin of its kind. Here is a list with a
+continuation, the delegate job it continues, an agent job and a manual job:
+
+```
+id                                  kind    status   elapsed  origin                               cwd
+mcp-1760000300000-3f9a2c1d-r7s1b4   mcp     running  40s      ↳ mcp-1760000100000-3f9a2c1d-k3j9x2  /home/me/repo
+mcp-1760000100000-3f9a2c1d-k3j9x2   mcp     done     2m       delegate                             /home/me/repo
+task-1760000000000-a1b2c3d4-q9w8e7  task    done     6m       agent                                /home/me/repo
+manual-1759999000000-manual-z5x4c3  manual  failed   12m05s   manual                               /home/me/repo
 ```
 
 ### `/orq result JOB_ID`
@@ -391,7 +407,7 @@ interaction `default`, and the debug log says
 `orq: ceiling for AGENT_ID: no permission mode captured at spawn`. The session's
 last `cc-orq:task` mode and `permissions.defaultMode` in settings never raise it.
 
-The `delegate` tool reads the mode from its `sessionMode` field. A `PreToolUse`
+The `delegate` and `answer` tools read the mode from their `sessionMode` field. A `PreToolUse`
 hook, `scripts/session-mode-hook.sh`, fills the field from the session and
 replaces whatever the model wrote there. Claude Code drops input keys that a
 tool's schema does not name, so `sessionMode` is in the schema of `delegate` and
@@ -1193,7 +1209,8 @@ the end of the session as the card's does.
 - A running or waiting job has a `cancel` button. It asks the supervisor to stop
   the job, as `/orq cancel` does.
 - Pressing a job's row selects it. The pane then shows the last 30 rendered lines
-  of that job's `events.jsonl`, read from its last 32 KB.
+  of that job's `events.jsonl`, read from its last 32 KB. For a continuation, a line
+  under the job's id names the job it continues: `↳ continues PARENT_ID`.
 - `show <id>` selects a job and opens the pane. `cancel <id>` cancels a running
   or waiting job without opening the pane.
 
@@ -1284,7 +1301,7 @@ for both the kind and the agent suffix, for example
 | --- | --- | --- |
 | `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` or `answer` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`; a continuation adds `parent`, the job whose question it answers. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
-| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
+| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable, `python-setsid` when there is no `setsid` either, as on macOS. |
 | `child.log` | start script | The supervisor's own stdout and stderr. It is empty for a job that ended without leftovers. A line says that the sweep ended processes the CLI left behind, or that OpenCode did not end on SIGINT. |
 | `pgid` | `supervise.sh` | The supervisor's pid. The supervisor leads its process group, so this is also the group id. |
 | `cli.pid` | `supervise.sh` | An OpenCode job only: the pid of the OpenCode client, which a cancel sends SIGINT to. |
@@ -1421,7 +1438,8 @@ flowchart LR
    subagent: the mod answers each of its steps itself.
 3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
    task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
-   detached under `systemd-run` or `setsid`. The supervisor runs the provider
+   detached under `systemd-run`, `setsid`, or `python3` where there is no
+   `setsid`. The supervisor runs the provider
    CLI, writes its events and final message, and ends the process group when
    a `cancel` file appears, in the order that `/orq cancel` describes. An
    OpenCode job passes `--standalone`, so it runs on a private OpenCode server
@@ -1447,9 +1465,19 @@ serves `tasks/get`, `tasks/update` and `tasks/cancel` through a task source;
 `server/job-tasks.ts` is the source for `delegate`, which creates the task, keeps
 `.tasks/ID/task.json` and derives the state from the job directory. The session's permission mode reaches it through the `PreToolUse` hook
 in `scripts/session-mode-hook.sh`, which `hooks/hooks.json` runs before
-`delegate` and `capabilities`.
+`delegate`, `answer` and `capabilities`.
 `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane from the job
 directories.
+
+`server/protocol.ts` is also tested without any job. `tests/conformance/` serves
+the fixtures of the MCP conformance suite over HTTP through it, and CI runs the
+suite's ten tasks scenarios by name: nine pass (`tasks-lifecycle`,
+`tasks-capability-negotiation`, `tasks-wire-fields`,
+`tasks-request-state-removal`, `tasks-mrtr-input`, `tasks-request-headers`,
+`tasks-dispatch-and-envelope`, `tasks-required-task-error` and
+`tasks-mrtr-composition`), and the suite skips `tasks-status-notifications`
+itself. The product serves stdio only; see [CONTRIBUTING.md](CONTRIBUTING.md) to
+run it.
 
 ## Upgrading from 0.1
 
@@ -1495,7 +1523,7 @@ habits.
 | `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
 | `delegate` answers `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied` | The request is above the ceiling, and the client could not ask you in a form or you declined it. The message names the limit in the way: raise that `ceiling` field in `~/.config/orq/config.json`, or run the session in a mode that allows it. See [Permission ceiling](#permission-ceiling) |
 | A task reads `working` with `starting after your approval` and nothing runs | The server stopped between your answer and the start of the job. Stop the task with `x` in `/tasks` |
-| A call to `delegate` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
+| A call to `delegate`, `answer` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
 | `answer` answers `already_answered` | The question has a continuation: read the job the message names with `status` |
 | `answer` answers `resume_unavailable` | The worker cannot be resumed, and the message says why. Delegate again with the brief and the answer |

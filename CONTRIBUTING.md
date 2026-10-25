@@ -42,7 +42,7 @@ node tests/conformance/run.mjs # the tasks scenarios of the MCP conformance suit
 `npm test` also checks the relative links and anchors of every tracked Markdown
 file, through `scripts/check-links.mjs`. Run it alone with `npm run check:links`.
 
-CI runs `npm ci`, the vendor check, `npm test`, the six shell suites, and
+CI runs `npm ci`, the vendor check, `npm test`, the shell suites, and
 `shellcheck` on the live harness scripts, and in a job of its own the conformance
 suite. It also runs the suites on `macos-latest`, which is experimental. The other
 checks need a logged-in Claude Code CLI, so run them locally.

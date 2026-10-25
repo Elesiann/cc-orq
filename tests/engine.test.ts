@@ -393,7 +393,7 @@ test('list shows the newest jobs with running, cancelling, done, failed and canc
   const text = (await orq($, 'list'))
   const lines = text.split('\n')
   expect(lines.length).toBe(6)
-  expect(lines[0]).toMatch(/^id\s+kind\s+status\s+elapsed\s+cwd$/)
+  expect(lines[0]).toMatch(/^id\s+kind\s+status\s+elapsed\s+origin\s+cwd$/)
   const statusOf = (id: string) => lines.find((l) => l.startsWith(id))?.split(/\s+/)[2]
   expect(lines.map((l) => l.split(/\s+/)[0])).toEqual([
     'id',
@@ -417,7 +417,7 @@ test('list reads a job whose meta.json has only the required fields', async ($, 
   stubs(on, s)
   await start($)
   const lines = (await orq($, 'list')).split('\n')
-  expect(lines[1]?.split(/\s+/)).toEqual(['job-min', 'manual', 'running', '0s', '/w'])
+  expect(lines[1]?.split(/\s+/)).toEqual(['job-min', 'manual', 'running', '0s', 'manual', '/w'])
 })
 
 test('list shows a job without exit and a gone supervisor as interrupted, and a live one as running', async ($, on) => {
@@ -433,9 +433,68 @@ test('list shows a job without exit and a gone supervisor as interrupted, and a 
   await start($)
   const lines = (await orq($, 'list')).split('\n')
   const rowOf = (id: string) => lines.find((l) => l.startsWith(id))?.split(/\s+/)
-  expect(rowOf('job-gone')).toEqual(['job-gone', 'manual', 'interrupted', '—', '/work'])
-  expect(rowOf('job-live')).toEqual(['job-live', 'manual', 'running', '10m', '/work'])
+  expect(rowOf('job-gone')).toEqual(['job-gone', 'manual', 'interrupted', '—', 'manual', '/work'])
+  expect(rowOf('job-live')).toEqual(['job-live', 'manual', 'running', '10m', 'manual', '/work'])
   expect(s.livenessScripts.some((sc) => sc.includes(`${JOBS}/job-gone/pgid`))).toBe(true)
+})
+
+// Cells of one list row. They are two or more spaces apart, so the one space inside `↳ PARENT_ID` stays in its cell.
+function listCells(listText: string, id: string): string[] | undefined {
+  return listText.split('\n').find((l) => l.startsWith(`${id} `))?.split(/ {2,}/)
+}
+
+const ORIGIN_CELL = 4
+
+test('list names the parent of a continuation in the origin column', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-parent', kind: 'dir' },
+    { name: 'job-child', kind: 'dir' },
+  ]
+  seedJob(s, 'job-parent', { kind: 'mcp' }, 4000000)
+  seedJob(s, 'job-child', { kind: 'mcp', parent: 'job-parent' }, 4300000)
+  stubs(on, s)
+  await start($)
+  const list = await orq($, 'list')
+  expect(listCells(list, 'job-child')).toEqual(['job-child', 'mcp', 'running', '5m', '↳ job-parent', '/work'])
+  expect(listCells(list, 'job-parent')?.[ORIGIN_CELL]).toBe('delegate')
+})
+
+test('list names where a job came from by its kind: delegate, agent or manual', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-mcp', kind: 'dir' },
+    { name: 'job-task', kind: 'dir' },
+    { name: 'job-manual', kind: 'dir' },
+    { name: 'job-other', kind: 'dir' },
+  ]
+  seedJob(s, 'job-mcp', { kind: 'mcp' }, 4000000)
+  seedJob(s, 'job-task', { kind: 'task' }, 4100000)
+  seedJob(s, 'job-manual', { kind: 'manual' }, 4200000)
+  seedJob(s, 'job-other', { kind: 'unlisted' }, 4300000)
+  stubs(on, s)
+  await start($)
+  const list = await orq($, 'list')
+  expect(listCells(list, 'job-mcp')?.[ORIGIN_CELL]).toBe('delegate')
+  expect(listCells(list, 'job-task')?.[ORIGIN_CELL]).toBe('agent')
+  expect(listCells(list, 'job-manual')?.[ORIGIN_CELL]).toBe('manual')
+  expect(listCells(list, 'job-other')?.[ORIGIN_CELL]).toBe('manual')
+})
+
+test('list shows the kind when parent is not a safe job id', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: 'job-escape', kind: 'dir' },
+    { name: 'job-number', kind: 'dir' },
+  ]
+  seedJob(s, 'job-escape', { kind: 'mcp', parent: '../outside' }, 4000000)
+  seedJob(s, 'job-number', { kind: 'task', parent: 7 }, 4100000)
+  stubs(on, s)
+  await start($)
+  const list = await orq($, 'list')
+  expect(listCells(list, 'job-escape')?.[ORIGIN_CELL]).toBe('delegate')
+  expect(listCells(list, 'job-number')?.[ORIGIN_CELL]).toBe('agent')
+  expect(list.includes('↳')).toBe(false)
 })
 
 test('a finished job keeps the duration of its exit file however late list runs', async ($, on) => {
@@ -719,7 +778,7 @@ test('shell words, footer, duration, job ids and redaction keep their contracts'
   expect(isSafeJobId('manual-1-a1b2c3d4-xyz')).toBe(true)
   expect(isSafeJobId('../evil')).toBe(false)
   expect(isSafeJobId('a/b')).toBe(false)
-  expect(renderTable([{ id: 'a', kind: 'manual', status: 'running', elapsed: '6m', cwd: '/work' }])).toContain('running')
+  expect(renderTable([{ id: 'a', kind: 'manual', status: 'running', elapsed: '6m', origin: 'manual', cwd: '/work' }])).toContain('running')
   const prose = 'exit 1: command not found: codex\nno credentials here, just words'
   expect(redactSecrets(prose)).toBe(prose)
   expect(failureSnippet(Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n')).split('\n').length).toBe(20)

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -125,7 +125,10 @@ test('catalog.py retries opencode models once after a failed run', () => {
   assert.equal(new Set(ids).size, 2, 'each call has a probe id of its own')
 })
 
-test('catalog.py ends what an opencode models call leaves running, and nothing else', async () => {
+const hasSetsid = spawnSync('sh', ['-c', 'command -v setsid']).status === 0
+const sweepsHere = { skip: !(existsSync('/proc/self') && hasSetsid) && 'the sweep needs /proc, and the leftover is started with setsid' }
+
+test('catalog.py ends what an opencode models call leaves running, and nothing else', sweepsHere, async () => {
   const bystander = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' })
   const dir = mkdtempSync(join(tmpdir(), 'orq-leftover-'))
   const pidFile = join(dir, 'leftover.pid')

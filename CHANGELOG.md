@@ -82,8 +82,8 @@ All notable changes to cc-orq are recorded here. The format follows
   (default `approval-required`) limits a task with `isolation: shared`, and
   `interaction` (default `default`) limits the interaction mode. A value that is
   not valid counts as the narrowest mode, and `capabilities` reports it.
-- A `PreToolUse` hook, `scripts/session-mode-hook.sh`, gives `delegate` and
-  `capabilities` the session's permission mode as `sessionMode`, over any value
+- A `PreToolUse` hook, `scripts/session-mode-hook.sh`, gives `delegate`,
+  `answer` and `capabilities` the session's permission mode as `sessionMode`, over any value
   the model wrote there. It returns the changed input and never a permission
   decision. It blocks the call when it has no `python3`, cannot read its input,
   or finds a `permission_mode` that is empty or not text, since a call let
@@ -121,6 +121,22 @@ All notable changes to cc-orq are recorded here. The format follows
   stderr. The README says what the opt-in risks: a worker that can write the
   checkout's shared git directory, or a hooks path in the work tree, decides what
   runs. Any other value, and the default, run no hook.
+- A conformance job for the task layer. `tests/conformance/` serves the seven
+  fixtures of the MCP conformance suite (`greet`, `slow_compute`, `failing_job`,
+  `protocol_error_job`, `confirm_delete`, `multi_input` and `test_tool_with_task`)
+  over a test-only HTTP entry, through `server/protocol.ts`, and CI runs each of
+  the suite's ten tasks scenarios by name, at commit c37eec8. Nine pass, with
+  44 checks, and `tasks-status-notifications` is skipped by the suite itself,
+  because its harness reads the SSE of `tools/call` where the spec has
+  `subscriptions/listen`. `--requirements 2026-07-28` is not the gate, since it
+  lists these scenarios as `not_scored`. The product still serves stdio only.
+
+- macOS, experimental. CI runs the test suites on `macos-latest` as well as
+  `ubuntu-latest`. Where `setsid` is missing, as on macOS, the start script runs
+  the supervisor through `python3` with `os.setsid()`, and the job's `scope`
+  file says `python-setsid`. The supervisor runs under bash 3.2. The sweep
+  needs `/proc`, so it ends nothing on macOS, and a cancel still ends the
+  process group. Nobody has run a job with a real CLI there.
 
 - The tool `answer` answers the question of a worker that stopped on one. The same
   worker resumes its own session in a new job, in the same directory, worktree
@@ -181,8 +197,8 @@ All notable changes to cc-orq are recorded here. The format follows
 - The working-directory check resolves a path with `fs.stat` instead of the
   GNU-only `realpath -e` and `-m`. An `allowedRoots` entry that does not exist
   is no longer listed among the roots of a refusal. It admitted nothing before
-  either. The check folds each `..` into the path's text before it follows a
-  symlink, as `cd -L` does, so `link/..` names the parent of the link. A `..`
+  either. In the MCP server, the check folds each `..` into the path's text before it
+  follows a symlink, as `cd -L` does, so `link/..` names the parent of the link. A `..`
   right after a symlink or after a missing directory resolves by text, in a `cwd`
   and in an `allowedRoots` entry.
 - A cancel no longer waits out the 5 seconds when the CLI ends sooner. Once the
@@ -195,6 +211,12 @@ All notable changes to cc-orq are recorded here. The format follows
   run programs in any later git command there, `integrate` and your own `git`
   commands included, so untrusted workers belong in modes that cannot write
   outside their worktree.
+- `/orq list` has an `origin` column between `elapsed` and `cwd`, so `cwd` is now
+  the sixth column. A job that continues another one, and records that job's id
+  as `parent` in its `meta.json`, shows `↳` and that id. Any other job shows
+  `delegate` (kind `mcp`), `agent` (kind `task`) or `manual`. A `parent` that is
+  not a safe job id is ignored. In `/orq-panel`, the detail of a selected
+  continuation names its parent on a line under the job's id.
 
 ### Fixed
 

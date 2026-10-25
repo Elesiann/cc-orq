@@ -31,7 +31,7 @@ type State = {
   /** When set, storing an agent's run record throws. */
   runStoreFails: boolean
   settingsMode: string | undefined
-  /** realpath results for paths that are not their own resolution (symlinks). */
+  /** The realPath fs.stat answers for paths that are not their own resolution (symlinks). */
   realpaths: Record<string, string>
   allowedRoots: string[]
   /** The `ceiling` of the config file; the file has none when unset. */
@@ -160,15 +160,10 @@ function stubs(on: any, s: State) {
   on('fs.stat', (_$: unknown, e: any) => {
     if (s.statMissing) throw new Error(`ENOENT: ${e.path}`)
     if (s.missingInHead && String(e.path).includes('-wt/')) throw new Error(`ENOENT: ${e.path}`)
-    return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: false } }
+    return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: false, realPath: s.realpaths[e.path] ?? e.path } }
   })
   on('process.run', (_$: unknown, e: any) => {
     const argv: string[] = e.argv
-    if (argv[0] === 'realpath') {
-      const path = argv[argv.length - 1] ?? ''
-      if (argv[1] === '-e' && s.statMissing) return run(1)
-      return run(0, `${s.realpaths[path] ?? path}\n`)
-    }
     if (argv[0] === 'python3') return run(0, JSON.stringify(s.summary) + '\n')
     if (argv[0] === 'git') {
       s.gitCalls.push(argv)
