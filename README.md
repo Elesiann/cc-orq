@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Elesiann/cc-orq/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-orq/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Claude Code 2.1.306](https://img.shields.io/badge/Claude%20Code-2.1.306-d97757)
+![Claude Code 2.1.310](https://img.shields.io/badge/Claude%20Code-2.1.310-d97757)
 ![Linux](https://img.shields.io/badge/platform-Linux-555)
 
 **Hand tasks from Claude Code to Codex, OpenCode or another Claude, and watch
@@ -72,8 +72,8 @@ ceiling, and its answer comes back to the conversation when it ends.
 
 | | Version | Why |
 | --- | --- | --- |
-| [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.306 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
-| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. The server tells you on stderr when `node` is older |
+| [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
+| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `status`, `list`, `cancel` and `integrate` are gone |
 | Linux | | Jobs run under `systemd-run` or `setsid` |
 | `bash`, `python3`, `git` | | The supervisor, the event extractor and worktrees |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
@@ -838,7 +838,7 @@ directories.
 | You see | Do this |
 | --- | --- |
 | `/orq`, the task card or `mcp__cc-orq__wait` are missing | Check that your Claude Code is 2.1.287 or newer, that your organization has not turned mods off, and that `cc-orq` is enabled in `/plugin`, then run `/reload-plugins` |
-| The `mcp__plugin_cc-orq_orq__*` tools are missing, or `/mcp` shows `plugin:cc-orq:orq` as failed | Check that `cc-orq` is enabled in `/plugin`. The server writes the reason to stderr, which `/mcp` shows: `the orq server needs Node 22.18 or newer` means the `node` on your PATH is older |
+| The `mcp__plugin_cc-orq_orq__*` tools are missing, or `/mcp` shows `plugin:cc-orq:orq` as failed | Check that `cc-orq` is enabled in `/plugin`. The server writes the reason for a failed start to stderr: `the orq server needs Node 22.18 or newer` means the `node` on your PATH is older; `node --version` shows which one Claude Code finds |
 | `capabilities` lists no providers, or misses one | Run the provider CLI once in a shell and log in. The debug log (`claude --debug-file`) gives the probe's reason |
 | `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |

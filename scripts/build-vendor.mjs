@@ -139,6 +139,15 @@ async function bundle() {
   return { text, packages }
 }
 
+/** The lines NOTICE keeps under a "NAME VERSION:" header, up to the next such header; null when the header is missing. */
+function noticeSection(notice, header) {
+  const lines = notice.split('\n')
+  const start = lines.indexOf(header)
+  if (start < 0) return null
+  const next = lines.findIndex((line, i) => i > start && /^\S.* \d[\w.-]*:$/.test(line))
+  return lines.slice(start + 1, next < 0 ? undefined : next).join('\n')
+}
+
 /** What NOTICE lacks for the bundled packages; empty when it names them all and carries every license text. */
 function noticeGaps(packages, notice) {
   const gaps = []
@@ -148,7 +157,15 @@ function noticeGaps(packages, notice) {
       gaps.push(`NOTICE has no "- ${p.name} ${p.version} (${p.license}...)" line`)
     }
     const installed = readPackage(p.name)
-    if (installed === null) continue
+    if (installed === null) {
+      const section = noticeSection(notice, `${p.name} ${p.version}:`)
+      const marker = LICENSE_MARKERS[p.license]
+      if (section === null) gaps.push(`NOTICE has no "${p.name} ${p.version}:" section with its license text`)
+      else if (marker !== undefined && !squash(section).includes(squash(marker))) {
+        gaps.push(`NOTICE's "${p.name} ${p.version}:" section does not carry the ${p.license} text`)
+      }
+      continue
+    }
     for (const file of readdirSync(installed.dir).filter((name) => /^(?:LICENSE|LICENCE|NOTICE)(?:\.|$)/i.test(name))) {
       if (!squash(notice).includes(squash(readFileSync(join(installed.dir, file), 'utf8')))) {
         gaps.push(`NOTICE does not carry node_modules/${p.name}/${file}`)

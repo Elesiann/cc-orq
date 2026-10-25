@@ -254,6 +254,16 @@ const LEGACY_INIT = {
   clientInfo: { name: 'server-stdio-test', version: '0' },
 }
 
+test('the plugin manifest starts this server with node through the JavaScript entry', () => {
+  const manifest = JSON.parse(readFileSync(join(REPO, '.claude-plugin', 'plugin.json'), 'utf8'))
+  const orq = manifest.mcpServers?.orq
+  assert.equal(orq?.command, 'node')
+  assert.equal(orq.args.length, 1)
+  const entry = orq.args[0].replace('${CLAUDE_PLUGIN_ROOT}', REPO)
+  assert.equal(entry, MAIN, 'the manifest must start server/main.mjs, which refuses an old Node with a reason')
+  assert.ok(existsSync(entry))
+})
+
 test('server/discover answers the tools capability, the tasks extension and the instructions', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())

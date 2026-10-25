@@ -26,7 +26,7 @@ All notable changes to cc-orq are recorded here. The format follows
   keeps its name.
 - **Breaking:** Node 22.18 or newer must be on the `PATH`. The server writes
   `the orq server needs Node 22.18 or newer` to stderr and exits when it is
-  older, and `/mcp` shows the failure.
+  older; the `cc-orq:task` agent keeps working, without the server's tools.
 - `capabilities` answers `approval-required` and `default` as `runtimeMode` and
   `interactionMode`, because the server does not know the permission mode of
   the session. The mod used to read it.
