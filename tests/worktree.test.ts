@@ -5,7 +5,6 @@ import { parseJobMeta } from '../hooks/types.ts'
 import {
   branchDeleteArgv,
   branchFor,
-  busyJob,
   isAncestorArgv,
   mergeAbortArgv,
   mergeArgv,
@@ -17,7 +16,6 @@ import {
   worktreeAddArgv,
   worktreePathFor,
   worktreeRemoveArgv,
-  type JobPlace,
 } from '../hooks/worktree.ts'
 
 const JOBS = '/srv/example/jobs'
@@ -74,20 +72,6 @@ test('ff-only and merge differ only in their flags, and neither forces', () => {
   for (const strategy of ['ff-only', 'merge'] as const) {
     expect(mergeArgv(CHECKOUT, `orq/${TASK}`, strategy).includes('--force')).toBe(false)
   }
-})
-
-test('a live job is busy for the checkout it runs in or is a worktree of, and only that one', () => {
-  const worktree = `${CHECKOUT}-wt/${TASK}`
-  const jobs: JobPlace[] = [
-    { id: 'job-dead', cwd: CHECKOUT, live: false },
-    { id: 'job-elsewhere', cwd: SESSION, repo: '/srv/example/other', live: true },
-    { id: 'job-cwd', cwd: CHECKOUT, live: true },
-    { id: 'job-wt', cwd: worktree, repo: CHECKOUT, live: true },
-  ]
-  expect(busyJob(jobs, CHECKOUT)).toBe('job-cwd')
-  expect(busyJob(jobs.slice(0, 2), CHECKOUT)).toBe(null)
-  expect(busyJob([{ id: 'job-wt', cwd: worktree, repo: CHECKOUT, live: true }], CHECKOUT)).toBe('job-wt')
-  expect(busyJob([{ id: 'job-wt', cwd: worktree, repo: CHECKOUT, live: true }], worktree)).toBe('job-wt')
 })
 
 test('the worktree meta fields are read when present and ignored when malformed', () => {
@@ -229,6 +213,9 @@ function stubs(on: any, s: State) {
     }
     if (script.includes('# orq:mkdir')) {
       s.mkdirScripts.push(script)
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (script.includes('# orq:lock')) {
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (script.includes('# orq:start')) {
