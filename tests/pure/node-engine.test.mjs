@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -75,6 +75,26 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer))
 }
 
+const POLL_FILE = `
+const { readFileSync } = require('node:fs')
+const [file, size, ms] = [process.argv[1], Number(process.argv[2]), Number(process.argv[3])]
+const whole = ['A'.repeat(size), 'B'.repeat(size)]
+let reads = 0
+let bad = 0
+for (const until = Date.now() + ms; Date.now() < until; ) {
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    bad += 1
+    continue
+  }
+  reads += 1
+  if (!whole.includes(text)) bad += 1
+}
+process.stdout.write(JSON.stringify({ reads, bad }))
+`
+
 test('stdin text reaches the child, and a child with no stdin reads end of file at once', async () => {
   const $ = nodeEngine({ env: baseEnv() })
   const echo = 'let text = ""; process.stdin.on("data", (d) => { text += d }); process.stdin.on("end", () => process.stdout.write(JSON.stringify(text)))'
@@ -83,6 +103,12 @@ test('stdin text reaches the child, and a child with no stdin reads end of file 
   assert.equal(JSON.parse(fed.stdout), 'héllo\n')
   const empty = await $.process.run([NODE, '-e', echo])
   assert.equal(JSON.parse(empty.stdout), '')
+})
+
+test('a child that exits without reading its stdin is not a failed run, however large the stdin text', async () => {
+  const $ = nodeEngine({ env: baseEnv() })
+  const r = await $.process.run(['true'], { stdin: 'x'.repeat(8 * MiB) })
+  assert.equal(r.exitCode, 0)
 })
 
 test('a relative cwd resolves against the shim cwd, and the default cwd is the shim cwd', async (t) => {
@@ -133,6 +159,23 @@ test('a child still running at the timeout rejects, and its whole process group 
   const gone = await goneWithin(pid, 2000)
   if (!gone) process.kill(pid, 'SIGKILL')
   assert.equal(gone, true, 'the grandchild outlived the killed process group')
+})
+
+test('a child that ignores SIGTERM is killed at the timeout, and run rejects within 2 s of it', async (t) => {
+  const dir = tempDir(t)
+  const pidFile = join(dir, 'pid')
+  const timeoutMs = 1000
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  const script = 'trap "" TERM; echo $$ > "$1"; sleep 30'
+  await assert.rejects(
+    withTimeout($.process.run(['bash', '-c', script, 'bash', pidFile], { timeoutMs }), timeoutMs + 2000),
+    /did not finish within 1000 ms/,
+  )
+  const pid = Number(readFileSync(pidFile, 'utf8'))
+  assert.ok(pid > 0, 'the child recorded its pid before the timeout')
+  const gone = await goneWithin(pid, 2000)
+  if (!gone) process.kill(-pid, 'SIGKILL')
+  assert.equal(gone, true, 'a child that ignores SIGTERM outlived the timeout')
 })
 
 test('a child ended by a signal resolves with exitCode 1, and an ordinary exit keeps its code', async () => {
@@ -263,6 +306,61 @@ test('fs.write creates parent folders, replaces an existing file, and leaves no 
   assert.deepEqual(readdirSync(join(dir, 'a', 'b')), ['note.txt'])
 })
 
+test('fs.write accepts text of exactly 4 MiB, and rejects one byte more with nothing created or changed', async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  await $.fs.write('exact.txt', 'x'.repeat(LIMIT))
+  assert.equal(readFileSync(join(dir, 'exact.txt')).length, LIMIT)
+
+  await $.fs.write('keep.txt', 'old')
+  await assert.rejects($.fs.write('keep.txt', 'x'.repeat(LIMIT + 1)), /larger than 4 MiB/)
+  await assert.rejects($.fs.write('new/folder/over.txt', 'x'.repeat(LIMIT + 1)), /larger than 4 MiB/)
+  assert.equal(readFileSync(join(dir, 'keep.txt'), 'utf8'), 'old')
+  assert.deepEqual(readdirSync(dir).sort(), ['exact.txt', 'keep.txt'], 'a rejected write left a file, a folder or a temporary file')
+})
+
+test('fs.write counts the 4 MiB limit in UTF-8 bytes, not in characters', async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  const euros = '€'.repeat(Math.floor(LIMIT / 3))
+  assert.equal(Buffer.byteLength(euros), LIMIT - 1)
+  await $.fs.write('fits.txt', `${euros}x`)
+  assert.equal(readFileSync(join(dir, 'fits.txt')).length, LIMIT)
+  await assert.rejects($.fs.write('over.txt', `${euros}xx`), /larger than 4 MiB/)
+  assert.equal(existsSync(join(dir, 'over.txt')), false)
+})
+
+test('fs.write replaces a file in one step, so a reader polling it never sees a short or mixed file', { timeout: 3000 }, async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  const first = 'A'.repeat(MiB)
+  const second = 'B'.repeat(MiB)
+  await $.fs.write('state.json', first)
+
+  const reader = spawn(NODE, ['-e', POLL_FILE, join(dir, 'state.json'), String(MiB), '1000'], { stdio: ['ignore', 'pipe', 'inherit'] })
+  t.after(() => reader.kill('SIGKILL'))
+  let stdout = ''
+  reader.stdout.on('data', (chunk) => {
+    stdout += chunk
+  })
+  const readerExit = new Promise((done) => reader.on('close', done))
+  let polling = true
+  readerExit.then(() => {
+    polling = false
+  })
+  let writes = 0
+  while (polling) {
+    await $.fs.write('state.json', writes % 2 === 0 ? second : first)
+    writes += 1
+  }
+
+  assert.equal(await readerExit, 0, 'the polling reader failed')
+  const { reads, bad } = JSON.parse(stdout)
+  assert.ok(reads > 0, 'the reader never read the file')
+  assert.ok(writes > 1, 'the shim wrote the file only once while the reader polled')
+  assert.equal(bad, 0, `${bad} of ${reads} reads saw a short, mixed or missing file during ${writes} writes`)
+})
+
 test('fs.read rejects a missing file and a file over 4 MiB, and reads a file of exactly 4 MiB', async (t) => {
   const dir = tempDir(t)
   const $ = nodeEngine({ cwd: dir, env: baseEnv() })
@@ -343,6 +441,16 @@ test('fs.list reports kinds, a link as other with isLink, and 0 size and mtime f
   assert.deepEqual(byName.folder, { name: 'folder', kind: 'dir', size: 0, mtimeMs: 0, isLink: false })
   assert.deepEqual(byName.link, { name: 'link', kind: 'other', size: 0, mtimeMs: 0, isLink: true })
   assert.equal(Object.keys(byName).length, 3)
+})
+
+test('a FIFO is kind other in fs.stat and in fs.list', async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  assert.equal(spawnSync('mkfifo', [join(dir, 'fifo')]).status, 0)
+  const stat = await $.fs.stat('fifo')
+  assert.equal(stat.kind, 'other')
+  assert.equal(stat.isLink, false)
+  assert.deepEqual(await $.fs.list(), [{ name: 'fifo', kind: 'other', size: 0, mtimeMs: 0, isLink: false }])
 })
 
 test('ui.log writes its line to stderr and nothing to stdout', async () => {
