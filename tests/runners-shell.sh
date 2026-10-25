@@ -62,7 +62,7 @@ cat > "$BIN/hold" <<'EOF'
 import ctypes, os, signal, sys, time
 name, seconds, ends_on = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
 dump = os.environ['ARGV_DUMP']
-if os.environ.get('HOLD_COMM'):
+if os.environ.get('HOLD_COMM') and sys.platform == 'linux':
     ctypes.CDLL(None).prctl(15, os.environ['HOLD_COMM'].encode(), 0, 0, 0)
 def ends(word, number):
     def on_signal(*_):
@@ -118,6 +118,21 @@ EOF
 chmod +x "$BIN"/codex "$BIN"/opencode "$BIN"/agy "$BIN"/claude "$BIN"/hold "$BIN"/slow-stop "$BIN"/deaf
 export BIN PATH="$BIN:$PATH" ARGV_DUMP="$DUMP"
 
+# macOS has no timeout and no setsid. These stand in for them, and Linux uses neither.
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+if ! command -v setsid >/dev/null 2>&1; then
+  cat > "$BIN/setsid" <<'SHIM'
+#!/usr/bin/env python3
+import os, sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+SHIM
+  chmod +x "$BIN/setsid"
+fi
+now_ns() { python3 -c 'import time; print(time.time_ns())'; }
+# macOS has no /proc, which the sweep reads, so the sweep's checks run only where /proc exists.
+if [ -d /proc/self ]; then SWEEPS=yes; else SWEEPS=no; echo "skip: the sweep checks, because this machine has no /proc"; fi
+
 # run_job <name> <runner> <model> <effort> <sandbox> <prompt> [flags...]
 # leaves job dir in $JOB.
 run_job() {
@@ -147,7 +162,7 @@ expect_file() {
 # dead PID: the process is gone, or is only a zombie that its parent has not collected.
 dead() {
   local state
-  state=$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1)
+  state=$(ps -o stat= -p "$1" 2>/dev/null | cut -c1)
   [ -z "$state" ] || [ "$state" = Z ]
 }
 await_dead() {
@@ -233,8 +248,10 @@ printf 'leave one behind' > "$LJOB/prompt.txt"
 CLAUDE_LEFTOVER=1 ORQ_JOB_DIR="$LJOB" timeout 60 bash "$ROOT/scripts/supervise.sh" "$LJOB" claude "$T/work" m '' '' > "$LJOB/child.log" 2>&1
 expect_file "$LJOB/exit" 0 leftover-exit
 expect_file "$LJOB/last.txt" FAKE-CLAUDE leftover-last
-expect_file "$LJOB/child.log" 'orq: ended 1 process that carried ORQ_JOB_DIR' leftover-reported
-if await_dead "$(cat "$DUMP/claude.leftover")"; then ok leftover-ended; else bad leftover-ended; fi
+if [ "$SWEEPS" = yes ]; then
+  expect_file "$LJOB/child.log" 'orq: ended 1 process that carried ORQ_JOB_DIR' leftover-reported
+  if await_dead "$(cat "$DUMP/claude.leftover")"; then ok leftover-ended; else bad leftover-ended; fi
+fi
 if dead "$(cat "$T/bystander.pid")"; then bad leftover-spares-unmarked; else ok leftover-spares-unmarked; fi
 if dead "$(cat "$T/other-job.pid")"; then bad leftover-spares-other-job; else ok leftover-spares-other-job; fi
 kill -KILL "$(cat "$T/bystander.pid")" "$(cat "$T/other-job.pid")" 2>/dev/null || true
@@ -297,23 +314,23 @@ cancel_scenario() {
   sup=$!
   for i in $(seq 1 100); do [ -s "$job/pgid" ] && [ -e "$d/$runner.ready" ] && break; sleep 0.1; done
   sleep 1
-  t0=$(date +%s%N)
+  t0=$(now_ns)
   echo cancelled > "$job/cancel"
   for i in $(seq 1 1250); do [ -e "$job/exit" ] && break; sleep 0.02; done
   if [ -s "$d/$runner.leftover" ]; then if dead "$(cat "$d/$runner.leftover")"; then left=dead; else left=alive; fi; fi
-  t1=$(date +%s%N)
+  t1=$(now_ns)
   if [ -s "$d/$runner.straggler" ]; then
     sp=$(cat "$d/$runner.straggler")
     straggler=never
     for i in $(seq 1 100); do
-      if dead "$sp"; then straggler=$(( ($(date +%s%N) - t1) / 1000000 )); break; fi
+      if dead "$sp"; then straggler=$(( ($(now_ns) - t1) / 1000000 )); break; fi
       sleep 0.02
     done
   fi
   pgid=$(cat "$job/pgid")
   for i in $(seq 1 100); do pgrep -g "$pgid" >/dev/null 2>&1 || break; sleep 0.05; done
-  group=$( (pgrep -g "$pgid" 2>/dev/null || true) | wc -l)
-  if [ "$marked" = marked ]; then
+  group=$( (pgrep -g "$pgid" 2>/dev/null || true) | wc -l | tr -d ' ')
+  if [ "$marked" = marked ] && [ "$SWEEPS" = yes ]; then
     marked_left=$( (grep -lazsx "ORQ_JOB_DIR=$job" /proc/[0-9]*/environ 2>/dev/null || true) | sed 's#/proc/\([0-9]*\)/environ#\1#' | while read -r p; do cat "/proc/$p/comm" 2>/dev/null; done | tr '\n' ' ')
   fi
   {
@@ -341,7 +358,7 @@ check_cancel() {
   case "$v" in
     dead) ok "$label-leftover-dead-at-exit" ;;
     none) ;;
-    *) bad "$label-leftover-dead-at-exit (a marked leftover that needs 0.8 s to stop was $v when exit appeared)" ;;
+    *) if [ "$SWEEPS" = yes ]; then bad "$label-leftover-dead-at-exit (a marked leftover that needs 0.8 s to stop was $v when exit appeared)"; fi ;;
   esac
   v=$(res "$name" straggler_ms)
   case "$v" in

@@ -137,7 +137,7 @@ const timed = plainWorktree()
 const overdue = run(`exec python3 '${script}' '${repo}' '${timed}' 0.2`)
 check('a copy past its deadline midway is undone', overdue.status === 1 && overdue.stderr.includes('ran out of time') && !existsSync(`${timed}/big`) && !staged(timed))
 const termed = plainWorktree()
-const term = run(`timeout --preserve-status -s TERM 0.2 python3 '${script}' '${repo}' '${termed}' 60`)
+const term = run(`python3 '${script}' '${repo}' '${termed}' 60 & copy=$!; sleep 0.2; kill -TERM $copy; wait $copy`)
 check('a copy stopped by SIGTERM is undone', term.status === 1 && term.stderr.includes('signal') && !existsSync(`${termed}/big`) && !staged(termed))
 rmSync(`${repo}/big`, { recursive: true, force: true })
 

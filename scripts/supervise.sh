@@ -51,11 +51,11 @@ read_prompt() {
   IFS= read -r -d '' prompt < "$dir/prompt.txt" || :
 }
 
-# $BASHPID, not $$: the runner and the watcher are subshells, and bash keeps $$
-# at the supervisor's pid inside them.
+# write_exit <who> <code>: the main flow and the watcher can write at the same time, so each takes its own
+# temporary file. $BASHPID would tell them apart, but it needs bash 4, and /bin/bash on macOS is 3.2.
 write_exit() {
-  local tmp="$dir/exit.$BASHPID.tmp"
-  printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$dir/exit"
+  local tmp="$dir/exit.$1.tmp"
+  printf '%s\n' "$2" > "$tmp" && mv -f "$tmp" "$dir/exit"
 }
 
 # A CLI can leave a process running outside its process group, such as an MCP server that OpenCode was still
@@ -111,8 +111,9 @@ run_opencode() {
   read_prompt
   # --standalone runs a private server that ends with the job. Without it OpenCode hands the run to
   # its shared background service, which leaves the user's MCP servers running and keeps the
-  # environment it started with.
-  ( echo "$BASHPID" > "$dir/cli.pid"; cd "$cwd" && exec opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
+  # environment it started with. The sh prints its parent, which is this subshell and becomes the client:
+  # $BASHPID needs bash 4, and /bin/bash on macOS is 3.2.
+  ( /bin/sh -c 'echo $PPID' > "$dir/cli.pid"; cd "$cwd" && exec opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
   if [ -e "$dir/cancel" ]; then return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
@@ -198,7 +199,7 @@ case "$runner" in
   opencode) run_cli() { run_opencode; } ;;
   agy) run_cli() { run_agy; } ;;
   claude) run_cli() { run_claude; } ;;
-  *) echo "orq: unknown runner $runner" > "$dir/stderr.txt"; write_exit 3; exit 0 ;;
+  *) echo "orq: unknown runner $runner" > "$dir/stderr.txt"; write_exit main 3; exit 0 ;;
 esac
 
 run_cli > /dev/null 2>&1 &
@@ -212,7 +213,7 @@ child=$!
       kill -TERM -$$ 2>/dev/null
       sleep 5
       sweep_job
-      if [ ! -e "$dir/exit" ]; then write_exit 124; fi
+      if [ ! -e "$dir/exit" ]; then write_exit watcher 124; fi
       kill -KILL -$$ 2>/dev/null
       exit 0
     fi
@@ -230,9 +231,9 @@ stop_watcher
 sweep_job
 if [ -e "$dir/cancel" ]; then
   # The KILL takes the supervisor too, so exit comes first.
-  write_exit 124
+  write_exit main 124
   kill -KILL -$$ 2>/dev/null
 elif [ ! -e "$dir/exit" ]; then
-  write_exit "$code"
+  write_exit main "$code"
 fi
 exit 0
