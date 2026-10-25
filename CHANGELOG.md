@@ -96,8 +96,38 @@ All notable changes to cc-orq are recorded here. The format follows
   stderr. The README says what the opt-in risks: a worker that can write the
   checkout's shared git directory, or a hooks path in the work tree, decides what
   runs. Any other value, and the default, run no hook.
+- The tool `answer` answers the question of a worker that stopped on one. The same
+  worker resumes its own session in a new job, in the same directory, worktree
+  and branch, with the answer as its next message, so it keeps what it had read
+  and done instead of starting again from the brief. A client with MCP tasks gets a
+  task of its own for the continuation, and any other client gets `{"taskId",
+  "status": "running"}`. The first answer claims the question with the file `next`,
+  created whole and only when absent, so two answers at once start one worker and
+  the second gets `already_answered` with the id of the continuation. A job that
+  recorded no session, or whose instance, `CODEX_HOME` or directory changed,
+  answers `resume_unavailable`, and `delegate` with the brief and the answer is
+  the way left. The continuation never runs above its worker's level and is held
+  to the ceiling again, unless the user allowed that level in a form for the task
+  that started the worker.
+- The supervisor writes the worker's session id to the file `session` before it
+  writes `exit`, and a job with a `resume` file starts the CLI's own resume form
+  for that session: `codex exec resume`, `opencode run --session`, `claude -p
+  --resume` or `agy --conversation`. `codex exec resume` takes no `-s`, `-C` or
+  `--approve-for-me`, so the sandbox and the approval settings travel as `-c`
+  values; a resume that names no sandbox falls back to the user's `config.toml`
+  (measured on codex-cli 0.162.1). A resumed job says which argv it ran in
+  `child.log`, without the prompt. The OpenCode and Antigravity resumes follow
+  their `--help` and were not run.
+- `status` names the job that a continuation answers (`parent`) and the job that
+  took a question over (`next`). `list` fills `parent`, and its `question` is
+  true only while nobody has answered.
 
 ### Changed
+
+- The `BLOCKED on a question` text tells the session to answer with the `answer`
+  tool, which resumes the same worker, and a job that recorded no session says it
+  cannot be resumed and that a new `delegate` with the brief and the answer is
+  the way. The description of the `cc-orq:task` agent says the same.
 
 - **Breaking:** `capabilities`, `status`, `cancel` and `integrate` are now the
   tools `mcp__plugin_cc-orq_orq__capabilities`, `mcp__plugin_cc-orq_orq__status`,

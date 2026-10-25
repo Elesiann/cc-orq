@@ -67,12 +67,13 @@ The answer of a `cc-orq:task` comes back to the conversation when the task ends.
   it back with a fast-forward or a merge commit.
 - **A live view.** A card above the prompt shows each job's model, status, last
   action and timer, and `/orq-panel` lists the jobs, tails one, and cancels it.
-- **An MCP server with six tools.** `capabilities`, `delegate`, `status`,
-  `list`, `cancel` and `integrate` come from a stdio MCP server that the plugin
-  starts, so they work whether or not the mod loads. `capabilities`, `status`
-  and `cancel` answer in the shapes of T3 Code's orchestrator contract.
+- **An MCP server with seven tools.** `capabilities`, `delegate`, `answer`,
+  `status`, `list`, `cancel` and `integrate` come from a stdio MCP server that
+  the plugin starts, so they work whether or not the mod loads. `capabilities`,
+  `status` and `cancel` answer in the shapes of T3 Code's orchestrator contract.
 - **Questions instead of guesses.** A blocked worker writes a question and
-  stops, and the parent answers it in a new task.
+  stops, and `answer` resumes that same worker with the reply, in its own
+  session, worktree and branch, instead of starting it again from the brief.
 
 <p align="center">
   <img src="docs/images/panel.png" width="560" alt="The /orq-panel pane: four jobs with their status, elapsed time and model, cancel buttons on the running ones, and the last events of the selected Codex job">
@@ -83,13 +84,13 @@ The answer of a `cc-orq:task` comes back to the conversation when the task ends.
 | | Version | Why |
 | --- | --- | --- |
 | [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
-| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `delegate`, `status`, `list`, `cancel` and `integrate` are gone |
+| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `delegate`, `answer`, `status`, `list`, `cancel` and `integrate` are gone |
 | Linux | | Jobs run under `systemd-run` or `setsid` |
 | `bash`, `python3`, `git`, `pgrep` | | The supervisor, the event extractor, worktrees, and the hook that reads the session's permission mode. `pgrep` comes from procps; the supervisor uses it to find its watcher's `sleep`. Without it the sweep ends that `sleep` and `child.log` gets a line saying so |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
 | [OpenCode](https://github.com/sst/opencode) | 2.0.27 (tested) | orq passes `--standalone` to `opencode run` and `opencode models`, so the flag is required. Earlier versions were not tried. See [OpenCode notes](#opencode-notes) |
 
-The six tools of the MCP server work in every session. The `cc-orq:task`
+The seven tools of the MCP server work in every session. The `cc-orq:task`
 agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
 default from 2.1.287 on, and an organization can turn them off, which leaves
 only the server's tools.
@@ -789,14 +790,14 @@ trust every worker you delegate to.
 
 ## Tools
 
-The plugin starts a stdio MCP server, `plugin:cc-orq:orq`, that serves six
+The plugin starts a stdio MCP server, `plugin:cc-orq:orq`, that serves seven
 tools to the parent session, named `mcp__plugin_cc-orq_orq__capabilities`,
-`mcp__plugin_cc-orq_orq__delegate`, `mcp__plugin_cc-orq_orq__status`,
-`mcp__plugin_cc-orq_orq__list`, `mcp__plugin_cc-orq_orq__cancel` and
-`mcp__plugin_cc-orq_orq__integrate`. They are there whether or not the mod
+`mcp__plugin_cc-orq_orq__delegate`, `mcp__plugin_cc-orq_orq__answer`,
+`mcp__plugin_cc-orq_orq__status`, `mcp__plugin_cc-orq_orq__list`,
+`mcp__plugin_cc-orq_orq__cancel` and `mcp__plugin_cc-orq_orq__integrate`. They are there whether or not the mod
 loads, and `/mcp` shows the server.
-Each answers with a JSON text, except `delegate` for a client with MCP tasks,
-which gets a task. A refusal has the shape
+Each answers with a JSON text, except `delegate` and `answer` for a client with
+MCP tasks, which get a task. A refusal has the shape
 `{"error": {"code": "...", "message": "..."}}` and comes with `isError`. The
 codes include `task_not_found`, `task_not_cancellable` and `invalid_request`,
 and the ceiling, scope and launch codes that `delegate` answers. A task is one
@@ -804,7 +805,7 @@ job: its `taskId` is the job id that `/orq list` shows and that `/tasks` shows. 
 described under [Worktrees and integrate](#worktrees-and-integrate).
 
 The server sends its own instructions to the session, which tell it how to use
-the six tools (`server/instructions.md`, under 4,000 bytes). The guidance for
+the seven tools (`server/instructions.md`, under 4,000 bytes). The guidance for
 starting a task is the description of the `cc-orq:task` agent, which the mod
 registers (`TASK_AGENT_DESCRIPTION` in `hooks/task.ts`), so it is in the session
 exactly when the mod loads. No hook injects text at session start.
@@ -903,7 +904,7 @@ a header.
 | `isolation` | no | `worktree` (the default) or `shared` |
 | `role` | no | `implementation`, `research`, `review`, `design`, `test` or `general` |
 | `runtime`, `interaction` | no | A mode at most as broad as the ceiling. Left out, the task gets the ceiling |
-| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result. `human` is refused for now: this version cannot resume a worker with an answer from a form |
+| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result, which you answer with [`answer`](#mcp__plugin_cc-orq_orq__answer). `human` is refused for now: the form that would take the answer is not in this version |
 | `sessionMode` | no | Filled by the cc-orq hook; leave it out |
 
 A call checks, in this order, its fields, `questions`, the ceiling, the target and
@@ -938,7 +939,7 @@ before.
 | --- | --- |
 | `working` | The job runs, including while a cancel is pending, or the launch that you approved is starting. The message is the card's line: instance, model, the worker's last action and the time |
 | `input_required` | A request above the ceiling waits for your form, under the key `approve` |
-| `completed` | The job ended, or the request was refused after you answered. `result` is what `status` gives, the worker's final message and the footer, and for a worktree job the branch and the `integrate` call, cut at 100 KB, with `isError: true` for a worker that failed or was lost. A worker that stopped on a question gives `BLOCKED on a question` |
+| `completed` | The job ended, or the request was refused after you answered. `result` is what `status` gives, the worker's final message and the footer, and for a worktree job the branch and the `integrate` call, cut at 100 KB, with `isError: true` for a worker that failed or was lost. A worker that stopped on a question gives `BLOCKED on a question`, which `answer` resumes |
 | `cancelled` | The job exited 124, or the task was cancelled before it started |
 | `failed` | The record of the task cannot be read. A worker that fails is `completed` with `isError`, since `failed` is for protocol errors |
 
@@ -948,6 +949,65 @@ which Claude Code sends twice; each is acked, the job gets its cancel marker and
 ends `cancelled`, and a cancel of a task that ended changes nothing.
 `tasks/update` answers the form, and an answer to a key that is not outstanding is
 acked and ignored. `tasks/result` and `tasks/list` do not exist, and answer -32601.
+
+### `mcp__plugin_cc-orq_orq__answer`
+
+Answers the question of a worker that stopped on one, a job whose result starts
+with `BLOCKED on a question`. The same worker resumes its own session in a new
+job, in the same directory, worktree and branch, with your answer as its next
+message, so it keeps what it had read and done instead of starting from the brief.
+The job is of kind `mcp`, and its `meta.json` names the job it continues
+(`parent`). A client with MCP tasks gets a task of its own, with the id of the
+new job, that `/tasks` lists and that wakes the session with the result; any
+other client gets `{"taskId": "<id>", "status": "running"}` at once and reads the
+job with `status`. The task that asked keeps its BLOCKED text: an answer never
+changes it. If the worker asks again, the new task ends with BLOCKED too, and
+`answer` takes that id.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `taskId` | yes | The id in the BLOCKED text |
+| `answer` | yes | The answer, 1 to 20,000 characters, not blank |
+| `sessionMode` | no | Filled by the cc-orq hook; leave it out |
+
+A call checks, in this order, its fields, the job, the question, the claim and the
+worker. A refusal comes back at once with `isError` and a typed code, and nothing
+starts:
+
+| Code | When |
+| --- | --- |
+| `invalid_request` | A field is not valid, or the job did not stop on a question (it still runs, failed, was cancelled or ended with an answer) |
+| `task_not_found` | No job has that id |
+| `already_answered` | The question already has a continuation, and the message names it. Two answers at once start one worker: the first claims the question with the file `next`, created whole and only when absent, and the other gets this |
+| `resume_unavailable` | The worker cannot be resumed: the job recorded no `session` (jobs from before this version have none), its instance is no longer configured as it was or its `CODEX_HOME` changed, or its directory is gone. The message says to `delegate` again with the brief and the answer, which is what 0.1 did. A refusal does not claim the question |
+| `runtime_mode_escalation_denied`, `interaction_mode_escalation_denied` | The level the worker ran at is above the ceiling now. The continuation never runs above its worker's level, and nothing lets `answer` ask for more. It is held to the ceiling again, unless you allowed that level in a form for the task that started the worker, which covers its continuations |
+
+The continuation takes from the job that asked its repository, base commit,
+branch, worktree and directory, its instance, model, effort, and its runtime and
+interaction modes, and runs with the flags that a launch at those modes writes.
+Its prompt is your answer, then the question protocol, so it can ask again.
+`status` and `list` show the link: `parent` on the continuation, `next` on the
+job that asked, and `question` in `list` is true only while nobody has answered.
+
+The supervisor records the worker's session id in the file `session` before it
+writes `exit`, from the stream the CLI printed, and a continuation has a file
+`resume` that holds the id to resume. Each runner resumes in its own form, and
+`child.log` of a continuation says which argv ran, without the prompt:
+
+| Runner | Argv of the resume |
+| --- | --- |
+| Codex | `codex exec resume --json -o last.txt -m MODEL --skip-git-repo-check FLAGS SESSION -`, run in the job's directory, with the prompt on stdin |
+| OpenCode | `opencode run --standalone --format json --session SESSION -m MODEL FLAGS -- PROMPT` |
+| Claude | `claude -p --resume SESSION --output-format stream-json --verbose --model MODEL FLAGS -- PROMPT` |
+| Antigravity | `agy --conversation SESSION --output-format stream-json --model MODEL FLAGS --print PROMPT` |
+
+`codex exec resume` takes no `-s`, `-C` or `--approve-for-me` (codex-cli 0.162.1).
+The supervisor turns `-s X` into `-c sandbox_mode="X"` and `--approve-for-me` into
+`-c approval_policy="on-request" -c approvals_reviewer="auto_review" -c
+sandbox_mode="workspace-write"`. A resume that names no sandbox does not keep the
+one the job started in: it takes the one in the user's `config.toml`, so every
+mode names its own. OpenCode and Antigravity resumes are built from their `--help`
+and were not run.
 
 ### `mcp__plugin_cc-orq_orq__status`
 
@@ -976,7 +1036,8 @@ jobs of earlier sessions. An unknown or unsafe id answers `task_not_found`.
 `result` is set for a completed task. `error` is set for a failed task (its exit
 code and the redacted stderr tail) and for an interrupted one. `finishedAtIso`
 is set once the job has ended. `instanceId` and `model` are set when the job
-recorded them.
+recorded them. `parent` names the job that a continuation answers, and `next` the
+job that took over this job's question.
 
 | `status` | Meaning |
 | --- | --- |
@@ -1188,7 +1249,7 @@ for both the kind and the agent suffix, for example
 
 | File | Written by | Contents |
 | --- | --- | --- |
-| `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
+| `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` or `answer` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`; a continuation adds `parent`, the job whose question it answers. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
 | `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
 | `child.log` | start script | The supervisor's own stdout and stderr. It is empty for a job that ended without leftovers. A line says that the sweep ended processes the CLI left behind, or that OpenCode did not end on SIGINT. |
@@ -1199,6 +1260,9 @@ for both the kind and the agent suffix, for example
 | `last.txt` | the CLI or `supervise.sh` | The final message. Codex writes it with `-o`. The other runners extract it from the event stream after the run. |
 | `cancel` | `/orq cancel` | A request to stop the job. Only its existence counts. |
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
+| `session` | `supervise.sh` | The worker's session id, taken from its event stream and written before `exit`. A job whose stream names none has no `session`, and cannot be resumed. |
+| `resume` | `answer` | A continuation only: the session id the CLI resumes, as its first line. The supervisor starts no worker when it is not a plain id. |
+| `next` | `answer` | `{"jobId", "via"}`: the job that took over this job's question. It is created whole and only when absent, so it is the claim that lets one answer through. |
 | `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
 | `flags` | `cc-orq:task`, `delegate` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
@@ -1242,8 +1306,10 @@ prints `BLOCKED:` followed by the question as its final message, and stops.
   still runs, `/orq list` shows the job as `waiting`, and `/orq result` says it is
   waiting for an answer.
 - When the job exits 0 after writing a non-blank question, it is `done`, and `/orq result`
-  prints `BLOCKED on a question`, with the question. The parent answers it in a new
-  task that carries the original brief plus the answer.
+  prints `BLOCKED on a question`, with the question. The parent answers it with
+  [`answer`](#mcp__plugin_cc-orq_orq__answer), which resumes the same worker. A job
+  that recorded no session says it cannot be resumed, and then a new task that
+  carries the original brief plus the answer is the way.
 - A job that fails or is cancelled keeps its failed or cancelled answer, even when
   it left a question.
 
@@ -1276,7 +1342,7 @@ does not show the question, although the question stays in `question.txt`.
 `hooks/register.ts` wires the modules to the engine's events. On
 `session.start` it reads the configuration, registers `/orq` and `/orq-panel`,
 the `cc-orq:task` agent type and the `wait` tool, and starts the task card; on
-`session.end` it stops the card and the pane. The six other tools are served by
+`session.end` it stops the card and the pane. The seven other tools are served by
 the MCP server in `server/`, which Claude Code starts from the `mcpServers` entry
 of `.claude-plugin/plugin.json`.
 
@@ -1318,7 +1384,7 @@ flowchart LR
    and the subagent hands the answer back to the parent.
 
 Beside that path, `server/main.mjs` starts the MCP server, which serves
-`capabilities`, `delegate`, `status`, `list`, `cancel` and `integrate`
+`capabilities`, `delegate`, `answer`, `status`, `list`, `cancel` and `integrate`
 (`server/tools.ts`) over stdio on the same job core: `hooks/tools.ts` answers
 three of them (the provider probe is `scripts/catalog.py`), `hooks/integrate.ts`
 merges a task's branch, and `server/node-engine.ts` gives them the engine's `$`
@@ -1345,6 +1411,8 @@ directories.
 | A task reads `working` with `starting after your approval` and nothing runs | The server stopped between your answer and the start of the job. Stop the task with `x` in `/tasks` |
 | A call to `delegate` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
+| `answer` answers `already_answered` | The question has a continuation: read the job the message names with `status` |
+| `answer` answers `resume_unavailable` | The worker cannot be resumed, and the message says why. Delegate again with the brief and the answer |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
 | `integrate` answers `merge_conflict` | Delegate a rebase of the task branch to the same worker, then integrate again |
 | `integrate` answers `task_running` | Wait for the job it names to finish, or cancel that job, then integrate again |
@@ -1355,8 +1423,12 @@ directories.
 ## Known limitations
 
 - Linux only. macOS has neither `systemd-run` nor `setsid` by default.
-- A task cannot be resumed or sent a follow-up message. A review round or an
-  answer to a child's question is a new task that carries the earlier brief.
+- Only a question can resume a worker: `answer` continues the session of a job
+  that stopped on one. A review round, or any other follow-up, is a new task that
+  carries the earlier brief. A worker below `auto` cannot write its question to
+  `question.txt` outside its directory (measured with a Claude worker at
+  `manual` and `acceptEdits`, which could not), so the question only reaches
+  `answer` from a worker that could write it.
 - A client without MCP tasks gets the job's id and no wake-up, and reads the job
   with `status`. A subagent is one (measured on 2.1.310). Claude Code's
   documentation names the VS Code extension, the desktop app and a one-shot
