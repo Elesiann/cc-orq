@@ -9,11 +9,10 @@ All notable changes to cc-orq are recorded here. The format follows
 ### Added
 
 - A stdio MCP server, `plugin:cc-orq:orq`, that serves the tools `capabilities`,
-  `status`, `list`, `cancel` and `integrate`. They are there in a session
-  without function hooks too. The server sends its own instructions to the
-  session. The MCP SDK it runs on is bundled in `server/vendor/mcp-sdk.mjs`, so
-  a user has no package to install, and `NOTICE` carries the licenses of the
-  packages in the bundle.
+  `status`, `list`, `cancel` and `integrate`. They are there whether or not the
+  mod loads. The server sends its own instructions to the session. The MCP SDK
+  it runs on is bundled in `server/vendor/mcp-sdk.mjs`, so a user has no package
+  to install, and `NOTICE` carries the licenses of the packages in the bundle.
 - The tool `list`: the newest jobs first, whatever started them, with each
   job's status, instance, model, duration, working directory, branch and
   whether it ended on a question.
@@ -31,8 +30,9 @@ All notable changes to cc-orq are recorded here. The format follows
 - `capabilities` answers `approval-required` and `default` as `runtimeMode` and
   `interactionMode`, because the server does not know the permission mode of
   the session. The mod used to read it.
-- The `SessionStart` hook prints the orchestration instructions for the
-  `cc-orq:task` agent only when `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is `1`.
+- The `SessionStart` hook and the orchestration snippet it printed are gone. The
+  guidance for starting a task is now the description of the `cc-orq:task`
+  agent, and the guidance for the tools is the server's instructions.
 
 ### Fixed
 

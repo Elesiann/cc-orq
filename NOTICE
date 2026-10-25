@@ -16,8 +16,9 @@ privilege ceiling between a parent and its child tasks follow T3 Code's
   model filter and the Claude model aliases.
 - hooks/tools.ts and hooks/target.ts: the mapping from a Claude Code
   permission mode to the modes a child task may run in.
-- hooks/instructions.ts and instructions.md: the orchestration instructions
-  given to the parent agent, rewritten for cc-orq's tools.
+- server/instructions.md and the description of the cc-orq:task agent in
+  hooks/task.ts: the orchestration instructions given to the parent agent,
+  rewritten for cc-orq's tools.
 
 T3 Code is distributed under this license:
 

@@ -986,6 +986,16 @@ test('no module the server loads writes to stdout, apart from the transport of t
   assert.equal(vendor.match(/process\.stdout/g)?.length, 1, 'only the stdio transport of the SDK touches stdout')
 })
 
+// Spelled in parts, so that this file is not a match of its own search.
+const OLD_PREFIX = ['mcp', 'cc-orq', ''].join('__')
+
+test('no text that names a tool uses the old prefix, except for the wait tool the mod still serves', (t) => {
+  const found = spawnSync('git', ['grep', '-n', OLD_PREFIX, '--', '.', ':!CHANGELOG.md'], { cwd: REPO, encoding: 'utf8' })
+  if (found.status !== 0 && found.status !== 1) return t.skip('not inside a git checkout, so there are no tracked files to search')
+  const stale = found.stdout.split('\n').filter((line) => line !== '' && line.replaceAll(`${OLD_PREFIX}wait`, '').includes(OLD_PREFIX))
+  assert.deepEqual(stale, [])
+})
+
 test('the server exits promptly on stdin EOF even while a catalog probe is still running', async (t) => {
   const s = scene({ instances: [{ id: 'codex', driver: 'codex' }] })
   const started = join(s.root, 'probe-started')
