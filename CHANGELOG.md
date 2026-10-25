@@ -6,10 +6,35 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The tools `capabilities`, `status`, `cancel` and `integrate` are now
+  `mcp__plugin_cc-orq_orq__capabilities`, `mcp__plugin_cc-orq_orq__status`,
+  `mcp__plugin_cc-orq_orq__cancel` and `mcp__plugin_cc-orq_orq__integrate`. Allow
+  rules for the old `mcp__cc-orq__*` names stop applying. `mcp__cc-orq__wait`
+  keeps its name.
+- The `ceiling` of the configuration now limits `cc-orq:task` too. By default a
+  worker edits only inside its own worktree and a `shared` worker only reads, so a
+  session in `auto` or `bypassPermissions` mode no longer gets workers in that
+  mode. To give workers `auto` in an `auto` session, set
+  `"ceiling": {"runtime": "auto"}`.
+- Node 22.18 or newer must be on the `PATH`. The server writes
+  `the orq server needs Node 22.18 or newer` to stderr and exits when it is
+  older; the `cc-orq:task` agent keeps working, without the server's tools.
+- The config key `"integrate": {"gitHooks": "run"}` is new. Without it, `integrate`
+  runs no hook of the checkout, as 0.1 did, so no existing setup changes. With it,
+  a hook that refuses the merge makes `integrate` answer `hook_failed`.
+- The `BLOCKED on a question` text tells the session to answer with the `answer`
+  tool, which resumes the same worker. A job that recorded no session says it cannot
+  be resumed, and a new `delegate` with the brief and the answer is the way.
+- The `SessionStart` hook and the orchestration snippet it printed are gone. The
+  guidance for starting a task is the description of the `cc-orq:task` agent, and
+  the guidance for the tools is the server's instructions.
+
 ### Added
 
 - A stdio MCP server, `plugin:cc-orq:orq`, that serves the tools `capabilities`,
-  `delegate`, `status`, `list`, `cancel` and `integrate`. They are there whether
+  `delegate`, `answer`, `status`, `list`, `cancel` and `integrate`. They are there whether
   or not the mod loads. The server sends its own instructions to the session.
   The MCP SDK it runs on is bundled in `server/vendor/mcp-sdk.mjs`, so a user has
   no package to install, and `NOTICE` carries the licenses of the packages in
@@ -56,8 +81,8 @@ All notable changes to cc-orq are recorded here. The format follows
   (default `approval-required`) limits a task with `isolation: shared`, and
   `interaction` (default `default`) limits the interaction mode. A value that is
   not valid counts as the narrowest mode, and `capabilities` reports it.
-- A `PreToolUse` hook, `scripts/session-mode-hook.sh`, gives `delegate` and
-  `capabilities` the session's permission mode as `sessionMode`, over any value
+- A `PreToolUse` hook, `scripts/session-mode-hook.sh`, gives `delegate`,
+  `answer` and `capabilities` the session's permission mode as `sessionMode`, over any value
   the model wrote there. It returns the changed input and never a permission
   decision. It blocks the call when it has no `python3`, cannot read its input,
   or finds a `permission_mode` that is empty or not text, since a call let
@@ -160,26 +185,49 @@ All notable changes to cc-orq are recorded here. The format follows
   needs `/proc`, so it ends nothing on macOS, and a cancel still ends the
   process group. Nobody has run a job with a real CLI there.
 
+- The tool `answer` answers the question of a worker that stopped on one. The same
+  worker resumes its own session in a new job, in the same directory, worktree
+  and branch, with the answer as its next message, so it keeps what it had read
+  and done instead of starting again from the brief. A client with MCP tasks gets a
+  task of its own for the continuation, and any other client gets `{"taskId",
+  "status": "running"}`. The first answer claims the question with the file `next`,
+  created whole and only when absent, so two answers at once start one worker and
+  the second gets `already_answered` with the id of the continuation. A job that
+  recorded no session, or whose instance, `CODEX_HOME` or directory changed,
+  answers `resume_unavailable`, and `delegate` with the brief and the answer is
+  the way left. The continuation never runs above its worker's level and is held
+  to the ceiling again, unless the user allowed that level in a form for the task
+  that started the worker.
+- The supervisor writes the worker's session id to the file `session` before it
+  writes `exit`, and a job with a `resume` file starts the CLI's own resume form
+  for that session: `codex exec resume`, `opencode run --session`, `claude -p
+  --resume` or `agy --conversation`. `codex exec resume` takes no `-s`, `-C` or
+  `--approve-for-me`, so the sandbox and the approval settings travel as `-c`
+  values; a resume that names no sandbox falls back to the user's `config.toml`
+  (measured on codex-cli 0.162.1). A resumed job says which argv it ran in
+  `child.log`, without the prompt. The OpenCode and Antigravity resumes follow
+  their `--help` and were not run.
+- `status` names the job that a continuation answers (`parent`) and the job that
+  took a question over (`next`). `list` fills `parent`, and its `question` is
+  true only while nobody has answered.
+- A conformance job for the task layer. `tests/conformance/` serves the seven
+  fixtures of the MCP conformance suite (`greet`, `slow_compute`, `failing_job`,
+  `protocol_error_job`, `confirm_delete`, `multi_input` and `test_tool_with_task`)
+  over a test-only HTTP entry, through `server/protocol.ts`, and CI runs each of
+  the suite's ten tasks scenarios by name, at commit c37eec8. Nine pass, with
+  44 checks, and `tasks-status-notifications` is skipped by the suite itself,
+  because its harness reads the SSE of `tools/call` where the spec has
+  `subscriptions/listen`. `--requirements 2026-07-28` is not the gate, since it
+  lists these scenarios as `not_scored`. The product still serves stdio only.
+- macOS, experimental. CI runs the test suites on `macos-latest` as well as
+  `ubuntu-latest`. Where `setsid` is missing, as on macOS, the start script runs
+  the supervisor through `python3` with `os.setsid()`, and the job's `scope`
+  file says `python-setsid`. The supervisor runs under bash 3.2. The sweep
+  needs `/proc`, so it ends nothing on macOS, and a cancel still ends the
+  process group. Nobody has run a job with a real CLI there.
+
 ### Changed
 
-- The `BLOCKED on a question` text tells the session to answer with the `answer`
-  tool, which resumes the same worker, and a job that recorded no session says it
-  cannot be resumed and that a new `delegate` with the brief and the answer is
-  the way. The description of the `cc-orq:task` agent says the same.
-
-- **Breaking:** `capabilities`, `status`, `cancel` and `integrate` are now the
-  tools `mcp__plugin_cc-orq_orq__capabilities`, `mcp__plugin_cc-orq_orq__status`,
-  `mcp__plugin_cc-orq_orq__cancel` and `mcp__plugin_cc-orq_orq__integrate`. Allow
-  rules for the old `mcp__cc-orq__*` names stop applying. `mcp__cc-orq__wait`
-  keeps its name.
-- **Breaking:** Node 22.18 or newer must be on the `PATH`. The server writes
-  `the orq server needs Node 22.18 or newer` to stderr and exits when it is
-  older; the `cc-orq:task` agent keeps working, without the server's tools.
-- **Breaking:** the `ceiling` of the configuration now limits `cc-orq:task`
-  too. By default a worker edits only inside its own worktree and a `shared`
-  worker only reads, so a session in `auto` or `bypassPermissions` mode no
-  longer gets workers in that mode. To give workers `auto` in an `auto`
-  session, set `"ceiling": {"runtime": "auto"}`.
 - `capabilities` reports `client.forms` as true for an `elicitation` capability
   that names no mode, which the MCP spec defines as form mode.
 - The tool descriptions and `server/instructions.md` tell the session that a task
@@ -193,13 +241,13 @@ All notable changes to cc-orq are recorded here. The format follows
   adds `ceiling` (the configuration's limits, the session's mode and each
   isolation's effective ceiling) and `client` (whether the client declared MCP
   tasks and form input).
-- The `SessionStart` hook and the orchestration snippet it printed are gone. The
-  guidance for starting a task is now the description of the `cc-orq:task`
-  agent, and the guidance for the tools is the server's instructions.
 - The working-directory check resolves a path with `fs.stat` instead of the
   GNU-only `realpath -e` and `-m`. An `allowedRoots` entry that does not exist
   is no longer listed among the roots of a refusal. It admitted nothing before
-  either.
+  either. In the MCP server, the check folds each `..` into the path's text before it
+  follows a symlink, as `cd -L` does, so `link/..` names the parent of the link. A `..`
+  right after a symlink or after a missing directory resolves by text, in a `cwd`
+  and in an `allowedRoots` entry.
 - A cancel no longer waits out the 5 seconds when the CLI ends sooner. Once the
   CLI has ended and its leftovers are swept, the supervisor writes `exit` 124
   and sends SIGKILL to the process group. A process in the group that needs

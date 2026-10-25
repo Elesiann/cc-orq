@@ -8,7 +8,7 @@ issue first so the shape can be agreed before the code.
 You need Linux, Node 22.18 or newer (users need it too: the MCP server runs its
 TypeScript files with no build), `bash`, `python3`, `git`, and the Claude Code
 CLI, 2.1.287 or newer, where mods load by default (see the README's
-Requirements).
+Requirements). macOS is experimental, and only its CI job checks it.
 
 ```bash
 git clone https://github.com/Elesiann/cc-orq.git
@@ -39,9 +39,13 @@ bash tests/lock-shell.sh       # the checkout lock with real processes
 node tests/conformance/run.mjs # the tasks scenarios of the MCP conformance suite
 ```
 
-CI runs `npm ci`, the vendor check, `npm test`, the six shell suites, and
+`npm test` also checks the relative links and anchors of every tracked Markdown
+file, through `scripts/check-links.mjs`. Run it alone with `npm run check:links`.
+
+CI runs `npm ci`, the vendor check, `npm test`, the shell suites, and
 `shellcheck` on the live harness scripts, and in a job of its own the conformance
-suite. The other checks need a logged-in Claude Code CLI, so run them locally.
+suite. It also runs the suites on `macos-latest`, which is experimental. The other
+checks need a logged-in Claude Code CLI, so run them locally.
 
 ## Conformance suite
 
@@ -93,6 +97,22 @@ mode. Receipts land in `.live-evidence/SCENARIO/` by default, or under
 `ORQ_EVIDENCE_DIR`, and hold the raw output of your machine, so read them
 before you attach them anywhere. See `tests/live/README.md` for the details and
 for how to add a scenario.
+
+## The MCP server
+
+The plugin's `mcpServers` entry starts `server/main.mjs`, a stdio MCP server that
+serves the tools `capabilities`, `delegate`, `answer`, `status`, `list`, `cancel`
+and `integrate`. `server/tools.ts` holds their names, input schemas and
+descriptions. `server/protocol.ts` reads what the client declared on each request
+and serves the MCP tasks, `server/job-tasks.ts` is the task source behind
+`delegate`, and `server/node-engine.ts` gives the job core the engine's `$` in
+plain Node. The server's tests are in `tests/pure/`, in the files named
+`server-*.test.mjs` and `job-tasks.test.mjs`.
+
+The MCP SDK that the server runs on is the committed bundle
+`server/vendor/mcp-sdk.mjs`. `npm run build:vendor` rebuilds it, and
+`node scripts/build-vendor.mjs --check` in CI fails when the bundle or `NOTICE`
+is out of date. Change the SDK only through that script.
 
 ## Rules
 
