@@ -133,8 +133,9 @@ claude plugin install cc-orq@cc-orq
 ```
 
 Then run `/reload-plugins` in a running session, or start a new one.
-`claude plugin install` reports that the `cardDisplay` option is not set yet.
-Until you set it, the task card uses `band`; see [Task card](#task-card).
+`claude plugin install` reports one user option not yet set. That option is
+`cardDisplay`, and until you set it the task card uses `band`; see
+[Task card](#task-card).
 
 To try a checkout without installing it:
 
@@ -169,7 +170,11 @@ the task's branch into your checkout.
 
 The session can call `mcp__plugin_cc-orq_orq__delegate` instead, with the header
 fields as JSON. In the CLI the call returns at once with a background task: `/tasks`
-lists it until the worker ends, and the session wakes with the answer.
+lists it until the worker ends, and the session wakes with the answer. Only
+`delegate` creates a `/tasks` entry; the `cc-orq:task` agent shows on the card.
+In the `default` permission mode, Claude Code asks once before it calls each
+tool, so a first delegation shows two approval prompts, one for `capabilities`
+and one for `delegate`.
 
 ## Commands
 
@@ -1174,8 +1179,9 @@ as `/exit`, a logout, or a `-p` run that finishes, stops it.
   earlier run left behind.
 - `off`: no card is drawn, and no refresh timer runs.
 
-An unknown value counts as `band`. Set it in `/config`, or in `settings.json`
-under `pluginConfigs.cc-orq.options.cardDisplay`.
+An unknown value counts as `band`. Set it in `/config`, with
+`/plugin configure cc-orq@cc-orq`, or in `settings.json` under
+`pluginConfigs."cc-orq@cc-orq".options.cardDisplay`.
 
 ### `/orq-panel`
 
