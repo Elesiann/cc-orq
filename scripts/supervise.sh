@@ -11,7 +11,13 @@
 #
 # Files in <dir>: prompt.txt (input), pgid, cli.pid (OpenCode only: the pid of
 # the client), events.jsonl (CLI stdout), stderr.txt, last.txt (final
-# message), exit (numeric exit code).
+# message), session (the worker's session id, when the stream names one),
+# exit (numeric exit code). session goes in before exit, so whoever reads
+# exit finds it.
+#
+# When <dir>/resume exists, its first line is the id of a session to continue:
+# the CLI resumes it, with prompt.txt as the next message, instead of starting
+# a new one, and child.log gets one line with the argv that ran, minus the prompt.
 #
 # Started as the main process of a transient user unit (systemd makes it a
 # session and group leader), or under setsid when no user manager is
@@ -35,6 +41,7 @@ dir=$1; runner=$2; cwd=$3; model=${4:-}; effort=${5:-}; sandbox=${6:-}
 echo $$ > "$dir/pgid"
 trap '' TERM
 sweep=$(cd "$(dirname "$0")" && pwd)/sweep.py
+extract=$(cd "$(dirname "$0")" && pwd)/extract.py
 
 flags=()
 if [ -f "$dir/flags" ]; then
@@ -56,6 +63,35 @@ read_prompt() {
 write_exit() {
   local tmp="$dir/exit.$BASHPID.tmp"
   printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$dir/exit"
+}
+
+# A session id reaches the CLI as one argument, so only a plain one is resumed. fd 3 is child.log, where a resumed job
+# says which argv it ran; a job that starts afresh writes nothing there.
+resume=
+if [ -s "$dir/resume" ]; then
+  IFS= read -r resume < "$dir/resume" || :
+  case "$resume" in
+    '' | -* | *[!A-Za-z0-9._:-]*)
+      echo "orq: the session to resume is not a plain id, so no worker was started" > "$dir/stderr.txt"
+      write_exit 4
+      exit 0
+      ;;
+  esac
+  exec 3>&1
+fi
+log_resume() {
+  local tail=$1
+  shift
+  { printf 'orq: resume:'; printf ' %q' "$@"; [ -z "$tail" ] || printf ' %s' "$tail"; printf '\n'; } >&3
+}
+
+# The session id the stream names, or else the one this job resumed, for a later answer to continue. A cancelled job
+# has no use for it.
+write_session() {
+  [ -e "$dir/cancel" ] && return 0
+  python3 "$extract" "$dir/events.jsonl" "$runner" "$dir/session" > /dev/null 2>&1
+  if [ ! -s "$dir/session" ] && [ -n "$resume" ]; then printf '%s\n' "$resume" > "$dir/session"; fi
+  return 0
 }
 
 # A CLI can leave a process running outside its process group, such as an MCP server that OpenCode was still
@@ -98,7 +134,39 @@ stop_watcher() {
   wait "$watcher" 2>/dev/null
 }
 
+# `codex exec resume` takes no -s, -C or --approve-for-me. The sandbox travels as config, and --approve-for-me is the
+# three settings it stands for. A resume that names no sandbox runs in the one of the user's config.toml, which can be
+# broader than the one the job started in, so every mode names its own.
+codex_resume_flags() {
+  cflags=()
+  local i=0 flag
+  while [ "$i" -lt "${#flags[@]}" ]; do
+    flag=${flags[$i]}
+    case "$flag" in
+      -s)
+        i=$((i + 1))
+        if [ -n "${flags[$i]:-}" ]; then cflags+=(-c "sandbox_mode=\"${flags[$i]}\""); fi
+        ;;
+      --approve-for-me) cflags+=(-c 'approval_policy="on-request"' -c 'approvals_reviewer="auto_review"' -c 'sandbox_mode="workspace-write"') ;;
+      *) cflags+=("$flag") ;;
+    esac
+    i=$((i + 1))
+  done
+}
+
 run_codex() {
+  if [ -n "$resume" ]; then
+    codex_resume_flags
+    rargs=(exec resume --json -o "$dir/last.txt")
+    [ -n "$model" ] && rargs+=(-m "$model")
+    [ -n "$effort" ] && rargs+=(-c "model_reasoning_effort=\"$effort\"")
+    rargs+=(--skip-git-repo-check)
+    [ -n "$sandbox" ] && rargs+=(-c "sandbox_mode=\"$sandbox\"")
+    rargs+=("${cflags[@]}" "$resume" -)
+    log_resume '' codex "${rargs[@]}"
+    ( cd "$cwd" && codex "${rargs[@]}" ) < "$dir/prompt.txt" > "$dir/events.jsonl" 2> "$dir/stderr.txt"
+    return
+  fi
   args=(exec --json -o "$dir/last.txt")
   [ -n "$model" ] && args+=(-m "$model")
   [ -n "$effort" ] && args+=(-c "model_reasoning_effort=\"$effort\"")
@@ -112,7 +180,11 @@ run_opencode() {
   # --standalone runs a private server that ends with the job. Without it OpenCode hands the run to
   # its shared background service, which leaves the user's MCP servers running and keeps the
   # environment it started with.
-  ( echo "$BASHPID" > "$dir/cli.pid"; cd "$cwd" && exec opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
+  head=(run --standalone --format json)
+  [ -n "$resume" ] && head+=(--session "$resume")
+  head+=(-m "$model")
+  [ -n "$resume" ] && log_resume '-- <prompt.txt>' opencode "${head[@]}" "${flags[@]}"
+  ( echo "$BASHPID" > "$dir/cli.pid"; cd "$cwd" && exec opencode "${head[@]}" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
   if [ -e "$dir/cancel" ]; then return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
@@ -139,7 +211,9 @@ run_agy() {
   read_prompt
   : > "$dir/last.txt"
   args=(--output-format stream-json)
+  [ -n "$resume" ] && args=(--conversation "$resume" --output-format stream-json)
   [ -n "$model" ] && args+=(--model "$model")
+  [ -n "$resume" ] && log_resume '--print <prompt.txt>' agy "${args[@]}" "${flags[@]}"
   args+=("${flags[@]}" --print "$prompt")
   ( cd "$cwd" && agy "${args[@]}" </dev/null ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
@@ -169,7 +243,9 @@ run_claude() {
   read_prompt
   : > "$dir/last.txt"
   args=(-p --output-format stream-json --verbose)
+  [ -n "$resume" ] && args=(-p --resume "$resume" --output-format stream-json --verbose)
   [ -n "$model" ] && args+=(--model "$model")
+  [ -n "$resume" ] && log_resume '-- <prompt.txt>' claude "${args[@]}" "${flags[@]}"
   args+=("${flags[@]}" -- "$prompt")
   ( cd "$cwd" && claude "${args[@]}" </dev/null ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
@@ -233,6 +309,7 @@ if [ -e "$dir/cancel" ]; then
   write_exit 124
   kill -KILL -$$ 2>/dev/null
 elif [ ! -e "$dir/exit" ]; then
+  write_session
   write_exit "$code"
 fi
 exit 0
