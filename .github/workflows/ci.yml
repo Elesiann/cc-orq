@@ -26,8 +26,6 @@ jobs:
       - run: bash tests/allowlist-shell.sh
       - run: shellcheck tests/live/*.sh tests/live/scenarios/*.sh
 
-  # The tasks scenarios of the MCP conformance suite, run by name against the test HTTP entry in tests/conformance/.
-  # The suite is the commit that the scenarios were read at; tests/conformance/run.mjs gates on each scenario's exit code.
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 15

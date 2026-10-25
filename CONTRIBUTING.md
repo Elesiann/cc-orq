@@ -61,11 +61,12 @@ node tests/conformance/run.mjs --out /tmp/conformance   # keep every checks.json
 
 The runner starts the entry in its own process, runs `server --url URL --scenario
 NAME` once per scenario, and gates on each exit code. It does not use
-`--requirements 2026-07-28`, which lists the ten tasks scenarios as `not_scored`
-and so cannot fail on them. A scenario also fails when it passes no check or
-skips one, except `tasks-status-notifications`, which the suite skips itself: its
-harness still reads the SSE of `tools/call` where the spec has
-`subscriptions/listen`. The run needs the network and no login.
+`--requirements 2026-07-28`: that run includes the ten tasks scenarios, but lists
+them under "Not scored" with the note "These do not affect conformance". A
+scenario also fails when it passes no check or skips one, except
+`tasks-status-notifications`, which the suite skips itself: its harness still
+reads the SSE of `tools/call` where the spec has `subscriptions/listen`. The run
+needs the network and no login.
 
 By default the runner fetches the published suite with `npx`. CI runs the commit
 that the scenarios were read at instead: set `CONFORMANCE_CMD` to the command that

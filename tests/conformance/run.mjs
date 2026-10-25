@@ -1,11 +1,10 @@
-// Runs the tasks scenarios of the MCP conformance suite against the test HTTP entry of this directory, one
-// `server --url URL --scenario NAME` per scenario, and gates on each exit code. `--requirements 2026-07-28` lists these
-// ten scenarios as not_scored, so it runs them and cannot fail on them.
+// Runs the tasks scenarios of the MCP conformance suite against the test HTTP entry, one `server --url URL --scenario NAME`
+// per scenario, and gates on each exit code: `--requirements 2026-07-28` runs them too, but lists them as not scored.
 //
 //   node tests/conformance/run.mjs [--out DIR] [scenario ...]
 //
-// CONFORMANCE_CMD says how to start the suite, as words split on spaces; it defaults to the published build below.
-// The results of each scenario, its checks.json included, are written under DIR (default: a new temporary directory).
+// CONFORMANCE_CMD says how to start the suite, as words split on spaces; the default is the published build below.
+// Each scenario's results, its checks.json included, go under DIR (default: a new temporary directory).
 
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -29,7 +28,7 @@ const SCENARIOS = [
   'tasks-required-task-error',
   'tasks-mrtr-composition',
 ]
-/** The suite's harness still reads the SSE of `tools/call` where the spec has `subscriptions/listen`, so it skips this one. */
+// The suite's harness still reads the SSE of `tools/call` where the spec has `subscriptions/listen`, so it skips this one.
 const SKIPPED_BY_THE_SUITE = new Set(['tasks-status-notifications'])
 
 function runSuite(words, args) {
@@ -43,7 +42,7 @@ function runSuite(words, args) {
   })
 }
 
-/** The checks that the suite saved for a scenario: it writes `<dir>/<scenario>-<time>/checks.json`, or nothing when it fails to start. */
+// The suite writes <dir>/server-<scenario>-<time>/checks.json, and nothing when it cannot start.
 function savedChecks(dir) {
   const file = readdirSync(dir)
     .filter((name) => !name.endsWith('.log'))
@@ -52,7 +51,6 @@ function savedChecks(dir) {
   return file === undefined ? [] : JSON.parse(readFileSync(file, 'utf8'))
 }
 
-/** Why a scenario does not pass, or null. A scenario that passed no check, or skipped one it should not, is not a pass. */
 function whyNot(name, code, checks) {
   if (code !== 0) return `the suite exited ${code}`
   if (SKIPPED_BY_THE_SUITE.has(name)) return checks.length > 0 && checks.every((check) => check.status === 'SKIPPED') ? null : 'it was expected to be skipped by the suite'

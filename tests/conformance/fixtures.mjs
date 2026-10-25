@@ -1,7 +1,5 @@
-// The seven fixtures that the tasks scenarios of the MCP conformance suite call (modelcontextprotocol/conformance,
-// src/scenarios/server/tasks/), as tools over an in-memory TaskSource. The tools that create tasks answer through the
-// generic task layer of server/protocol.ts, as `delegate` does, so what the suite sees is what that layer puts on the
-// wire. Nothing here knows a job.
+// The seven fixtures that the tasks scenarios of the MCP conformance suite call, as tools over an in-memory TaskSource.
+// The tools that create tasks answer through taskTool and registerTaskMethods of server/protocol.ts, as `delegate` does.
 
 /** @import { DetailedTask, TaskSource } from '../../server/protocol.ts' */
 import { ProtocolError, ProtocolErrorCode, acceptedContent, inputRequired } from '@modelcontextprotocol/server'
@@ -15,10 +13,6 @@ const RESUME_MS = 150
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const text = (value, isError = false) => ({ content: [{ type: 'text', text: value }], isError })
 
-/**
- * One task and the state it is in. A state is replaced as a whole, and a task that has ended keeps the state it ended
- * in, so a late timer or a late answer cannot change it.
- */
 class FixtureTask {
   state = { status: 'working' }
   createdAt = new Date().toISOString()
@@ -39,7 +33,6 @@ class FixtureTask {
     this.lastUpdatedAt = new Date().toISOString()
   }
 
-  /** Runs `then` after `ms`, unless the state changes first. The timer never keeps the process alive. */
   after(ms, then) {
     clearTimeout(this.#timer)
     this.#timer = setTimeout(then, ms)
@@ -58,7 +51,6 @@ class FixtureTask {
     this.#set({ status: 'cancelled' })
   }
 
-  /** Parks on `requests`, under keys that are new for the life of the task, and calls `whenAnswered` once every one has an answer. */
   ask(requests, whenAnswered) {
     const outstanding = {}
     for (const request of requests) outstanding[`input-${(this.#minted += 1)}`] = request
@@ -67,12 +59,12 @@ class FixtureTask {
     this.#set({ status: 'input_required', inputRequests: outstanding })
   }
 
-  /** A key that is not outstanding is ignored, as the extension asks; the answered keys leave `inputRequests`. */
   answer(responses) {
     if (this.state.status !== 'input_required') return
     const remaining = { ...this.state.inputRequests }
     let answered = 0
     for (const [key, response] of Object.entries(responses)) {
+      // A server SHOULD ignore a key that is not outstanding (ext-tasks, tasks/update), and the suite sends one.
       if (!(key in remaining)) continue
       this.#collected[key] = response
       delete remaining[key]
@@ -102,10 +94,6 @@ const namesIn = (answers) =>
     .map((answer) => (answer.action === 'accept' && typeof answer.content?.name === 'string' ? answer.content.name : '-'))
     .join(', ')
 
-/**
- * What each task fixture does once it has a task. `sync` is the answer of a client that did not declare the extension;
- * a fixture without one says that it needs the extension.
- */
 const WORK = {
   slow_compute: {
     start: (task, { seconds, label }) => task.after(seconds * 1000, () => task.complete(text(`computed ${label} in ${seconds}s`))),
@@ -139,7 +127,6 @@ const WORK = {
   },
 }
 
-/** The arguments that the suite sends, read where they enter: a value that is not usable is the default. */
 function argumentsOf(tool, input) {
   const args = typeof input === 'object' && input !== null ? input : {}
   const seconds = typeof args.seconds === 'number' && Number.isFinite(args.seconds) && args.seconds >= 0 ? args.seconds : 0
@@ -185,11 +172,6 @@ export function fixtureSource() {
 
 const object = (properties, required) => ({ type: 'object', properties, ...(required ? { required } : {}), additionalProperties: false })
 
-/**
- * The tools of the suite. A `required` tool cannot be served without a task, so a client that did not declare the
- * extension gets -32021 for it, and the others fall back to the synchronous answer. Only a request handler can answer
- * -32021: McpServer turns an error thrown in a tool callback into an `isError` result.
- */
 const TOOLS = {
   greet: {
     description: 'Sync-only: Hello, {name}!',
@@ -229,7 +211,6 @@ const missingTasks = () =>
     requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } },
   })
 
-/** The round of `test_tool_with_task` that asks for the name, and the one that has it and makes the task. */
 async function testToolWithTask(source, input, ctx) {
   const answer = acceptedContent(ctx.mcpReq.inputResponses, 'user_name')
   if (answer === undefined) {
@@ -238,7 +219,8 @@ async function testToolWithTask(source, input, ctx) {
   return taskTool(source, 'test_tool_with_task')({ ...input, name: answer.name }, ctx)
 }
 
-/** Serves the fixtures from the low-level server, which can answer -32021 where a tool callback cannot. */
+// The low-level server serves the tools, not McpServer.registerTool: McpServer turns an error thrown in a tool callback
+// into an `isError` result, and a `required` tool must answer -32021 to a client that did not declare the extension.
 export function registerFixtureTools(server, source) {
   server.setRequestHandler('tools/list', () => ({
     tools: Object.entries(TOOLS).map(([name, { description, inputSchema }]) => ({ name, description, inputSchema })),

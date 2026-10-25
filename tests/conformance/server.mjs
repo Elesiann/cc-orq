@@ -1,7 +1,5 @@
-// The test HTTP entry of the conformance suite: the SDK's `createMcpHandler`, the stateless 2026-07-28 serving entry,
-// on a plain node:http server, over the fixtures of fixtures.mjs. The task methods are the ones of server/protocol.ts.
-// The handler checks the `_meta` envelope and answers -32020 for an Mcp-Method or Mcp-Name header that disagrees
-// with the body, which is what the headers scenario needs. The product serves stdio only; this file is for tests.
+// The test HTTP entry of the conformance suite: the SDK's createMcpHandler on node:http, over the fixtures. The handler
+// answers -32020 for an Mcp-Method or Mcp-Name header that disagrees with the body, which the headers scenario needs.
 
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
