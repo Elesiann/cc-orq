@@ -25,6 +25,12 @@ which Claude Code loads by default from 2.1.287.
 
 <sub>The screenshots use demo jobs.</sub>
 
+<p align="center">
+  <img src="docs/images/fanout.gif" width="900" alt="Two delegated tasks, one to Codex and one to Claude, listed in /tasks with their last action; the session waking with each result; and the approval form for a request above the ceiling">
+</p>
+
+<sub>A real run on Claude Code 2.1.310: a Codex task on gpt-6-luna and a Claude task on haiku.</sub>
+
 ## Contents
 
 - [Features](#features)
