@@ -27,7 +27,9 @@ import {
   GIT_TIMEOUT_MS,
   branchDeleteArgv,
   branchFor,
+  gitArgv,
   gitDetail,
+  NO_HOOKS,
   revParseHeadArgv,
   revParseToplevelArgv,
   WORKTREE_INCLUDE_DEADLINE_S,
@@ -1003,6 +1005,45 @@ export type ContinuationPlan = {
   model: string
   modes: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
   flags: string[]
+  /** `worktree` only for a worktree that git lists for the task; anything else runs, and is locked, as a shared task. */
+  isolation: TaskIsolation
+  /** The directory the task was asked to work in, resolved: the checkout of a worktree task, the directory itself of a shared one. */
+  requestCwd: string
+  worktree?: NonNullable<Continuation['worktree']>
+}
+
+async function realPath($: CoreEngine, path: string): Promise<string> {
+  try {
+    const r = await $.process.run(['realpath', '-m', '--', path], { timeoutMs: 10000 })
+    return r.exitCode === 0 && r.stdout.trim().startsWith('/') ? r.stdout.trim() : path
+  } catch {
+    return path
+  }
+}
+
+/**
+ * The worktree of a job, when it is the one this task made: its directory is inside the worktree, and git of the recorded
+ * checkout lists that worktree on the recorded branch. meta.json is the job's own file, and a worker that can write outside
+ * its directory can change it, so a path that git does not list for the branch is not trusted to be held by this task alone.
+ */
+async function ownWorktree($: CoreEngine, job: JobRecord): Promise<NonNullable<Continuation['worktree']> | null> {
+  const { repo, baseSha, branch, worktree } = job
+  if (repo === undefined || baseSha === undefined || branch === undefined || worktree === undefined) return null
+  if (!isWithin(job.cwd, worktree) || !(await isDirectory($, job.cwd))) return null
+  try {
+    const listed = await $.process.run(gitArgv(repo, ...NO_HOOKS, 'worktree', 'list', '--porcelain'), { timeoutMs: GIT_TIMEOUT_MS })
+    if (listed.exitCode !== 0) return null
+    const wanted = await realPath($, worktree)
+    for (const block of listed.stdout.split('\n\n')) {
+      const lines = block.split('\n')
+      const path = lines.find((line) => line.startsWith('worktree '))?.slice('worktree '.length)
+      if (path === undefined || !lines.includes(`branch refs/heads/${branch}`)) continue
+      if ((await realPath($, path)) === wanted) return { repo, baseSha, branch, worktree }
+    }
+  } catch {
+    /* a git that cannot be asked confirms nothing */
+  }
+  return null
 }
 
 /**
@@ -1010,7 +1051,12 @@ export type ContinuationPlan = {
  * session, its worker and its modes, its instance must still be the one it ran on (the session lives in that instance's
  * CODEX_HOME), and its directory must still be there. The flags are the ones a launch at the same modes would write.
  */
-export async function continuationPlan($: CoreEngine, config: OrqConfig, parent: JobRecord): Promise<{ plan: ContinuationPlan } | { failure: Failure }> {
+export async function continuationPlan(
+  $: CoreEngine,
+  config: OrqConfig,
+  parent: JobRecord,
+  sessionDir: string,
+): Promise<{ plan: ContinuationPlan } | { failure: Failure }> {
   const unavailable = (why: string): { failure: Failure } => ({
     failure: fail('resume_unavailable', `${parent.id} cannot be resumed: ${why}. Delegate a new task that carries the brief and the answer instead.`),
   })
@@ -1025,13 +1071,33 @@ export async function continuationPlan($: CoreEngine, config: OrqConfig, parent:
   if (instance.env?.CODEX_HOME !== parent.codexHome) return unavailable('the CODEX_HOME of its instance changed, so its session is not where the worker left it')
   if (!plainArgument(model)) return unavailable('its model is not one word')
   if (!(await isDirectory($, parent.cwd))) return unavailable(`its directory ${parent.cwd} is gone`)
+  const worktree = await ownWorktree($, parent)
+  // The scope is judged as a launch judges it: on the directory the task was asked to work in.
+  const scoped = await scopedCwd($, config, sessionDir, worktree === null ? parent.cwd : worktree.repo)
+  if ('refusal' in scoped) {
+    const body = scoped.refusal.slice(`${TASK_REFUSAL}: `.length)
+    const outside = /^cwd_out_of_scope: ([\s\S]*)$/.exec(body)
+    return outside?.[1] !== undefined ? { failure: fail('cwd_out_of_scope', outside[1]) } : unavailable(body)
+  }
   const policy = runnerPolicy(driver, runtimeMode, interactionMode)
   if (isFailure(policy)) return unavailable(policy.error.message)
   const effort = parent.effort === undefined ? [] : effortFlag(driver, [{ id: EFFORT_OPTION, value: parent.effort }])
-  return { plan: { parent, session, instance, model, modes: { runtimeMode, interactionMode }, flags: [...policy.flags, ...effort] } }
+  return {
+    plan: {
+      parent,
+      session,
+      instance,
+      model,
+      modes: { runtimeMode, interactionMode },
+      flags: [...policy.flags, ...effort],
+      isolation: worktree === null ? 'shared' : 'worktree',
+      requestCwd: scoped.cwd,
+      ...(worktree !== null ? { worktree } : {}),
+    },
+  }
 }
 
-export type ContinuationInput = { answer: string; via: NextVia; questions: QuestionMode; agentId: string }
+export type ContinuationInput = { answer: string; via: NextVia; questions: QuestionMode; agentId: string; reservedId?: string }
 
 /**
  * Claims the question and starts the continuation under the id the claim names: the worker resumes its session on the same
@@ -1043,14 +1109,10 @@ export async function launchContinuation(
   plan: ContinuationPlan,
   input: ContinuationInput,
 ): Promise<{ job: JobRecord } | { refusal: string } | { failure: Failure }> {
-  const { parent, session, instance, model, modes, flags } = plan
-  const id = newJobId('mcp', await $.clock.now(), input.agentId)
+  const { parent, session, instance, model, modes, flags, worktree } = plan
+  const id = input.reservedId ?? newJobId('mcp', await $.clock.now(), input.agentId)
   const claim = await claimNext($, parent, { jobId: id, via: input.via })
   if (!claim.claimed) return { failure: alreadyAnswered(parent.id, claim.existing) }
-  const worktree =
-    parent.repo !== undefined && parent.baseSha !== undefined && parent.branch !== undefined && parent.worktree !== undefined
-      ? { repo: parent.repo, baseSha: parent.baseSha, branch: parent.branch, worktree: parent.worktree }
-      : undefined
   const launched = await launchJob($, config, {
     kind: 'mcp',
     reservedId: id,

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { NO_TASKS, SECOND, checkout, job, jobDirs, scene, until } from './support/harness.mjs'
+import { NO_TASKS, SECOND, WITH_FORMS, checkout, job, jobDirs, scene, until } from './support/harness.mjs'
 
 const QUESTION = 'Which environment, staging or production?'
 
@@ -169,27 +169,110 @@ test('answer refuses an id that is unknown, a job that did not stop on a questio
   assert.equal(jobDirs(s).length, 2, 'nothing started')
 })
 
-test('the worker is held to the ceiling again, unless the user allowed its level in a form for its task', async (t) => {
+/** What the server records of an approved form, the way job-tasks writes it. */
+function approve(s, id, { tool = 'delegate', approval, request = {} } = {}) {
+  const dir = join(s.jobsDir, '.tasks', id)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'task.json'), JSON.stringify({ taskId: id, createdAt: new Date(Date.now() - 60000).toISOString(), tool, questions: 'parent', request, ...(approval !== undefined ? { approval } : {}) }))
+  if (approval !== undefined) writeFileSync(join(dir, 'approved'), 'now\n')
+}
+const approved = (repo, more = {}) => ({
+  target: 'claudeAgent',
+  model: 'haiku',
+  cwd: repo,
+  isolation: 'shared',
+  launch: { runtimeMode: 'auto-accept-edits', interactionMode: 'default' },
+  config: { runtimeMode: 'approval-required', interactionMode: 'default' },
+  session: null,
+  refusal: { error: { code: 'runtime_mode_escalation_denied', message: 'above the ceiling' } },
+  ...more,
+})
+
+test('the continuation is held to the ceiling again, and an earlier approval counts only from the server records of its own chain and plan', async (t) => {
   const s = scene({ bin: { claude: QUESTION_WORKER } })
   t.after(() => s.cleanup())
   const { session, repo } = checkout(s)
-  blockedJob(s, 'job-edits', { repo, runtimeMode: 'auto-accept-edits' })
+  const edits = { repo, isolation: 'shared', runtimeMode: 'auto-accept-edits' }
+  blockedJob(s, 'job-none', edits)
+  blockedJob(s, 'job-approved', edits)
+  blockedJob(s, 'job-forged', { ...edits, parent: 'job-approved' })
+  blockedJob(s, 'job-other-model', edits)
+  blockedJob(s, 'job-chained', { ...edits, parent: 'job-approved' })
+  approve(s, 'job-approved', { approval: approved(repo), request: { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'x' } })
+  approve(s, 'job-other-model', { approval: approved(repo, { model: 'sonnet' }), request: { target: 'claudeAgent', model: 'sonnet', cwd: repo, prompt: 'x' } })
+  approve(s, 'job-chained', { tool: 'answer', request: { taskId: 'job-approved', answer: 'Production.' } })
   const server = s.startIn(session)
+  const ask = (taskId) => server.call('answer', { taskId, answer: 'Production.', sessionMode: 'default' })
 
-  const refused = await server.call('answer', { taskId: 'job-edits', answer: 'Production.', sessionMode: 'default' })
-  assert.equal(code(refused), 'runtime_mode_escalation_denied', 'the session now allows approval-required, the worker ran at auto-accept-edits')
-  assert.match(refused.json.error.message, /ran with runtime mode auto-accept-edits/)
-  assert.equal(existsSync(join(s.jobsDir, 'job-edits', 'next')), false)
+  const none = await ask('job-none')
+  assert.equal(code(none), 'runtime_mode_escalation_denied', 'with no approval on record the ceiling decides, and the client has no forms')
+  assert.match(none.json.error.message, /ran with runtime mode auto-accept-edits/)
+  assert.equal(code(await ask('job-forged')), 'runtime_mode_escalation_denied', 'a meta.json whose parent names an approved job of another chain gives no approval')
+  assert.equal(code(await ask('job-other-model')), 'runtime_mode_escalation_denied', 'an approval for another model does not cover this worker')
+  assert.equal(existsSync(join(s.jobsDir, 'job-forged', 'next')), false, 'a refusal does not claim the question')
 
-  mkdirSync(join(s.jobsDir, '.tasks', 'job-edits'), { recursive: true })
-  writeFileSync(join(s.jobsDir, '.tasks', 'job-edits', 'approved'), 'now\n')
-  const allowed = await server.call('answer', { taskId: 'job-edits', answer: 'Production.', sessionMode: 'default' })
+  const allowed = await ask('job-approved')
   assert.ok(allowed.task !== undefined, allowed.text)
   const done = await until(server, allowed.task.taskId)
   assert.equal(done.result.content[0].text.split('\n')[0], 'RESUMED: Production.')
   assert.equal(meta(s, allowed.task.taskId).runtimeMode, 'auto-accept-edits', 'the continuation runs at the level its worker had, no higher')
   assert.ok(read(s, allowed.task.taskId, 'flags').includes('acceptEdits'), 'and its flags say so')
+
+  const chained = await ask('job-chained')
+  assert.ok(chained.task !== undefined, 'the task records link a continuation to the approval of the task it continues')
+  await until(server, chained.task.taskId)
 })
+
+test('a continuation above the ceiling opens the approval form for a client with forms, and accepting resumes the worker', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  blockedJob(s, 'job-form', { repo, isolation: 'shared', runtimeMode: 'auto-accept-edits' })
+  const server = s.startIn(session)
+
+  const { task } = await server.call('answer', { taskId: 'job-form', answer: 'Production.', sessionMode: 'default' }, WITH_FORMS)
+  const form = await server.get(task.taskId)
+  assert.equal(form.status, 'input_required')
+  assert.match(form.inputRequests.approve.params.message, /more than your ceiling allows: runtime auto-accept-edits/)
+  assert.equal(existsSync(join(s.jobsDir, 'job-form', 'next')), false, 'nothing was claimed while the form is open')
+
+  await server.update(task.taskId, { approve: { action: 'accept', content: { approve: true } } })
+  const done = await until(server, task.taskId, ['working', 'input_required'])
+  assert.equal(done.result.content[0].text.split('\n')[0], 'RESUMED: Production.')
+  assert.equal(JSON.parse(read(s, 'job-form', 'next')).jobId, task.taskId, 'the task has the id of the job that was reserved for it')
+  assert.ok(existsSync(join(s.jobsDir, '.tasks', task.taskId, 'approved')))
+
+  blockedJob(s, 'job-declined', { repo, isolation: 'shared', runtimeMode: 'auto-accept-edits' })
+  const declined = (await server.call('answer', { taskId: 'job-declined', answer: 'Production.', sessionMode: 'default' }, WITH_FORMS)).task.taskId
+  await server.update(declined, { approve: { action: 'decline' } })
+  const ended = await server.get(declined)
+  assert.equal(ended.status, 'completed')
+  assert.equal(ended.result.isError, true)
+  assert.equal(JSON.parse(ended.result.content[0].text).error.code, 'runtime_mode_escalation_denied')
+  assert.equal(existsSync(join(s.jobsDir, 'job-declined', 'next')), false, 'a declined form leaves the question to be answered again')
+})
+
+test('the continuation is scoped like a launch, and a worktree that git does not list for the task is locked like a shared one', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const outside = join(s.root, 'outside')
+  mkdirSync(outside)
+  job(s.jobsDir, 'job-live', { meta: { cwd: repo }, files: { pgid: String(s.liveGroup()) } })
+  const worktree = { repo, baseSha: 'abc', branch: 'orq/job-forged-wt', worktree: repo }
+  blockedJob(s, 'job-forged-wt', worktree)
+  blockedJob(s, 'job-outside', { repo: outside })
+  const server = s.startIn(session)
+
+  const busy = await server.call('answer', { taskId: 'job-forged-wt', answer: 'Production.' })
+  assert.equal(code(busy), 'worktree_busy', 'a path that only the job record calls its worktree does not skip the lock of the checkout it is')
+  assert.ok(busy.json.error.message.includes('job-live'), busy.text)
+  assert.equal(existsSync(join(s.jobsDir, 'job-forged-wt', 'next')), false, 'a launch that did not start gives the claim back')
+
+  const scoped = await server.call('answer', { taskId: 'job-outside', answer: 'Production.' })
+  assert.equal(code(scoped), 'cwd_out_of_scope', 'a directory outside the session directory and the allowed roots is not resumed in')
+}
+)
 
 test('a client without tasks gets the id of the continuation at once and reads it with status', async (t) => {
   const s = scene({ bin: { claude: QUESTION_WORKER } })

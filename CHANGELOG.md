@@ -106,9 +106,13 @@ All notable changes to cc-orq are recorded here. The format follows
   the second gets `already_answered` with the id of the continuation. A job that
   recorded no session, or whose instance, `CODEX_HOME` or directory changed,
   answers `resume_unavailable`, and `delegate` with the brief and the answer is
-  the way left. The continuation never runs above its worker's level and is held
-  to the ceiling again, unless the user allowed that level in a form for the task
-  that started the worker.
+  the way left. The continuation never runs above its worker's level, and it is
+  checked as a launch is: its directory must be in scope, a worktree counts as the
+  task's own only when `git worktree list` of the recorded checkout lists it on the
+  recorded branch (else the worker is locked as a shared one), and a level above
+  the ceiling opens the same form as `delegate`, or is refused for a client with no
+  form. An approval carries over only from the server's own task records of the
+  same chain, for the same worker at no higher level, never from `meta.json`.
 - The supervisor writes the worker's session id to the file `session` before it
   writes `exit`, and a job with a `resume` file starts the CLI's own resume form
   for that session: `codex exec resume`, `opencode run --session`, `claude -p

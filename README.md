@@ -980,11 +980,22 @@ starts:
 | `task_not_found` | No job has that id |
 | `already_answered` | The question already has a continuation, and the message names it. Two answers at once start one worker: the first claims the question with the file `next`, created whole and only when absent, and the other gets this |
 | `resume_unavailable` | The worker cannot be resumed: the job recorded no `session` (jobs from before this version have none), its instance is no longer configured as it was or its `CODEX_HOME` changed, or its directory is gone. The message says to `delegate` again with the brief and the answer, which is what 0.1 did. A refusal does not claim the question |
-| `runtime_mode_escalation_denied`, `interaction_mode_escalation_denied` | The level the worker ran at is above the ceiling now. The continuation never runs above its worker's level, and nothing lets `answer` ask for more. It is held to the ceiling again, unless you allowed that level in a form for the task that started the worker, which covers its continuations |
+| `runtime_mode_escalation_denied`, `interaction_mode_escalation_denied` | The level the worker ran at is above the ceiling now, as it is for a launch, and the client has no form to ask you in |
+| `cwd_out_of_scope`, `worktree_busy` | The directory is outside the session directory and the allowed roots, or a shared worker's checkout has a live job, as for a launch |
 
 The continuation takes from the job that asked its repository, base commit,
 branch, worktree and directory, its instance, model, effort, and its runtime and
 interaction modes, and runs with the flags that a launch at those modes writes.
+It never runs above its worker's level, and nothing lets `answer` ask for more.
+It is checked as a launch is: the directory must lie in the session directory or
+an allowed root, a worktree counts as the task's own only when `git worktree
+list` of the recorded checkout lists it on the recorded branch (otherwise the
+worker runs, and is locked, as a shared one), and a level above the ceiling opens
+the same form as `delegate` for a client with tasks and forms, and is refused for
+any other. An earlier approval carries over only from the task records the
+server wrote for the same chain of tasks, and only for the same worker (instance,
+model, directory and isolation) at no higher level; the `parent` in a job's
+`meta.json` never gives one, since a worker can write that file.
 Its prompt is your answer, then the question protocol, so it can ask again.
 `status` and `list` show the link: `parent` on the continuation, `next` on the
 job that asked, and `question` in `list` is true only while nobody has answered.

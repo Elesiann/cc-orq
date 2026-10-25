@@ -28,6 +28,7 @@ import {
   readNext,
   taskStatusOf,
   writeCancel,
+  type ContinuationPlan,
   type CoreEngine,
   type JobView,
   type TaskLaunchSpec,
@@ -355,6 +356,28 @@ function aboveCeilingNow(refusal: Failure, modes: Modes): Failure {
   return fail(refusal.error.code, `the worker ran with ${level}, which is above the ceiling now, so it is not resumed. ${message}`)
 }
 
+/** The worker is the one the user was shown, and no more than the level they allowed. */
+function withinApproval(approval: Approval, plan: ContinuationPlan): boolean {
+  return (
+    approval.target === plan.instance.id &&
+    approval.model === plan.model &&
+    approval.cwd === plan.requestCwd &&
+    approval.isolation === plan.isolation &&
+    runtimeModeRank(plan.modes.runtimeMode) <= runtimeModeRank(approval.launch.runtimeMode) &&
+    interactionModeRank(plan.modes.interactionMode) <= interactionModeRank(approval.launch.interactionMode)
+  )
+}
+
+/** A launch that did not start, said as the typed code it carries when it names one. */
+async function continuationRefusal($: CoreEngine, text: string): Promise<TaskResult> {
+  const named = /^orq: mcp refused: ([a-z_]+): ([\s\S]*)$/.exec(text)
+  const code = FAILURE_CODES.find((candidate) => candidate === named?.[1])
+  if (code !== undefined && named?.[2] !== undefined) return answerOf(fail(code, named[2]), true)
+  const failure = `orq: answer failed: ${text}`
+  await $.ui.log(failure)
+  return { content: [{ type: 'text', text: failure }], isError: true }
+}
+
 const widest = <Mode extends string>(asked: Mode | undefined, effective: Mode, rank: (mode: Mode) => number): Mode =>
   asked !== undefined && rank(asked) > rank(effective) ? asked : effective
 
@@ -373,14 +396,28 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     await $.fs.write(`${config.jobsDir}/${TASKS_DIR}/${record.taskId}/task.json`, JSON.stringify(record))
   }
 
-  /** Whether the user allowed this level in a form: the task of the job, or of the job it continues, has its `approved` marker. */
-  async function allowedInAForm(config: OrqConfig, job: JobRecord): Promise<boolean> {
-    let at: JobRecord | null = job
-    for (let hops = 0; at !== null && hops < 64; hops += 1) {
-      if (await $.fs.exists(`${config.jobsDir}/${TASKS_DIR}/${at.id}/approved`)) return true
-      at = at.parent === undefined ? null : await readMeta($, config.jobsDir, at.parent)
+  /**
+   * What the user approved in a form for the task this worker belongs to, read from the server's own task records and never
+   * from meta.json, which the worker can write. The record of the job names the approval, or, for the task of an answer,
+   * the job it answered, and the walk goes on from there. A record without the `approved` marker approves nothing.
+   */
+  async function approvalOfChain(config: OrqConfig, jobId: string): Promise<Approval | null> {
+    let id = jobId
+    for (let hops = 0; hops < 64; hops += 1) {
+      const dir = `${config.jobsDir}/${TASKS_DIR}/${id}`
+      if (!isSafeJobId(id) || !(await $.fs.exists(`${dir}/task.json`))) return null
+      let record: TaskRecord | null
+      try {
+        record = parseRecord(JSON.parse(await $.fs.read(`${dir}/task.json`)), id)
+      } catch {
+        return null
+      }
+      if (record === null) return null
+      if (record.approval !== undefined) return (await $.fs.exists(`${dir}/approved`)) ? record.approval : null
+      if (record.tool !== 'answer') return null
+      id = record.request.taskId ?? ''
     }
-    return false
+    return null
   }
 
   async function answerCreate(args: unknown, client: ClientInfo): Promise<Created> {
@@ -395,24 +432,44 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     }
     const next = await readNext($, parent)
     if (next !== null) return { result: answerOf(alreadyAnswered(parent.id, next), true) }
-    const planned = await continuationPlan($, config, parent)
+    const planned = await continuationPlan($, config, parent, await sessionDir())
     if ('failure' in planned) return { result: answerOf(planned.failure, true) }
     const { plan } = planned
-    const { refusal } = resolveCeiling({
-      config: config.ceiling,
-      session: sessionCeiling(call.sessionMode),
-      isolation: parent.branch !== undefined ? 'worktree' : 'shared',
-      request: plan.modes,
-    })
-    if (refusal !== null && !(await allowedInAForm(config, parent))) return { result: answerOf(aboveCeilingNow(refusal, plan.modes), true) }
     const now = await $.clock.now()
+    const { refusal } = resolveCeiling({ config: config.ceiling, session: sessionCeiling(call.sessionMode), isolation: plan.isolation, request: plan.modes })
+    if (refusal !== null) {
+      // As for a launch: above the ceiling, a client with forms asks the user, and any other is refused. An earlier approval counts
+      // only when the server recorded it for this chain and the worker is the one it was given for.
+      const earlier = await approvalOfChain(config, parent.id)
+      if (earlier === null || !withinApproval(earlier, plan)) {
+        const above = aboveCeilingNow(refusal, plan.modes)
+        if (!client.tasks || !client.forms) return { result: answerOf(above, true) }
+        const taskId = newJobId('mcp', now, await agentId())
+        const approval: Approval = {
+          target: plan.instance.id,
+          model: plan.model,
+          cwd: plan.requestCwd,
+          isolation: plan.isolation,
+          launch: plan.modes,
+          config: configCeiling(config.ceiling, plan.isolation),
+          session: sessionCeiling(call.sessionMode),
+          refusal: above,
+        }
+        await writeRecord(config, {
+          taskId,
+          createdAt: iso(now),
+          tool: 'answer',
+          questions: 'parent',
+          request: { taskId: parent.id, answer: call.answer },
+          approval,
+          ...(client.toolUseId !== undefined ? { toolUseId: client.toolUseId } : {}),
+        })
+        return { taskId }
+      }
+    }
     const launched = await launchContinuation($, config, plan, { answer: call.answer, via: 'answer', questions: 'parent', agentId: await agentId() })
     if ('failure' in launched) return { result: answerOf(launched.failure, true) }
-    if ('refusal' in launched) {
-      const failure = `orq: answer failed: ${launched.refusal}`
-      await $.ui.log(failure)
-      return { result: { content: [{ type: 'text', text: failure }], isError: true } }
-    }
+    if ('refusal' in launched) return { result: await continuationRefusal($, launched.refusal) }
     const taskId = launched.job.id
     const running = { result: answerOf({ taskId, status: 'running' }, false) }
     if (!client.tasks) return running
@@ -497,10 +554,35 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     return { taskId }
   }
 
+  /** The form of a continuation was accepted: the worker resumes under the id the task has, if it is still what the form showed. */
+  async function launchApprovedAnswer(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, approval: Approval): Promise<void> {
+    const { record, dir } = loaded
+    const refuse = (failure: Failure): Promise<void> => $.fs.write(`${dir}/refused`, JSON.stringify(failure))
+    const parent = await readMeta($, config.jobsDir, record.request.taskId ?? '')
+    if (parent === null) return refuse(fail('task_not_found', `no task ${record.request.taskId ?? ''}`))
+    const planned = await continuationPlan($, config, parent, await sessionDir())
+    if ('failure' in planned) return refuse(planned.failure)
+    if (!withinApproval(approval, planned.plan)) return refuse(fail('invalid_request', CHANGED_SINCE_SHOWN))
+    const launched = await launchContinuation($, config, planned.plan, {
+      answer: record.request.answer ?? '',
+      via: 'answer',
+      questions: 'parent',
+      agentId: await agentId(),
+      reservedId: record.taskId,
+    })
+    if ('job' in launched) {
+      if (await $.fs.exists(`${dir}/cancelled`)) await writeCancel($, launched.job, 'cancelled while it started')
+      return
+    }
+    if ('failure' in launched) return refuse(launched.failure)
+    await $.fs.write(`${dir}/refused`, textOf(await continuationRefusal($, launched.refusal)))
+  }
+
   async function launchApproved(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, approval: Approval): Promise<void> {
     const { record, dir } = loaded
     const refuse = (text: string): Promise<void> => $.fs.write(`${dir}/refused`, text)
     await $.fs.write(`${dir}/approved`, `${iso(await $.clock.now())}\n`)
+    if (record.tool === 'answer') return launchApprovedAnswer(config, loaded, approval)
     const call = parseDelegateInput(record.request)
     if (isFailure(call)) return refuse(JSON.stringify(call))
     const effective = effectiveOf(approval)
