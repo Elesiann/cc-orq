@@ -248,7 +248,7 @@ const FAILURE = (code, message) => ({ error: { code, message } })
 // Negotiation: server/discover, the legacy initialize, and tools/list.
 
 const INSTRUCTIONS = readFileSync(join(REPO, 'server', 'instructions.md'), 'utf8')
-const TOOLS = ['capabilities', 'delegate', 'status', 'list', 'cancel', 'integrate']
+const TOOLS = ['capabilities', 'delegate', 'answer', 'status', 'list', 'cancel', 'integrate']
 
 const LEGACY_INIT = {
   protocolVersion: SUPPORTED_PROTOCOL_VERSIONS[0],
@@ -301,7 +301,7 @@ test('the legacy initialize is served too, with the instructions, and its tools/
   )
 })
 
-test('tools/list lists exactly the six tools, with the input schemas of 0.1, the new list and the new delegate', async (t) => {
+test('tools/list lists exactly the seven tools, with the input schemas of 0.1, the new list, the new delegate and the answer', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())
   const server = s.start()
@@ -330,6 +330,16 @@ test('tools/list lists exactly the six tools, with the input schemas of 0.1, the
     additionalProperties: false,
   })
   assert.deepEqual(schemas.integrate, INTEGRATE_INPUT_SCHEMA)
+  assert.deepEqual(schemas.answer, {
+    type: 'object',
+    properties: {
+      taskId: { type: 'string', description: 'The taskId in the BLOCKED text of the job that asked the question.' },
+      answer: { type: 'string', minLength: 1, maxLength: 20000, description: 'The answer, at most 20,000 characters. The worker gets it as its next message, in the session it already has.' },
+      sessionMode: { type: 'string', description: 'Filled by the cc-orq hook; leave it out.' },
+    },
+    required: ['taskId', 'answer'],
+    additionalProperties: false,
+  })
   assert.equal(schemas.list.properties.limit.type, 'integer')
   assert.equal(schemas.list.properties.limit.minimum, 1)
   assert.equal(schemas.list.properties.limit.maximum, 50)
@@ -342,11 +352,10 @@ test('tools/list lists exactly the six tools, with the input schemas of 0.1, the
   assert.equal(described.capabilities.includes('do not follow the session yet'), false, 'the modes follow the session now')
 })
 
-test('server/instructions.md is under 4,000 bytes and names each of the six tools, and none that does not exist yet', () => {
+test('server/instructions.md is under 4,000 bytes and names each of the seven tools', () => {
   assert.ok(Buffer.byteLength(INSTRUCTIONS) < 4000, `${Buffer.byteLength(INSTRUCTIONS)} bytes`)
   for (const tool of TOOLS) assert.ok(INSTRUCTIONS.includes(`\`${tool}\``), `the instructions name ${tool}`)
   for (const advice of ['not_fast_forward', 'merge_conflict']) assert.ok(INSTRUCTIONS.includes(advice), advice)
-  assert.equal(/`answer`/.test(INSTRUCTIONS), false)
 })
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -407,7 +416,7 @@ test('status answers each state of a job as the 0.1 mod did', async (t) => {
     ...base,
     startedAtIso: iso(SECOND),
     finishedAtIso: iso(SECOND + 4),
-    result: 'BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.',
+    result: 'BLOCKED on a question (taskId job-blk): Which branch?\n\nThis worker cannot be resumed (it recorded no session), so answer it in a new delegate with the original brief plus the answer.',
   })
   const failed = await status('job-bad')
   assert.deepEqual(failed, {

@@ -45,6 +45,8 @@ export type JobRecord = {
   branch?: string
   /** The task's worktree path: cwd, or the directory above cwd when the task ran in a subdirectory. */
   worktree?: string
+  /** The job whose question this job answers, when it resumes that job's worker. */
+  parent?: string
 }
 
 /** True when path is root or lies under it. Both are resolved paths. */
@@ -93,6 +95,7 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (typeof raw.baseSha === 'string' && raw.baseSha !== '') job.baseSha = raw.baseSha
   if (typeof raw.branch === 'string' && raw.branch !== '') job.branch = raw.branch
   if (typeof raw.worktree === 'string' && raw.worktree !== '') job.worktree = raw.worktree
+  if (typeof raw.parent === 'string' && isSafeJobId(raw.parent)) job.parent = raw.parent
   return job
 }
 

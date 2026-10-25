@@ -15,13 +15,17 @@ import {
   type TaskIsolation,
 } from '../hooks/contract.ts'
 import {
+  alreadyAnswered,
   composeAnswer,
+  continuationPlan,
   jobView,
+  launchContinuation,
   launchTaskFromHeader,
   launchTaskJob,
   newJobId,
   planTaskLaunch,
   readMeta,
+  readNext,
   taskStatusOf,
   writeCancel,
   type CoreEngine,
@@ -41,7 +45,7 @@ import {
   type TaskResult,
   type TaskSource,
 } from './protocol.ts'
-import { QUESTION_MODES, parseDelegateInput } from './tools.ts'
+import { QUESTION_MODES, parseAnswerInput, parseDelegateInput } from './tools.ts'
 
 const TASKS_DIR = '.tasks'
 const APPROVE = 'approve'
@@ -67,12 +71,13 @@ type Approval = {
 }
 
 const ISOLATIONS: readonly TaskIsolation[] = ['worktree', 'shared']
+const TASK_TOOLS = ['delegate', 'answer'] as const
 
 /** `task.json` is written once, before the task is answered, and never changed. */
 type TaskRecord = {
   taskId: string
   createdAt: string
-  tool: 'delegate'
+  tool: 'delegate' | 'answer'
   questions: (typeof QUESTION_MODES)[number]
   request: Record<string, string>
   toolUseId?: string
@@ -99,7 +104,8 @@ function parseApproval(raw: unknown): Approval | null {
 }
 
 function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
-  if (!isRecord(raw) || raw.taskId !== taskId || raw.tool !== 'delegate') return null
+  const tool = isRecord(raw) ? TASK_TOOLS.find((candidate) => candidate === raw.tool) : undefined
+  if (!isRecord(raw) || raw.taskId !== taskId || tool === undefined) return null
   const { createdAt, questions, request, toolUseId, approval } = raw
   const mode = QUESTION_MODES.find((candidate) => candidate === questions)
   if (typeof createdAt !== 'string' || Number.isNaN(Date.parse(createdAt)) || mode === undefined || !isRecord(request)) return null
@@ -113,7 +119,7 @@ function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
   return {
     taskId,
     createdAt,
-    tool: 'delegate',
+    tool,
     questions: mode,
     request: text,
     ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
@@ -342,6 +348,13 @@ function isWhatWasShown(spec: TaskLaunchSpec, approval: Approval): boolean {
   )
 }
 
+/** The ceiling refusal, said for a worker that is resumed rather than launched: an answer has no level to ask for less. */
+function aboveCeilingNow(refusal: Failure, modes: Modes): Failure {
+  const level = refusal.error.code === 'interaction_mode_escalation_denied' ? `interaction mode ${modes.interactionMode}` : `runtime mode ${modes.runtimeMode}`
+  const message = refusal.error.message.replace(/otherwise ask for [^.]* at most\.$/, 'otherwise delegate the task anew within the ceiling.')
+  return fail(refusal.error.code, `the worker ran with ${level}, which is above the ceiling now, so it is not resumed. ${message}`)
+}
+
 const widest = <Mode extends string>(asked: Mode | undefined, effective: Mode, rank: (mode: Mode) => number): Mode =>
   asked !== undefined && rank(asked) > rank(effective) ? asked : effective
 
@@ -358,6 +371,65 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
 
   async function writeRecord(config: OrqConfig, record: TaskRecord): Promise<void> {
     await $.fs.write(`${config.jobsDir}/${TASKS_DIR}/${record.taskId}/task.json`, JSON.stringify(record))
+  }
+
+  /** Whether the user allowed this level in a form: the task of the job, or of the job it continues, has its `approved` marker. */
+  async function allowedInAForm(config: OrqConfig, job: JobRecord): Promise<boolean> {
+    let at: JobRecord | null = job
+    for (let hops = 0; at !== null && hops < 64; hops += 1) {
+      if (await $.fs.exists(`${config.jobsDir}/${TASKS_DIR}/${at.id}/approved`)) return true
+      at = at.parent === undefined ? null : await readMeta($, config.jobsDir, at.parent)
+    }
+    return false
+  }
+
+  async function answerCreate(args: unknown, client: ClientInfo): Promise<Created> {
+    const config = await getConfig()
+    const call = parseAnswerInput(args)
+    if (isFailure(call)) return { result: answerOf(call, true) }
+    const parent = await readMeta($, config.jobsDir, call.taskId)
+    if (parent === null) return { result: answerOf(fail('task_not_found', `no task ${call.taskId}`), true) }
+    const view = await jobView($, parent)
+    if (view.status !== 'done' || view.question === null) {
+      return { result: answerOf(fail('invalid_request', `task ${parent.id} has not stopped on a question (it is ${taskStatusOf(view)}), so there is nothing to answer`), true) }
+    }
+    const next = await readNext($, parent)
+    if (next !== null) return { result: answerOf(alreadyAnswered(parent.id, next), true) }
+    const planned = await continuationPlan($, config, parent)
+    if ('failure' in planned) return { result: answerOf(planned.failure, true) }
+    const { plan } = planned
+    const { refusal } = resolveCeiling({
+      config: config.ceiling,
+      session: sessionCeiling(call.sessionMode),
+      isolation: parent.branch !== undefined ? 'worktree' : 'shared',
+      request: plan.modes,
+    })
+    if (refusal !== null && !(await allowedInAForm(config, parent))) return { result: answerOf(aboveCeilingNow(refusal, plan.modes), true) }
+    const now = await $.clock.now()
+    const launched = await launchContinuation($, config, plan, { answer: call.answer, via: 'answer', questions: 'parent', agentId: await agentId() })
+    if ('failure' in launched) return { result: answerOf(launched.failure, true) }
+    if ('refusal' in launched) {
+      const failure = `orq: answer failed: ${launched.refusal}`
+      await $.ui.log(failure)
+      return { result: { content: [{ type: 'text', text: failure }], isError: true } }
+    }
+    const taskId = launched.job.id
+    const running = { result: answerOf({ taskId, status: 'running' }, false) }
+    if (!client.tasks) return running
+    try {
+      await writeRecord(config, {
+        taskId,
+        createdAt: iso(now),
+        tool: 'answer',
+        questions: 'parent',
+        request: { taskId: parent.id },
+        ...(client.toolUseId !== undefined ? { toolUseId: client.toolUseId } : {}),
+      })
+    } catch (err) {
+      await $.ui.log(`orq: answer started ${taskId} but could not write its task record: ${String(err)}`)
+      return running
+    }
+    return { taskId }
   }
 
   async function create(args: unknown, client: ClientInfo): Promise<Created> {
@@ -463,6 +535,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
 
   return {
     async create(tool, args, client) {
+      if (tool === 'answer') return answerCreate(args, client)
       if (tool !== 'delegate') throw new Error(`orq: no task tool named ${tool}`)
       return create(args, client)
     },

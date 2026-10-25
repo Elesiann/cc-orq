@@ -389,7 +389,9 @@ test('create answers the other refusals at once, for every client, and records n
   const nonRecord = await tasks.create('delegate', null, CLIENT)
   assert.match(nonRecord.result.content[0].text, /^\{"error":\{"code":"invalid_request","message":"delegate needs /)
   assert.deepEqual(jobDirs(s), [])
-  await assert.rejects(() => tasks.create('answer', {}, CLIENT), /no task tool named answer/)
+  const noAnswer = await tasks.create('answer', {}, CLIENT)
+  assert.equal(JSON.parse(noAnswer.result.content[0].text).error.code, 'invalid_request', 'answer is a task tool, and an empty call is refused as input')
+  await assert.rejects(() => tasks.create('wait', {}, CLIENT), /no task tool named wait/)
 })
 
 // ---------------------------------------------------------------------------------------------------------------------

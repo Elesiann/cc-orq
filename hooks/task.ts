@@ -38,7 +38,7 @@ const TASK_AGENT_DESCRIPTION =
   'and `role: implementation | research | review | design | test | general`. ' +
   "Never pass the Agent tool's own `isolation` option. " +
   'After spawning, end the turn and do not poll: the answer arrives when the job ends, and its footer carries `taskId <id>`. ' +
-  'A handback that starts `BLOCKED on a question` is answered by a new `cc-orq:task` with the original brief plus the answer: settle the question yourself when the brief and the conversation do, and ask the user when they do not. ' +
+  'A handback that starts `BLOCKED on a question` is answered with the `answer` tool, which resumes the same worker in a new job: settle the question yourself when the brief and the conversation do, and ask the user when they do not. ' +
   'A review round is a new task too, run by a different model family than the implementer.'
 const ONE_LINE_PROMPT =
   'An orq runner: the orq plugin serves your steps and runs your task on the external CLI its target line names. Call mcp__cc-orq__wait with the job id until the job finishes.'
