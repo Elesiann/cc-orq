@@ -10,10 +10,11 @@ them run above your prompt.**
 
 cc-orq is a [Claude Code mod](https://code.claude.com/docs/en/plugins/mods/overview)
 that brings the orchestrator of [T3 Code](https://github.com/pingdotgg/t3code)
-into Claude Code. Your session delegates self-contained tasks through one agent
-type, `cc-orq:task`, to the coding agent CLIs you already use. Each task runs as
-a detached job in its own git worktree, under your session's permission
-ceiling, and its answer comes back to the conversation when it ends.
+into Claude Code. Your session delegates self-contained tasks through the agent
+type `cc-orq:task`, or through the `delegate` tool, to the coding agent CLIs you
+already use. Each task runs as a detached job in its own git worktree, under a
+permission ceiling. The answer of a `cc-orq:task` comes back to the conversation
+when the task ends, and a `delegate` job is read with `status`.
 
 <p align="center">
   <img src="docs/images/card.gif" width="900" alt="The task card above the prompt: a Claude, an OpenCode and a Codex task, each with its model, status, last action and a running timer; the OpenCode task finishes and shows its token counts">
@@ -29,6 +30,7 @@ ceiling, and its answer comes back to the conversation when it ends.
 - [Quick start](#quick-start)
 - [Commands](#commands)
 - [Delegating with cc-orq:task](#delegating-with-cc-orqtask)
+- [Permission ceiling](#permission-ceiling)
 - [Worktrees and integrate](#worktrees-and-integrate)
 - [Tools](#tools)
 - [Task card](#task-card)
@@ -46,9 +48,10 @@ ceiling, and its answer comes back to the conversation when it ends.
   OpenCode, Antigravity or the Claude CLI. The task's header names the
   provider instance and the model, so the parent session picks the right model
   for each job.
-- **A permission ceiling.** A task never runs with a broader mode than the
-  session that spawned it, and a driver refuses a mode it cannot enforce with a
-  CLI flag.
+- **A permission ceiling.** A task never runs with a broader mode than your
+  `ceiling` configuration allows, nor, while the hook that reads the session's
+  permission mode runs, than that mode allows. A driver refuses a mode it cannot
+  enforce with a CLI flag.
 - **Jobs that outlive the session.** Workers run detached, keep their prompt,
   events and answer on disk, and can be read, cancelled or integrated from a
   later session.
@@ -57,10 +60,10 @@ ceiling, and its answer comes back to the conversation when it ends.
   it back with a fast-forward or a merge commit.
 - **A live view.** A card above the prompt shows each job's model, status, last
   action and timer, and `/orq-panel` lists the jobs, tails one, and cancels it.
-- **An MCP server with five tools.** `capabilities`, `status`, `list`, `cancel`
-  and `integrate` come from a stdio MCP server that the plugin starts, so they
-  work whether or not the mod loads. `capabilities`, `status` and `cancel`
-  answer in the shapes of T3 Code's orchestrator contract.
+- **An MCP server with six tools.** `capabilities`, `delegate`, `status`,
+  `list`, `cancel` and `integrate` come from a stdio MCP server that the plugin
+  starts, so they work whether or not the mod loads. `capabilities`, `status`
+  and `cancel` answer in the shapes of T3 Code's orchestrator contract.
 - **Questions instead of guesses.** A blocked worker writes a question and
   stops, and the parent answers it in a new task.
 
@@ -73,12 +76,12 @@ ceiling, and its answer comes back to the conversation when it ends.
 | | Version | Why |
 | --- | --- | --- |
 | [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
-| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `status`, `list`, `cancel` and `integrate` are gone |
+| [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `delegate`, `status`, `list`, `cancel` and `integrate` are gone |
 | Linux | | Jobs run under `systemd-run` or `setsid` |
-| `bash`, `python3`, `git` | | The supervisor, the event extractor and worktrees |
+| `bash`, `python3`, `git` | | The supervisor, the event extractor, worktrees, and the hook that reads the session's permission mode |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
 
-The five tools of the MCP server work in every session. The `cc-orq:task`
+The six tools of the MCP server work in every session. The `cc-orq:task`
 agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
 default from 2.1.287 on, and an organization can turn them off, which leaves
 only the server's tools.
@@ -232,25 +235,6 @@ Review the diff on this branch and list the risks.
   given for a refused task. A refusal from the ceiling or the driver names its
   code, such as `runtime_mode_unsupported`.
 
-### Permission ceiling
-
-The parent session's permission mode sets the most a task may do. The mode
-comes only from the `Agent` call that spawned that task. When that call set no
-mode, the ceiling is `approval-required` with interaction `default`, and the
-debug log says `orq: ceiling for AGENT_ID: no permission mode captured at spawn`.
-The session's last `cc-orq:task` mode and `permissions.defaultMode` in settings never
-raise a task's ceiling.
-
-| Parent permission mode | Runtime ceiling | Interaction ceiling |
-| --- | --- | --- |
-| `plan` | `approval-required` | `plan` |
-| `default` | `approval-required` | `default` |
-| `acceptEdits` | `auto-accept-edits` | `default` |
-| `auto` | `auto` | `default` |
-| `dontAsk` | `approval-required` | `default` |
-| `bypassPermissions` | `full-access` | `default` |
-| none, or any other value | `approval-required` | `default` |
-
 ### Working directory
 
 `cwd` is resolved through symlinks (`realpath`), and the resolved path must lie
@@ -260,35 +244,16 @@ the answer names the roots. A symlink is judged where it points, so a link insid
 the session that points elsewhere is refused. A path that does not exist, or is
 not a directory, is refused too.
 
-Runtime modes rise in this order: `approval-required`, `auto-accept-edits`,
-`auto`, `full-access`. A task that asks for a broader mode than its ceiling is
-refused with `runtime_mode_escalation_denied`; `interaction=default` under a
-`plan` ceiling is refused with `interaction_mode_escalation_denied`.
-
-Not every driver can enforce every runtime mode with a flag. A mode it cannot
-enforce is refused with `runtime_mode_unsupported`, so a task never runs with a
-CLI default broader than the ceiling.
-
-| Driver | `approval-required` | `auto-accept-edits` | `auto` | `full-access` | `interaction=plan` |
-| --- | --- | --- | --- | --- | --- |
-| `codex` | `-s read-only` | `-s workspace-write` | `--approve-for-me` | `-s danger-full-access --dangerously-bypass-approvals-and-sandbox` | refused |
-| `opencode` | `--agent plan` | refused | `--auto` | refused | `--agent plan` |
-| `antigravity` | `--sandbox` | `--mode accept-edits` | `--mode accept-edits` (narrower) | `--dangerously-skip-permissions` | adds `--mode plan` |
-| `claudeAgent` | `--permission-mode manual` | `--permission-mode acceptEdits` | `--permission-mode auto` | `--permission-mode bypassPermissions` | `--permission-mode plan` |
-
-Supported runtime modes per driver: `codex`, `antigravity` and `claudeAgent`
-support all four; `opencode` supports `approval-required` and `auto`. The
-`claudeAgent` `approval-required` row pins `--permission-mode manual`, so the
-`permissions.defaultMode` in the user's settings cannot widen the child. The
-`codex` `auto` row sends `--approve-for-me` without `-s`, because the CLI refuses
-the pair; its sandbox follows the Codex config.
+The `delegate` tool takes the session's working directory from the
+`CLAUDE_PROJECT_DIR` that Claude Code sets for the server. Without it, only the
+`allowedRoots` entries count.
 
 ### Handback
 
 How a finished task is delivered reads the mode in this order: the task's own
 spawn, then the session's last `cc-orq:task` spawn, then `permissions.defaultMode`
 in settings. This choice only sets the format of the answer. It never changes
-the ceiling above.
+the [ceiling](#permission-ceiling).
 
 A task's job runs detached. The subagent waits on it through `mcp__cc-orq__wait`,
 one call per `waitSeconds` slice, and each call answers `finished`,
@@ -310,6 +275,148 @@ not reach the mod.
 
 Stopping the subagent with `TaskStop` writes the job's `cancel` file, so the
 supervisor stops the job.
+
+## Permission ceiling
+
+A task never runs with a broader mode than its ceiling. The ceiling is the lower
+of two limits: the `ceiling` in your [configuration](#configuration), and the
+permission mode of the session that starts the task. The configuration's limit
+always holds. The session's limit reaches `delegate` through a hook, and holds
+only while that hook runs (see [The session's limit](#the-sessions-limit)). The
+`delegate` tool and the `cc-orq:task` agent both obey the ceiling.
+
+### The configuration's limit
+
+`ceiling` in `~/.config/orq/config.json` sets three limits:
+
+| Field | Limits | Default |
+| --- | --- | --- |
+| `runtime` | The runtime mode of a task in its own worktree (`isolation: worktree`) | `auto-accept-edits` |
+| `sharedRuntime` | The runtime mode of a task that runs in the checkout itself (`isolation: shared`) | `approval-required` |
+| `interaction` | The interaction mode of every task | `default` |
+
+With the defaults, a worker edits only inside its own worktree, and a `shared`
+worker only reads. A value that is not a valid mode counts as the narrowest one,
+`approval-required` (`plan` for `interaction`), and `capabilities` reports it in
+`ceiling.warnings`.
+
+### The session's limit
+
+| Session permission mode | Runtime limit | Interaction limit |
+| --- | --- | --- |
+| `plan` | `approval-required` | `plan` |
+| `default`, `manual` | `approval-required` | `default` |
+| `acceptEdits` | `auto-accept-edits` | `default` |
+| `auto` | `auto` | `default` |
+| `dontAsk` | `approval-required` | `default` |
+| `bypassPermissions` | `full-access` | `default` |
+| any other value | `approval-required` | `default` |
+
+`manual` is the name that `claude --help` gives the prompting mode in 2.1.310.
+A hook of a session started with `--permission-mode manual` reports it as `default`.
+
+The `cc-orq:task` agent reads the mode from the `Agent` call that spawned the
+task. When that call set no mode, the limit is `approval-required` with
+interaction `default`, and the debug log says
+`orq: ceiling for AGENT_ID: no permission mode captured at spawn`. The session's
+last `cc-orq:task` mode and `permissions.defaultMode` in settings never raise it.
+
+The `delegate` tool reads the mode from its `sessionMode` field. A `PreToolUse`
+hook, `scripts/session-mode-hook.sh`, fills the field from the session and
+replaces whatever the model wrote there. Claude Code drops input keys that a
+tool's schema does not name, so `sessionMode` is in the schema of `delegate` and
+`capabilities`, described as filled by the hook. The hook returns the changed
+input and never a permission decision, so every call still goes through the
+session's own permission check.
+
+The session's limit holds only while the hook runs. Without the hook, as when you
+turn hooks off with `disableAllHooks` or use a client other than Claude Code, the
+server cannot tell the session's mode. It takes the `sessionMode` that the call
+carries, if any, as given. The configuration's limit is then the most a task can
+get, and a value the model writes can lower the ceiling but never raise it above
+that limit.
+
+The hook blocks a cc-orq tool call when it cannot give the server the session's
+mode: when `python3` is missing, when its input is not what Claude Code sends, or
+when `permission_mode` is present but empty or not text. It stops the call and
+writes the reason to stderr, because a call let through that way would reach the
+server with a `sessionMode` that the model wrote itself, and a forged mode lifts
+the limit above the session's real one. A hook input with no `permission_mode`
+key at all is not blocked: the hook removes the model's `sessionMode`, and the
+configuration alone limits the task.
+
+A hook that outlives its timeout does not block the call (measured on 2.1.310),
+and the call then reaches the server as the model wrote it. The hook takes about
+30 ms and its timeout is 30 s. So that it ends before that, the hook reads at most
+8 MiB and gives up after 20 s, both with exit 2. `delegate` also takes a prompt of
+at most 200,000 characters. That cap keeps the usual input small. It does not
+bound the whole input, since the other fields are free text.
+
+### The effective ceiling
+
+The effective ceiling is the lower of the two limits on each axis. Runtime modes
+rise in this order: `approval-required`, `auto-accept-edits`, `auto`,
+`full-access`. Interaction modes rise as `plan`, then `default`. A `sessionMode`
+that the model writes never raises the ceiling above the configuration's limit.
+Whether the session's own limit holds depends on the hook, as the previous
+section says.
+
+A request that leaves out `runtime` or `interaction` gets the effective ceiling.
+A request above it is refused before anything starts, with
+`runtime_mode_escalation_denied` or `interaction_mode_escalation_denied`. The
+message gives each limit and names what lifts each one that stands in the way:
+raise the `ceiling` field it names in the configuration, run the session in a
+mode that allows the request, or both. `capabilities` reports the limits as
+`ceiling.config`, `ceiling.session` and `ceiling.effective`, with one effective
+ceiling per isolation. Its top-level `runtimeMode` and `interactionMode` are the
+effective ceiling of a `worktree` task.
+
+### What each driver can enforce
+
+Not every driver can enforce every runtime mode with a flag. A mode it cannot
+enforce is refused with `runtime_mode_unsupported`, and the message lists the
+modes the driver supports, so a task never runs with a CLI default broader than
+the ceiling.
+
+| Driver | `approval-required` | `auto-accept-edits` | `auto` | `full-access` | `interaction=plan` |
+| --- | --- | --- | --- | --- | --- |
+| `codex` | `-s read-only` | `-s workspace-write` | `--approve-for-me` | `-s danger-full-access --dangerously-bypass-approvals-and-sandbox` | refused |
+| `opencode` | `--agent plan` | refused | `--auto` | refused | `--agent plan` |
+| `antigravity` | `--sandbox` | `--mode accept-edits` | `--mode accept-edits` (narrower) | `--dangerously-skip-permissions` | adds `--mode plan` |
+| `claudeAgent` | `--permission-mode manual` | `--permission-mode acceptEdits` | `--permission-mode auto` | `--permission-mode bypassPermissions` | `--permission-mode plan` |
+
+Supported runtime modes per driver: `codex`, `antigravity` and `claudeAgent`
+support all four; `opencode` supports `approval-required` and `auto`. The
+`claudeAgent` `approval-required` row pins `--permission-mode manual`, so the
+`permissions.defaultMode` in the user's settings cannot widen the child. The
+`codex` `auto` row sends `--approve-for-me` without `-s`, because the CLI refuses
+the pair; its sandbox follows the Codex config.
+
+An OpenCode task that names no `runtime` inherits the effective ceiling. When
+that is `auto-accept-edits`, as the default ceiling gives a worktree task in an
+`acceptEdits` or `auto` session, OpenCode cannot enforce it and the task is
+refused. Ask for `runtime=approval-required` to run it read-only. To let it
+edit, set `"ceiling": {"runtime": "auto"}` and ask for `runtime=auto`, since
+OpenCode has no mode that only edits.
+
+### What the ceiling is not
+
+The ceiling does not defend against a malicious model. It limits the flags that
+the worker's CLI receives. In the `auto` and `bypassPermissions` modes, the
+permission prompt of the tool call does not show you the requested level: the
+classifier decides under `auto`, and nothing asks under `bypassPermissions`. For
+sessions in those modes, the configuration's `ceiling` and the hook are the real
+limits.
+
+### Upgrading from 0.1
+
+In 0.1, the parent's permission mode alone set the ceiling of a `cc-orq:task`.
+Now your `ceiling` limits it too. By default a worker edits only in its own
+worktree and a `shared` worker only reads, so a session in `auto` or
+`bypassPermissions` mode no longer gets workers in that mode. To give workers
+`auto` in an `auto` session, set `"ceiling": {"runtime": "auto"}`. To go back to
+the 0.1 behavior, where the session's mode alone decides, set
+`"ceiling": {"runtime": "full-access", "sharedRuntime": "full-access"}`.
 
 ## Worktrees and integrate
 
@@ -392,8 +499,41 @@ refused for that, and it does not take the lock.
 The refusal names no job, and reads `is in use by a launch in progress`, only
 when the lock holds no job id yet, when two launches claim it at the same
 moment, when another launch is taking over the lock of a job that ended, or
-when this launch lost its lock while it scanned the jobs directory. Try again a
-moment later.
+when this launch lost its lock, or could not check that it still held it, while
+it scanned the jobs directory or wrote its job files. Try again a moment later.
+
+A launch keeps its lock young while it works. It touches the lock, with a check
+that the lock is still its own, while it scans the jobs directory. Two touches
+are final checks: one after the scan, before it writes meta.json, and one after
+it writes its job files, right before the start script. A final check takes the
+same mutex as a launcher that breaks a lock, so a check and a break do not
+interleave, unless a launcher stops while it holds the mutex (see below). It
+fails closed: when the check throws, times out, cannot take the mutex in time,
+exits with anything but success, or finds that another launcher has taken the
+lock, the launch starts nothing and is refused.
+
+A mutex older than 60 s counts as abandoned, and the next launcher steps over
+it. So a launcher that stops for more than 60 s while it holds the mutex, for
+example a suspended process, loses that guarantee. If it stopped between
+judging a lock dead and moving it aside, a final check can renew the lock in
+the meantime, the stopped launcher then moves the renewed lock aside, and both
+launches start.
+
+The final checks leave a window that runs from the last of them to the moment the
+supervisor writes its pid. A launch with no supervisor pid counts as alive for
+10 s after its last touch, so the window has two parts:
+
+- A launcher that stops for more than 10 s after its last check, whether it is
+  suspended or its start script is slow, can find its lock broken. Another
+  launcher then takes the lock and starts its own job, and both run.
+- A supervisor that writes its pid after its launcher has given up still runs its
+  worker. The launcher gives up when the start script reports no pid within 5 s:
+  it writes `exit` 125 and gives the lock back, and the next launcher takes it.
+  The supervisor does not look for that `exit` file. This is a known limit, and
+  the supervisor itself has to close it, by not running a worker for a job
+  that already has an `exit` file. This release does not change the supervisor.
+
+Once a supervisor that runs has written its pid, the lock holds however old it is.
 
 The lock is a directory under `.locks` in the jobs directory. It stays after
 its job ends. The next shared launch takes it over, as it does the lock of a
@@ -567,20 +707,21 @@ trust every worker you delegate to.
 
 ## Tools
 
-The plugin starts a stdio MCP server, `plugin:cc-orq:orq`, that serves five
+The plugin starts a stdio MCP server, `plugin:cc-orq:orq`, that serves six
 tools to the parent session, named `mcp__plugin_cc-orq_orq__capabilities`,
-`mcp__plugin_cc-orq_orq__status`, `mcp__plugin_cc-orq_orq__list`,
-`mcp__plugin_cc-orq_orq__cancel` and `mcp__plugin_cc-orq_orq__integrate`. They
-are there whether or not the mod loads, and `/mcp` shows the server.
+`mcp__plugin_cc-orq_orq__delegate`, `mcp__plugin_cc-orq_orq__status`,
+`mcp__plugin_cc-orq_orq__list`, `mcp__plugin_cc-orq_orq__cancel` and
+`mcp__plugin_cc-orq_orq__integrate`. They are there whether or not the mod
+loads, and `/mcp` shows the server.
 Each answers with a JSON text. A refusal has the shape
-`{"error": {"code": "...", "message": "..."}}` and comes with `isError`, and the
-codes orq answers with are `task_not_found`, `task_not_cancellable` and
-`invalid_request`. A task is one job: its `taskId` is the job id that
-`/orq list` shows. `integrate` is described under
-[Worktrees and integrate](#worktrees-and-integrate).
+`{"error": {"code": "...", "message": "..."}}` and comes with `isError`. The
+codes include `task_not_found`, `task_not_cancellable` and `invalid_request`,
+and the ceiling, scope and launch codes that `delegate` answers. A task is one
+job: its `taskId` is the job id that `/orq list` shows. `integrate` is
+described under [Worktrees and integrate](#worktrees-and-integrate).
 
 The server sends its own instructions to the session, which tell it how to use
-the five tools (`server/instructions.md`, under 4,000 bytes). The guidance for
+the six tools (`server/instructions.md`, under 4,000 bytes). The guidance for
 starting a task is the description of the `cc-orq:task` agent, which the mod
 registers (`TASK_AGENT_DESCRIPTION` in `hooks/task.ts`), so it is in the session
 exactly when the mod loads. No hook injects text at session start.
@@ -592,8 +733,10 @@ committed file or `NOTICE` is out of date.
 
 ### `mcp__plugin_cc-orq_orq__capabilities`
 
-Takes no input. Answers the provider instances of the configured `instances`
-and the modes a task may run in. Each provider has its
+Takes no input; the `sessionMode` field is filled by the hook, so leave it out.
+Answers the provider instances of the configured `instances`, the modes a task
+may run in, the ceiling behind them, and what the client can do. Each provider
+has its
 `providerInstanceId`, its `driverKind`, its `models` (each with the `options`
 the CLI reports, such as `reasoningEffort` and its allowed values),
 `canRunChildTask` and `constraints`, the reasons it cannot run now. An
@@ -630,7 +773,16 @@ providers OpenCode can use, logged in or configured through the environment.
     "incrementalThreadRead": false,
     "scheduledTasks": false,
     "maxBatchThreads": 0
-  }
+  },
+  "ceiling": {
+    "config": { "runtime": "auto-accept-edits", "sharedRuntime": "approval-required", "interaction": "default" },
+    "session": { "mode": "manual", "runtimeMode": "approval-required", "interactionMode": "default" },
+    "effective": {
+      "worktree": { "runtimeMode": "approval-required", "interactionMode": "default" },
+      "shared": { "runtimeMode": "approval-required", "interactionMode": "default" }
+    }
+  },
+  "client": { "tasks": true, "forms": false }
 }
 ```
 
@@ -638,11 +790,51 @@ providers OpenCode can use, logged in or configured through the environment.
 
 The probe runs `scripts/catalog.py` over the configured instances and is cached
 for ten minutes. A probe that fails answers no providers, logs the reason on
-stderr, and is run again on the next call. The server does not know the
-permission mode of the session yet, so `runtimeMode` and `interactionMode` are
-what an unknown mode gives, `approval-required` and `default`. They do not
-follow the session, and the ceiling of a `cc-orq:task` is still its parent's
-mode (see [Permission ceiling](#permission-ceiling)).
+stderr, and is run again on the next call.
+
+`runtimeMode` and `interactionMode` are the effective ceiling of a task in its
+own worktree. `ceiling` gives the configuration's limits, the session's mode with
+the limits it sets (`session` is `null` when no mode reached the server), and the
+effective ceiling of each isolation. A `ceiling.warnings` list appears when the
+configuration holds a value that is not valid. `client` says whether the client
+declared MCP tasks and form input on this request. See
+[Permission ceiling](#permission-ceiling).
+
+### `mcp__plugin_cc-orq_orq__delegate`
+
+Starts a job and answers `{"taskId": "<id>", "status": "running"}` at once. The
+fields are the header of a `cc-orq:task` prompt as JSON, and the server reads
+them with the same parser, so a mistake gets the same message as in a header.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `target` | yes | The `id` of an instance, as `capabilities` lists it |
+| `model` | yes | A model id of that instance, one word that does not start with `-` |
+| `cwd` | yes | An absolute path inside the session directory or an `allowedRoots` entry |
+| `prompt` | yes | The whole brief, at most 200,000 characters (more is refused with `invalid_request`). The worker has no history |
+| `effort` | no | The reasoning effort, one word |
+| `isolation` | no | `worktree` (the default) or `shared` |
+| `role` | no | `implementation`, `research`, `review`, `design`, `test` or `general` |
+| `runtime`, `interaction` | no | A mode at most as broad as the ceiling. Left out, the task gets the ceiling |
+| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result. `human` is refused for now, because it needs MCP tasks and form input |
+| `sessionMode` | no | Filled by the cc-orq hook; leave it out |
+
+A call checks, in this order, its fields, `questions`, the ceiling, the target and
+the driver, and the working directory. A refusal comes back at once with
+`isError` and a typed code, and nothing starts:
+`invalid_request`, `runtime_mode_escalation_denied`,
+`interaction_mode_escalation_denied`, `provider_unavailable`,
+`runtime_mode_unsupported`, `cwd_out_of_scope`, `not_a_repository`,
+`worktree_busy` or `git_failed`. A refusal for a request above the ceiling says
+which limit stands in the way and what lifts it. A launch that fails for a reason
+that no code names answers `orq: delegate failed: ...` with `isError`.
+
+The job is of kind `mcp`. Its `agentId` is the `CLAUDE_CODE_SESSION_ID` that
+Claude Code sets for the server, or `mcp` when there is none, and its
+`meta.json` records `questions`. `/orq list`, the task card, `/orq-panel`,
+`status`, `list` and `integrate` read it like any other job. The mod's
+`cc-orq:task` never claims it. The answer carries no wake-up, so read the job with
+`status`; a finished worktree job merges with `integrate`.
 
 ### `mcp__plugin_cc-orq_orq__status`
 
@@ -809,6 +1001,7 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
   "jobsDir": "~/.cache/orq/jobs",
   "waitSeconds": 120,
   "allowedRoots": ["~/work/shared"],
+  "ceiling": { "runtime": "auto-accept-edits", "sharedRuntime": "approval-required", "interaction": "default" },
   "integrate": { "gitHooks": "off" },
   "instances": [
     { "id": "codex", "driver": "codex" },
@@ -827,6 +1020,14 @@ orq reads `~/.config/orq/config.json` when it exists. Every field is optional.
   where an `cc-orq:task` may run besides the session's own working directory. A
   `cwd` must resolve inside one of them. Default: none. Entries that are not
   absolute are dropped with a warning in the debug log.
+- `ceiling`: the most a task may run as, before the session's permission mode
+  lowers it. `runtime` limits a task in its own worktree (default
+  `auto-accept-edits`), `sharedRuntime` limits a task with `isolation: shared`
+  (default `approval-required`), and `interaction` is `default` or `plan`
+  (default `default`). A runtime value is one of `approval-required`,
+  `auto-accept-edits`, `auto` and `full-access`. A value that is not valid counts
+  as the narrowest mode, `approval-required` (`plan` for `interaction`). See
+  [Permission ceiling](#permission-ceiling).
 - `integrate.gitHooks`: `"run"` has `integrate` run your checkout's git hooks,
   and carries a risk, which [Git hooks on integrate](#git-hooks-on-integrate)
   describes. `"off"`, the default, runs none. Any other value keeps them off, with
@@ -856,7 +1057,7 @@ for both the kind and the agent suffix, for example
 
 | File | Written by | Contents |
 | --- | --- | --- |
-| `meta.json` | `/orq launch` | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
+| `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
 | `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
 | `child.log` | start script | The supervisor's own stdout and stderr. |
@@ -867,7 +1068,7 @@ for both the kind and the agent suffix, for example
 | `cancel` | `/orq cancel` | A request to stop the job. Only its existence counts. |
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
 | `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
-| `flags` | `cc-orq:task` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
+| `flags` | `cc-orq:task`, `delegate` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
 The `exit` file holds one number:
 
@@ -933,7 +1134,7 @@ does not show the question, although the question stays in `question.txt`.
 `hooks/register.ts` wires the modules to the engine's events. On
 `session.start` it reads the configuration, registers `/orq` and `/orq-panel`,
 the `cc-orq:task` agent type and the `wait` tool, and starts the task card; on
-`session.end` it stops the card and the pane. The five other tools are served by
+`session.end` it stops the card and the pane. The six other tools are served by
 the MCP server in `server/`, which Claude Code starts from the `mcpServers` entry
 of `.claude-plugin/plugin.json`.
 
@@ -953,10 +1154,10 @@ flowchart LR
 
 1. The parent calls `Agent` with `subagent_type: "cc-orq:task"`. On
    `agent.spawn`, `hooks/task.ts` records the permission mode of that call,
-   which sets the task's ceiling.
+   which sets the task's ceiling together with the configuration's `ceiling`.
 2. The subagent's first `turn.step` parses the header (`hooks/task-header.ts`),
-   resolves the target and the CLI flags under the ceiling (`hooks/target.ts`),
-   and starts a job through the engine. No model call happens for the
+   holds it to the ceiling (`hooks/ceiling.ts`), resolves the target and the CLI
+   flags (`hooks/target.ts`), and starts a job through the engine. No model call happens for the
    subagent: the mod answers each of its steps itself.
 3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
    task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
@@ -970,10 +1171,15 @@ flowchart LR
    and the subagent hands the answer back to the parent.
 
 Beside that path, `server/main.mjs` starts the MCP server, which serves
-`capabilities`, `status`, `list`, `cancel` and `integrate` (`server/tools.ts`)
-over stdio on the same job core: `hooks/tools.ts` answers three of them (the
-provider probe is `scripts/catalog.py`), `hooks/integrate.ts` merges a task's
-branch, and `server/node-engine.ts` gives them the engine's `$` in plain Node.
+`capabilities`, `delegate`, `status`, `list`, `cancel` and `integrate`
+(`server/tools.ts`) over stdio on the same job core: `hooks/tools.ts` answers
+three of them (the provider probe is `scripts/catalog.py`), `hooks/integrate.ts`
+merges a task's branch, and `server/node-engine.ts` gives them the engine's `$`
+in plain Node. `delegate` builds a task header from its fields, holds it to the
+ceiling in `hooks/ceiling.ts`, and launches it through the same engine call as
+the agent. The session's permission mode reaches it through the `PreToolUse` hook
+in `scripts/session-mode-hook.sh`, which `hooks/hooks.json` runs before
+`delegate` and `capabilities`.
 `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane from the job
 directories.
 
@@ -985,6 +1191,8 @@ directories.
 | The `mcp__plugin_cc-orq_orq__*` tools are missing, or `/mcp` shows `plugin:cc-orq:orq` as failed | Check that `cc-orq` is enabled in `/plugin`. The server writes the reason for a failed start to stderr: `the orq server needs Node 22.18 or newer` means the `node` on your PATH is older; `node --version` shows which one Claude Code finds |
 | `capabilities` lists no providers, or misses one | Run the provider CLI once in a shell and log in. The debug log (`claude --debug-file`) gives the probe's reason |
 | `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
+| `delegate` answers `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied` | The request is above the ceiling. The message names the limit in the way: raise that `ceiling` field in `~/.config/orq/config.json`, or run the session in a mode that allows it. See [Permission ceiling](#permission-ceiling) |
+| A call to `delegate` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
 | `integrate` answers `merge_conflict` | Delegate a rebase of the task branch to the same worker, then integrate again |
@@ -998,6 +1206,14 @@ directories.
 - Linux only. macOS has neither `systemd-run` nor `setsid` by default.
 - A task cannot be resumed or sent a follow-up message. A review round or an
   answer to a child's question is a new task that carries the earlier brief.
+- `delegate` returns the job's id and no MCP task, so the session gets no
+  wake-up when the job ends and reads it with `status`. `questions: human` is
+  refused.
+- A supervisor that writes its pid after its launcher gave up, so after the
+  launcher wrote `exit` 125 and gave the lock back, still runs its worker next to
+  the job of whoever took the lock. The supervisor has to close this by not
+  running a job that already has an `exit` file. See
+  [Worktrees and integrate](#worktrees-and-integrate).
 - Cancelling a job stops its process group. A process that leaves the group
   keeps running, and so do the tools of an `opencode run` job, which execute
   in the shared OpenCode server.

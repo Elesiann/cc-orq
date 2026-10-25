@@ -1,28 +1,82 @@
-// The five tools of the orq server: capabilities, status, list, cancel and integrate. Each answers with one text
-// block, the JSON that the mod's tools answered in 0.1, and a refusal is the typed `{ error: { code, message } }`
+// The six tools of the orq server: capabilities, delegate, status, list, cancel and integrate. Each answers with one
+// text block, the JSON that the mod's tools answered in 0.1, and a refusal is the typed `{ error: { code, message } }`
 // with `isError`. The answers come from the job core, so the server and the mod read a job the same way.
 
+import { describeCeiling, resolveCeiling, sessionCeiling } from '../hooks/ceiling.ts'
 import { loadConfig, type OrqConfig } from '../hooks/config.ts'
 import {
+  FAILURE_CODES,
   INTEGRATE_DESCRIPTION,
   INTEGRATE_INPUT_SCHEMA,
   INTEGRATE_TOOL,
+  INTERACTION_MODES,
+  RUNTIME_MODES,
   fail,
   isFailure,
   type Failure,
   type TaskStatus,
 } from '../hooks/contract.ts'
-import { LIST_LIMIT, jobView, listJobs, taskStatusOf, type CoreEngine } from '../hooks/engine.ts'
+import { LIST_LIMIT, jobView, launchTaskFromHeader, listJobs, taskStatusOf, type CoreEngine, type QuestionMode } from '../hooks/engine.ts'
 import { integrate, integratePayload, parseIntegrateInput } from '../hooks/integrate.ts'
-import { parentRuntimeModeFromPermissionMode } from '../hooks/target.ts'
+import { parseTaskHeader, type TaskHeader } from '../hooks/task-header.ts'
 import { CANCEL_REASON_MAX, cancelAnswer, capabilitiesAnswer, statusAnswer, type CatalogCache } from '../hooks/tools.ts'
-import { isRecord } from '../hooks/types.ts'
+import { isRecord, TASK_REFUSAL } from '../hooks/types.ts'
 import { nodeEngine } from './node-engine.ts'
-import type { CallToolResult, McpServer, StandardSchemaWithJSON } from './vendor/mcp-sdk.mjs'
+import { clientInfoOf } from './protocol.ts'
+import type { CallToolResult, McpServer, ServerContext, StandardSchemaWithJSON } from './vendor/mcp-sdk.mjs'
 
 const LIST_DEFAULT = 20
 
-const NO_INPUT = { type: 'object', properties: {}, required: [], additionalProperties: false }
+const ISOLATIONS = ['worktree', 'shared']
+const ROLES = ['implementation', 'research', 'review', 'design', 'test', 'general']
+const QUESTION_MODES = ['parent', 'human'] as const satisfies readonly QuestionMode[]
+const PROMPT_MAX_CHARS = 200_000
+
+const SESSION_MODE_INPUT = { type: 'string', description: 'Filled by the cc-orq hook; leave it out.' }
+const SESSION_MODE_REFUSAL = 'sessionMode must be text; the cc-orq hook fills it, so leave it out'
+const CAPABILITIES_INPUT = { type: 'object', properties: { sessionMode: SESSION_MODE_INPUT }, additionalProperties: false }
+const DELEGATE_INPUT = {
+  type: 'object',
+  properties: {
+    target: { type: 'string', description: 'The provider instance id, as capabilities lists it.' },
+    model: { type: 'string', description: 'A model id of that instance, from capabilities. One word.' },
+    effort: { type: 'string', description: 'Reasoning effort, such as high, for a model that has the option.' },
+    cwd: {
+      type: 'string',
+      description: 'Absolute path of the directory to work in: inside the session directory or an allowed root. With isolation worktree it must be inside a git checkout.',
+    },
+    isolation: {
+      type: 'string',
+      enum: ISOLATIONS,
+      description: 'worktree (default): its own git worktree on a new branch. shared: runs in cwd as it is, for a task that edits nothing.',
+    },
+    role: { type: 'string', enum: ROLES, description: 'The role the worker is asked to act as. general adds nothing to the prompt.' },
+    runtime: {
+      type: 'string',
+      enum: [...RUNTIME_MODES],
+      description: 'What the worker may do, at most the ceiling that capabilities reports. Leave it out to get the ceiling.',
+    },
+    interaction: {
+      type: 'string',
+      enum: [...INTERACTION_MODES],
+      description: 'default, or plan to have the worker plan and not act. At most the ceiling; leave it out to get the ceiling.',
+    },
+    questions: {
+      type: 'string',
+      enum: [...QUESTION_MODES],
+      description: 'Who answers a question the worker asks. parent (default): the job ends with BLOCKED in its result, for you to answer. human is not available yet.',
+    },
+    prompt: {
+      type: 'string',
+      maxLength: PROMPT_MAX_CHARS,
+      description:
+        'The whole brief, at most 200,000 characters: the worker has no history, so give the goal, the files it may touch and the check that shows it worked.',
+    },
+    sessionMode: SESSION_MODE_INPUT,
+  },
+  required: ['target', 'model', 'cwd', 'prompt'],
+  additionalProperties: false,
+}
 const TASK_ID_INPUT = {
   type: 'object',
   properties: { taskId: { type: 'string' } },
@@ -51,9 +105,20 @@ const LIST_INPUT = {
 const CAPABILITIES_DESCRIPTION =
   'List the orq provider instances (as configured in the instances list) with their live models from the catalog probe, ' +
   "each model's options and allowed values (such as reasoningEffort), and each instance's constraints. " +
-  'runtimeMode and interactionMode are the most that orq grants a task while it does not know the permission mode of the session: ' +
-  'approval-required and default. They do not follow the session yet. ' +
-  'Read it before you name a target in a task brief, and do not guess model ids. Takes no input.'
+  'runtimeMode and interactionMode are the most that a task in its own worktree, the default isolation, may run as: ' +
+  'the lower of the config ceiling and the session permission mode. The session mode counts as far as the cc-orq hook supplies it; without the hook only the config ceiling holds. ' +
+  'ceiling shows both limits, the effective ceiling of a worktree task and of a shared one, and a warning for a config value that is not valid; ' +
+  'client says whether this client gets tasks and forms. ' +
+  'Read it before you name a target in a task brief, and do not guess model ids. Takes no input; sessionMode is filled by the cc-orq hook, so leave it out.'
+const DELEGATE_DESCRIPTION =
+  'Start one orq job: a Codex, OpenCode, Antigravity or Claude CLI working on one self-contained task in the background. ' +
+  'The answer comes at once, as {"taskId", "status": "running"}; read the job with status until it ends. ' +
+  'The worker has no history, so the prompt carries the whole brief, at most 200,000 characters. ' +
+  'isolation worktree, the default, gives the worker its own git worktree on a new branch: tell it to commit, because integrate merges commits only. ' +
+  'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode, which counts as far as the cc-orq hook supplies it. ' +
+  'runtime and interaction ask for less; a request above the ceiling is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
+  'questions parent, the default, ends a job that asks a question with BLOCKED in its result; questions human is not available yet. ' +
+  'Input: {"target", "model", "cwd", "prompt"}, and optionally effort, isolation, role, runtime, interaction and questions.'
 const STATUS_DESCRIPTION =
   "Read one orq task's state from its job directory: status (queued, running, waiting, completed, failed, cancelled or interrupted), " +
   'workState (working or result_available), and once it has ended its result or error; a task blocked on a question has the BLOCKED text as its result. ' +
@@ -161,10 +226,10 @@ async function listAnswer($: CoreEngine, config: OrqConfig, input: unknown): Pro
 }
 
 /** A tool callback that answers a failure naming the tool when its body throws. */
-function guarded($: CoreEngine, name: string, answer: (input: unknown) => Promise<CallToolResult>) {
-  return async (input: unknown): Promise<CallToolResult> => {
+function guarded($: CoreEngine, name: string, answer: (input: unknown, ctx: ServerContext) => Promise<CallToolResult>) {
+  return async (input: unknown, ctx: ServerContext): Promise<CallToolResult> => {
     try {
-      return await answer(input)
+      return await answer(input, ctx)
     } catch (err) {
       return failed($, name, err)
     }
@@ -174,13 +239,138 @@ function guarded($: CoreEngine, name: string, answer: (input: unknown) => Promis
 /** The answer of a tool that refuses with a typed failure: the failure is the text, and `isError` marks it. */
 const reply = (answer: object): CallToolResult => textResult(answer, isFailure(answer))
 
-export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCache): void {
-  const modes = parentRuntimeModeFromPermissionMode(undefined)
+/** Absent, or the text the hook put there. Anything else is refused, since only the hook sets it. */
+function sessionModeOf(input: unknown): string | undefined | Failure {
+  const value = isRecord(input) ? input.sessionMode : undefined
+  return value === undefined || typeof value === 'string' ? value : fail('invalid_request', SESSION_MODE_REFUSAL)
+}
 
+const DELEGATE_FIELDS = ['target', 'model', 'effort', 'cwd', 'isolation', 'role', 'runtime', 'interaction', 'questions', 'prompt'] as const
+/** The fields on the `target:` line, where a space would start another word. */
+const ONE_WORD_FIELDS = ['target', 'model', 'effort', 'runtime', 'interaction'] as const
+/** The other header fields, where a line break would start another line. */
+const ONE_LINE_FIELDS = ['cwd', 'isolation', 'role'] as const
+
+const HUMAN_REFUSAL =
+  'questions: human is not available yet: it needs a client with MCP tasks and form input, which this server does not offer. ' +
+  'Leave questions out, and a question the worker asks comes back to you in its result.'
+
+/**
+ * The header a cc-orq:task prompt would carry for these fields, so that the header parser holds each field to its rules
+ * and a mistake gets the same message. A blank line ends the header, so the prompt is never read as a header line.
+ */
+function headerText(text: Record<string, string>): string {
+  const words = [text.target, text.model].filter((word): word is string => word !== undefined)
+  for (const key of ['effort', 'runtime', 'interaction'] as const) {
+    if (text[key] !== undefined) words.push(`${key}=${text[key]}`)
+  }
+  const lines = [
+    ...(words.length > 0 ? [`target: ${words.join(' ')}`] : []),
+    ...(text.cwd !== undefined ? [`cwd: ${text.cwd}`] : []),
+    ...(text.isolation !== undefined ? [`isolation: ${text.isolation}`] : []),
+    ...(text.role !== undefined ? [`role: ${text.role}`] : []),
+  ]
+  return `${lines.join('\n')}\n\n${text.prompt ?? ''}`
+}
+
+/** Characters as the schema's maxLength counts them: code points, so an emoji is one. */
+function characterCount(text: string): number {
+  let count = 0
+  for (const _ of text) count += 1
+  return count
+}
+
+type DelegateCall = { header: TaskHeader; questions: QuestionMode; sessionMode: string | undefined }
+
+function parseDelegateInput(input: unknown): DelegateCall | Failure {
+  if (!isRecord(input)) {
+    return fail('invalid_request', 'delegate needs {"target": "<instance>", "model": "<model>", "cwd": "/absolute/path", "prompt": "<the whole brief>"}')
+  }
+  for (const key of Object.keys(input)) {
+    if (key !== 'sessionMode' && !DELEGATE_FIELDS.some((field) => field === key)) {
+      return fail('invalid_request', `delegate has no field "${key}"; its fields are ${DELEGATE_FIELDS.join(', ')}`)
+    }
+  }
+  const text: Record<string, string> = {}
+  for (const key of [...DELEGATE_FIELDS, 'sessionMode']) {
+    const value = input[key]
+    if (value === undefined) continue
+    if (typeof value !== 'string') return fail('invalid_request', key === 'sessionMode' ? SESSION_MODE_REFUSAL : `${key} must be text`)
+    text[key] = value
+  }
+  const promptLength = characterCount(text.prompt ?? '')
+  if (promptLength > PROMPT_MAX_CHARS) return fail('invalid_request', `prompt must be at most ${PROMPT_MAX_CHARS} characters, got ${promptLength}`)
+  for (const key of ONE_WORD_FIELDS) {
+    if (/\s/.test(text[key] ?? '')) return fail('invalid_request', `${key} must be one word, without spaces or line breaks`)
+  }
+  for (const key of ONE_LINE_FIELDS) {
+    if (/[\r\n]/.test(text[key] ?? '')) return fail('invalid_request', `${key} must be on one line`)
+  }
+  const header = parseTaskHeader(headerText(text))
+  if (isFailure(header)) return header
+  const questions = QUESTION_MODES.find((mode) => mode === (text.questions ?? 'parent'))
+  if (questions === undefined) return fail('invalid_request', `questions must be one of: ${QUESTION_MODES.join(', ')}.`)
+  return { header, questions, sessionMode: text.sessionMode }
+}
+
+/** Launch refusals that name no code and are the caller's to fix. */
+const REQUEST_PROBLEMS = ['directory does not exist: ', 'not a directory: ']
+
+/** The launch words a refusal as the text the cc-orq:task agent answers, so the code is read back from it. */
+async function launchRefusal($: CoreEngine, text: string): Promise<CallToolResult> {
+  const prefix = `${TASK_REFUSAL}: `
+  const body = text.startsWith(prefix) ? text.slice(prefix.length) : text
+  const named = /^([a-z_]+): ([\s\S]*)$/.exec(body)
+  const code = FAILURE_CODES.find((candidate) => candidate === named?.[1])
+  if (code !== undefined && named?.[2] !== undefined) return reply(fail(code, named[2]))
+  if (REQUEST_PROBLEMS.some((start) => body.startsWith(start))) return reply(fail('invalid_request', body))
+  const failure = `orq: delegate failed: ${body}`
+  await $.ui.log(failure)
+  return { content: [{ type: 'text', text: failure }], isError: true }
+}
+
+/** The job is of kind mcp, and belongs to the session that the environment names, or to mcp without one. */
+async function delegateAnswer($: CoreEngine, config: OrqConfig, input: unknown): Promise<CallToolResult> {
+  const call = parseDelegateInput(input)
+  if (isFailure(call)) return reply(call)
+  if (call.questions === 'human') return reply(fail('invalid_request', HUMAN_REFUSAL))
+  const { header } = call
+  const { effective, refusal } = resolveCeiling({
+    config: config.ceiling,
+    session: sessionCeiling(call.sessionMode),
+    isolation: header.isolation,
+    request: { runtimeMode: header.runtimeMode, interactionMode: header.interactionMode },
+  })
+  if (refusal !== null) return reply(refusal)
+  const launched = await launchTaskFromHeader($, config, {
+    agentId: (await $.env.get('CLAUDE_CODE_SESSION_ID')) || 'mcp',
+    header,
+    ceiling: effective,
+    sessionDir: (await $.env.get('CLAUDE_PROJECT_DIR')) ?? '',
+    kind: 'mcp',
+    questions: call.questions,
+  })
+  if ('job' in launched) return textResult({ taskId: launched.job.id, status: 'running' }, false)
+  return launchRefusal($, launched.refusal)
+}
+
+export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCache): void {
   mcp.registerTool(
     'capabilities',
-    { description: CAPABILITIES_DESCRIPTION, inputSchema: advertise(NO_INPUT) },
-    guarded($, 'capabilities', async () => textResult(await capabilitiesAnswer($, await configOf($), modes, catalog), false)),
+    { description: CAPABILITIES_DESCRIPTION, inputSchema: advertise(CAPABILITIES_INPUT) },
+    guarded($, 'capabilities', async (input, ctx) => {
+      const sessionMode = sessionModeOf(input)
+      if (isFailure(sessionMode)) return reply(sessionMode)
+      const config = await configOf($)
+      const ceiling = describeCeiling(config.ceiling, sessionMode)
+      const answer = await capabilitiesAnswer($, config, ceiling.effective.worktree, catalog)
+      return textResult({ ...answer, ceiling, client: clientInfoOf(ctx.mcpReq.envelope) }, false)
+    }),
+  )
+  mcp.registerTool(
+    'delegate',
+    { description: DELEGATE_DESCRIPTION, inputSchema: advertise(DELEGATE_INPUT) },
+    guarded($, 'delegate', async (input) => delegateAnswer($, await configOf($), input)),
   )
   mcp.registerTool(
     'status',

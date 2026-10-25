@@ -1,3 +1,4 @@
+import { defaultCeilingConfig, parseCeilingConfig, type CeilingConfig } from './ceiling.ts'
 import type { CoreEngine } from './engine.ts'
 
 export type DriverKind = 'codex' | 'opencode' | 'antigravity' | 'claudeAgent'
@@ -21,6 +22,8 @@ export type OrqConfig = {
   /** Absolute directories, besides the session's own, that a cc-orq:task may run in. */
   allowedRoots: string[]
   integrate: { gitHooks: IntegrateGitHooks }
+  /** The most a task may run as. The session's permission mode can lower it, never raise it. */
+  ceiling: CeilingConfig
 }
 
 export const CONFIG_PATH = '.config/orq/config.json'
@@ -40,6 +43,7 @@ export function defaultConfig(home: string): OrqConfig {
     waitSeconds: 120,
     allowedRoots: [],
     integrate: { gitHooks: 'off' },
+    ceiling: defaultCeilingConfig(),
   }
 }
 
@@ -95,6 +99,11 @@ export function parseConfig(text: string | null, home: string): ParsedConfig {
       if (gitHooks === 'run') config.integrate = { gitHooks: 'run' }
       else if (gitHooks !== undefined && gitHooks !== 'off') warnings.push('integrate.gitHooks must be "run" or "off", keeping git hooks off')
     }
+  }
+  if (obj.ceiling !== undefined) {
+    const parsed = parseCeilingConfig(obj.ceiling)
+    config.ceiling = parsed.ceiling
+    warnings.push(...parsed.warnings)
   }
   if (obj.instances !== undefined) {
     if (!Array.isArray(obj.instances)) {

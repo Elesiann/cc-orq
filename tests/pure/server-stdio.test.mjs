@@ -179,6 +179,8 @@ function scene({ instances = [{ id: 'claudeAgent', driver: 'claudeAgent' }], bin
   // The system directories only, so a provider CLI installed on this machine is never probed or run.
   const env = { ...process.env, ...AUTHOR, HOME: home, PATH: `${binDir}:/usr/bin:/bin` }
   delete env.CLAUDE_PLUGIN_ROOT
+  delete env.CLAUDE_PROJECT_DIR
+  delete env.CLAUDE_CODE_SESSION_ID
   const live = []
   return {
     root,
@@ -246,7 +248,7 @@ const FAILURE = (code, message) => ({ error: { code, message } })
 // Negotiation: server/discover, the legacy initialize, and tools/list.
 
 const INSTRUCTIONS = readFileSync(join(REPO, 'server', 'instructions.md'), 'utf8')
-const TOOLS = ['capabilities', 'status', 'list', 'cancel', 'integrate']
+const TOOLS = ['capabilities', 'delegate', 'status', 'list', 'cancel', 'integrate']
 
 const LEGACY_INIT = {
   protocolVersion: SUPPORTED_PROTOCOL_VERSIONS[0],
@@ -299,7 +301,7 @@ test('the legacy initialize is served too, with the instructions, and its tools/
   )
 })
 
-test('tools/list lists exactly the five tools, with the input schemas of 0.1 and the new list', async (t) => {
+test('tools/list lists exactly the six tools, with the input schemas of 0.1, the new list and the new delegate', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())
   const server = s.start()
@@ -310,7 +312,11 @@ test('tools/list lists exactly the five tools, with the input schemas of 0.1 and
     TOOLS,
   )
   const schemas = Object.fromEntries(result.tools.map((tool) => [tool.name, tool.inputSchema]))
-  assert.deepEqual(schemas.capabilities, { type: 'object', properties: {}, required: [], additionalProperties: false })
+  assert.deepEqual(schemas.capabilities, {
+    type: 'object',
+    properties: { sessionMode: { type: 'string', description: 'Filled by the cc-orq hook; leave it out.' } },
+    additionalProperties: false,
+  })
   assert.deepEqual(schemas.status, {
     type: 'object',
     properties: { taskId: { type: 'string' } },
@@ -332,15 +338,15 @@ test('tools/list lists exactly the five tools, with the input schemas of 0.1 and
   const described = Object.fromEntries(result.tools.map((tool) => [tool.name, tool.description]))
   assert.ok(described.integrate.includes('redelegate a rebase to the same worker, then integrate again'))
   assert.ok(described.integrate.includes('uncommitted work in the task worktree is not'))
-  assert.ok(described.capabilities.includes('approval-required and default'), 'the description says what the modes are until the session mode reaches the server')
-  assert.ok(described.capabilities.includes('do not follow the session yet'))
+  assert.ok(described.capabilities.includes('the lower of the config ceiling and the session permission mode'), 'the description says where the modes come from')
+  assert.equal(described.capabilities.includes('do not follow the session yet'), false, 'the modes follow the session now')
 })
 
-test('server/instructions.md is under 4,000 bytes and names each of the five tools, and none that does not exist yet', () => {
+test('server/instructions.md is under 4,000 bytes and names each of the six tools, and none that does not exist yet', () => {
   assert.ok(Buffer.byteLength(INSTRUCTIONS) < 4000, `${Buffer.byteLength(INSTRUCTIONS)} bytes`)
   for (const tool of TOOLS) assert.ok(INSTRUCTIONS.includes(`\`${tool}\``), `the instructions name ${tool}`)
   for (const advice of ['not_fast_forward', 'merge_conflict']) assert.ok(INSTRUCTIONS.includes(advice), advice)
-  assert.equal(/`(?:delegate|answer)`/.test(INSTRUCTIONS), false)
+  assert.equal(/`answer`/.test(INSTRUCTIONS), false)
 })
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -658,7 +664,7 @@ const FAKE_CODEX = (counter) =>
     '',
   ].join('\n')
 
-test('capabilities answers the CapabilitiesResult shape of 0.1, with the modes of an unknown session mode', async (t) => {
+test('capabilities answers the CapabilitiesResult shape of 0.1, with the ceiling of the config alone when no session mode reached it', async (t) => {
   const s = scene({ bin: { claude: '#!/bin/bash\nexit 0\n' } })
   t.after(() => s.cleanup())
   const server = s.start()
@@ -669,7 +675,7 @@ test('capabilities answers the CapabilitiesResult shape of 0.1, with the modes o
     parentThreadId: null,
     inheritedProviderInstanceId: null,
     inheritedModel: null,
-    runtimeMode: 'approval-required',
+    runtimeMode: 'auto-accept-edits',
     interactionMode: 'default',
     providers: [
       {
@@ -696,11 +702,16 @@ test('capabilities answers the CapabilitiesResult shape of 0.1, with the modes o
       scheduledTasks: false,
       maxBatchThreads: 0,
     },
+    ceiling: {
+      config: { runtime: 'auto-accept-edits', sharedRuntime: 'approval-required', interaction: 'default' },
+      session: null,
+      effective: {
+        worktree: { runtimeMode: 'auto-accept-edits', interactionMode: 'default' },
+        shared: { runtimeMode: 'approval-required', interactionMode: 'default' },
+      },
+    },
+    client: { tasks: true, forms: false },
   })
-  assert.deepEqual(
-    { runtimeMode: answer.json.runtimeMode, interactionMode: answer.json.interactionMode },
-    parentRuntimeModeFromPermissionMode(undefined),
-  )
 })
 
 test('capabilities probes once for ten minutes, probes again for another instances list, and reports a CLI that is missing', async (t) => {
@@ -1029,6 +1040,421 @@ test('integrate answers task_running for a live shared job inside the task workt
   assert.equal(merged.isError, false)
   assert.equal(merged.json.ok, true)
   assert.equal(git(repo, ['rev-parse', 'HEAD']), merged.json.mergedSha)
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// capabilities and the session mode
+
+const CLIENT_WITH_FORMS = { extensions: { [TASKS]: {} }, elicitation: { form: {} } }
+
+test('capabilities follows the session mode that the hook supplies, and says which limit is which', async (t) => {
+  const s = scene({ bin: { claude: '#!/bin/bash\nexit 0\n' } })
+  s.setConfig({ ceiling: { runtime: 'auto', sharedRuntime: 'auto-accept-edits' } })
+  t.after(() => s.cleanup())
+  const server = s.start()
+  t.after(() => server.close())
+  const ask = async (sessionMode) => (await server.call('capabilities', sessionMode === undefined ? {} : { sessionMode })).json
+  const modes = (answer) => [answer.runtimeMode, answer.interactionMode]
+
+  const alone = await ask(undefined)
+  assert.deepEqual(modes(alone), ['auto', 'default'], 'without a session mode only the config limits')
+  assert.equal(alone.ceiling.session, null)
+  assert.deepEqual(alone.ceiling.config, { runtime: 'auto', sharedRuntime: 'auto-accept-edits', interaction: 'default' })
+  assert.deepEqual(alone.ceiling.effective, {
+    worktree: { runtimeMode: 'auto', interactionMode: 'default' },
+    shared: { runtimeMode: 'auto-accept-edits', interactionMode: 'default' },
+  })
+
+  const rows = [
+    ['default', ['approval-required', 'default'], 'approval-required'],
+    ['manual', ['approval-required', 'default'], 'approval-required'],
+    ['dontAsk', ['approval-required', 'default'], 'approval-required'],
+    ['acceptEdits', ['auto-accept-edits', 'default'], 'auto-accept-edits'],
+    ['auto', ['auto', 'default'], 'auto-accept-edits'],
+    ['bypassPermissions', ['auto', 'default'], 'auto-accept-edits'],
+    ['plan', ['approval-required', 'plan'], 'approval-required'],
+    ['root-please', ['approval-required', 'default'], 'approval-required'],
+  ]
+  for (const [sessionMode, expected, shared] of rows) {
+    const answer = await ask(sessionMode)
+    assert.deepEqual(modes(answer), expected, `${sessionMode}: the modes are the effective ceiling of a worktree task`)
+    assert.equal(answer.ceiling.session.mode, sessionMode, `${sessionMode}: the mode that arrived`)
+    assert.deepEqual(answer.ceiling.effective.worktree, { runtimeMode: expected[0], interactionMode: expected[1] })
+    assert.equal(answer.ceiling.effective.shared.runtimeMode, shared, `${sessionMode}: a shared task has its own limit`)
+    assert.deepEqual(answer.ceiling.config, alone.ceiling.config, `${sessionMode}: the config part never changes with the session`)
+  }
+})
+
+test('capabilities refuses a sessionMode that is not text, tells a client with tasks and forms from one without, and warns about a ceiling it cannot read', async (t) => {
+  const s = scene({ bin: { claude: '#!/bin/bash\nexit 0\n' } })
+  s.setConfig({ ceiling: { runtime: 'turbo', interaction: 7 } })
+  t.after(() => s.cleanup())
+  const server = s.start()
+  t.after(() => server.close())
+  for (const sessionMode of [7, null, ['auto'], { mode: 'auto' }, true]) {
+    const answer = await server.call('capabilities', { sessionMode })
+    assert.equal(answer.isError, true, JSON.stringify(sessionMode))
+    assert.deepEqual(answer.json, FAILURE('invalid_request', 'sessionMode must be text; the cc-orq hook fills it, so leave it out'))
+  }
+  const ceilingOf = async (capabilities) => (await server.call('capabilities', {}, capabilities)).json
+  const plain = await ceilingOf({})
+  assert.deepEqual(plain.client, { tasks: false, forms: false })
+  assert.deepEqual((await ceilingOf(CLIENT_WITH_FORMS)).client, { tasks: true, forms: true })
+  assert.deepEqual((await ceilingOf({ elicitation: { form: {} } })).client, { tasks: false, forms: true })
+  assert.deepEqual([plain.runtimeMode, plain.interactionMode], ['approval-required', 'plan'], 'an invalid ceiling fails closed')
+  assert.deepEqual(plain.ceiling.warnings, [
+    'ceiling.runtime must be one of approval-required, auto-accept-edits, auto, full-access; it counts as approval-required',
+    'ceiling.interaction must be one of default, plan; it counts as plan',
+  ])
+  assert.match(server.stderr(), /orq: config: ceiling\.runtime must be one of/, 'the server logs the warning too')
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// delegate
+
+const SESSION_ID = 'sess-0123456789'
+
+/** A session directory that holds one git checkout with one commit. */
+function checkout(s) {
+  const session = join(s.root, 'session')
+  const repo = join(session, 'repo')
+  mkdirSync(repo, { recursive: true })
+  git(repo, ['init', '-q', '-b', 'main'])
+  writeFileSync(join(repo, 'shared.txt'), 'base\n')
+  git(repo, ['add', 'shared.txt'])
+  git(repo, ['commit', '-q', '-m', 'base'])
+  return { session, repo }
+}
+
+const startIn = (s, session, extraEnv = {}) => s.start({ CLAUDE_PROJECT_DIR: session, CLAUDE_CODE_SESSION_ID: SESSION_ID, ...extraEnv })
+const jobDirs = (s) => (existsSync(s.jobsDir) ? readdirSync(s.jobsDir) : [])
+
+/** The worker of the integrate test with its argv kept, and held until the test creates `go` in the job directory. */
+const FAKE_HELD_WORKER = FAKE_WORKER.replace(
+  '#!/bin/bash\n',
+  '#!/bin/bash\nprintf "%s\\n" "$@" > "$ORQ_JOB_DIR/argv.txt"\nfor _ in $(seq 1 300); do [ -e "$ORQ_JOB_DIR/go" ] && break; sleep 0.1; done\n',
+)
+
+const ENUMS = (text) => /one of: (.*)\.$/.exec(parseTaskHeader(text).error.message)[1].split(', ')
+const HEADER = 'target: a b\ncwd: /x\n'
+
+test('the delegate input schema takes the header fields, requires four, and takes sessionMode from the hook', async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const server = s.start()
+  t.after(() => server.close())
+  const { result } = await server.request('tools/list', modern())
+  const delegate = result.tools.find((tool) => tool.name === 'delegate')
+  const schema = delegate.inputSchema
+  assert.equal(schema.type, 'object')
+  assert.deepEqual(Object.keys(schema.properties), ['target', 'model', 'effort', 'cwd', 'isolation', 'role', 'runtime', 'interaction', 'questions', 'prompt', 'sessionMode'])
+  assert.deepEqual(schema.required, ['target', 'model', 'cwd', 'prompt'])
+  assert.equal(schema.additionalProperties, false)
+  assert.equal(schema.properties.sessionMode.description, 'Filled by the cc-orq hook; leave it out.')
+  for (const [field, text] of [
+    ['isolation', `${HEADER}isolation: nope\n\np`],
+    ['role', `${HEADER}role: nope\n\np`],
+  ]) {
+    assert.deepEqual(schema.properties[field].enum, ENUMS(text), `${field} offers what the header parser accepts`)
+  }
+  assert.deepEqual(schema.properties.runtime.enum, ENUMS('target: a b runtime=nope\ncwd: /x\n\np'))
+  assert.deepEqual(schema.properties.interaction.enum, ENUMS('target: a b interaction=nope\ncwd: /x\n\np'))
+  assert.deepEqual(schema.properties.questions.enum, ['parent', 'human'])
+  assert.equal(schema.properties.prompt.maxLength, 200000, 'the schema advertises the cap that the handler enforces')
+  for (const phrase of ['{"taskId", "status": "running"}', 'commit', 'integrate', 'status', 'ceiling', 'worktree', 'questions']) {
+    assert.ok(delegate.description.includes(phrase), `the description names ${phrase}`)
+  }
+})
+
+test('delegate refuses what the cc-orq:task header refuses, with the same code and message, and launches nothing', async (t) => {
+  const s = scene({ instances: [{ id: 'claudeAgent', driver: 'claudeAgent' }, { id: 'opencode', driver: 'opencode' }] })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const base = { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.' }
+  const line = (more = '') => `target: claudeAgent haiku${more}\ncwd: ${repo}\n`
+  const cases = [
+    ['no target and no model', { cwd: repo, prompt: 'Go.' }, `cwd: ${repo}\n\nGo.`],
+    ['no model', { target: 'claudeAgent', cwd: repo, prompt: 'Go.' }, `target: claudeAgent\ncwd: ${repo}\n\nGo.`],
+    ['a model that starts with a dash', { ...base, model: '-haiku' }, `target: claudeAgent -haiku\ncwd: ${repo}\n\nGo.`],
+    ['an effort that is not a word of plain characters', { ...base, effort: 'high!' }, `${line(' effort=high!')}\nGo.`],
+    ['an empty effort', { ...base, effort: '' }, `${line(' effort=')}\nGo.`],
+    ['a runtime that is not a mode', { ...base, runtime: 'turbo' }, `${line(' runtime=turbo')}\nGo.`],
+    ['an interaction that is not a mode', { ...base, interaction: 'chat' }, `${line(' interaction=chat')}\nGo.`],
+    ['no cwd', { target: 'claudeAgent', model: 'haiku', prompt: 'Go.' }, 'target: claudeAgent haiku\n\nGo.'],
+    ['a relative cwd', { ...base, cwd: 'relative/path' }, 'target: claudeAgent haiku\ncwd: relative/path\n\nGo.'],
+    ['an isolation that is not one', { ...base, isolation: 'copy' }, `${line()}isolation: copy\n\nGo.`],
+    ['a role that is not one', { ...base, role: 'wizard' }, `${line()}role: wizard\n\nGo.`],
+    ['no prompt', { target: 'claudeAgent', model: 'haiku', cwd: repo }, line()],
+    ['an empty prompt', { ...base, prompt: '' }, line()],
+    ['a prompt of only blanks', { ...base, prompt: ' \n\t ' }, line()],
+  ]
+  for (const [name, input, text] of cases) {
+    const expected = parseTaskHeader(text)
+    assert.ok('error' in expected, `${name}: the header parser refuses this too`)
+    const answer = await server.call('delegate', input)
+    assert.equal(answer.isError, true, name)
+    assert.deepEqual(answer.json, expected, name)
+  }
+  assert.deepEqual((await server.call('delegate', {})).json, parseTaskHeader(''), 'an empty call reads as a header with nothing in it')
+
+  const own = [
+    ['a target that is not text', { ...base, target: 7 }, 'target must be text'],
+    ['a prompt that is null', { ...base, prompt: null }, 'prompt must be text'],
+    ['a cwd that is a list', { ...base, cwd: [repo] }, 'cwd must be text'],
+    ['a target with a space', { ...base, target: 'claude Agent' }, 'target must be one word, without spaces or line breaks'],
+    ['a model with a line break', { ...base, model: 'haiku\ncwd: /etc' }, 'model must be one word, without spaces or line breaks'],
+    ['an effort with a space', { ...base, effort: 'very high' }, 'effort must be one word, without spaces or line breaks'],
+    ['a cwd with a line break', { ...base, cwd: `${repo}\nrole: design` }, 'cwd must be on one line'],
+    ['a role with a line break', { ...base, role: 'design\nisolation: shared' }, 'role must be on one line'],
+    ['a questions value that is not one', { ...base, questions: 'ask' }, 'questions must be one of: parent, human.'],
+    ['a field the tool does not have', { ...base, runtimeMode: 'auto' }, 'delegate has no field "runtimeMode"; its fields are target, model, effort, cwd, isolation, role, runtime, interaction, questions, prompt'],
+    ['a sessionMode that is not text', { ...base, sessionMode: 7 }, 'sessionMode must be text; the cc-orq hook fills it, so leave it out'],
+  ]
+  for (const [name, input, message] of own) {
+    const answer = await server.call('delegate', input)
+    assert.equal(answer.isError, true, name)
+    assert.deepEqual(answer.json, FAILURE('invalid_request', message), name)
+  }
+
+  const unknown = await server.call('delegate', { ...base, target: 'nope' })
+  assert.deepEqual(unknown.json, FAILURE('provider_unavailable', 'Provider instance nope is not configured.'))
+  const unsupported = await server.call('delegate', { ...base, target: 'opencode', model: 'fixture-model' })
+  assert.deepEqual(
+    unsupported.json,
+    FAILURE('runtime_mode_unsupported', 'Driver opencode cannot enforce runtime mode auto-accept-edits; it supports approval-required, auto.'),
+    'the refusal lists the modes the driver accepts',
+  )
+  assert.deepEqual(jobDirs(s), [], 'nothing was launched')
+  assert.equal(server.garbage.length, 0)
+})
+
+test('delegate takes a prompt of at most 200,000 characters, counted as characters and not as UTF-16 units, and refuses more', async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const call = (prompt) => server.call('delegate', { target: 'nope', model: 'haiku', cwd: repo, prompt })
+  const unknownInstance = FAILURE('provider_unavailable', 'Provider instance nope is not configured.')
+  for (const [name, prompt] of [
+    ['exactly 200,000 characters', 'x'.repeat(200000)],
+    ['100,001 emoji, which are 200,002 UTF-16 units and 100,001 characters', '😀'.repeat(100001)],
+    ['200,000 emoji, the most in characters', '😀'.repeat(200000)],
+  ]) {
+    assert.deepEqual((await call(prompt)).json, unknownInstance, `${name} goes on to the next check`)
+  }
+  for (const [name, prompt, count] of [
+    ['one character over', 'x'.repeat(200001), 200001],
+    ['an emoji over', '😀'.repeat(200001), 200001],
+    ['a megabyte', 'y'.repeat(1_000_000), 1_000_000],
+  ]) {
+    const answer = await call(prompt)
+    assert.equal(answer.isError, true, name)
+    assert.deepEqual(answer.json, FAILURE('invalid_request', `prompt must be at most 200000 characters, got ${count}`), name)
+  }
+  assert.deepEqual(jobDirs(s), [], 'nothing was launched')
+})
+
+test('delegate refuses questions: human, which needs tasks and forms that this server does not offer yet', async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  for (const capabilities of [undefined, CLIENT_WITH_FORMS]) {
+    const answer = await server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.', questions: 'human' }, capabilities)
+    assert.equal(answer.isError, true)
+    assert.equal(answer.json.error.code, 'invalid_request')
+    assert.equal(
+      answer.json.error.message,
+      'questions: human is not available yet: it needs a client with MCP tasks and form input, which this server does not offer. Leave questions out, and a question the worker asks comes back to you in its result.',
+    )
+  }
+  assert.deepEqual(jobDirs(s), [])
+})
+
+test('delegate above the ceiling is refused at once with the escalation code and what would lift it, and launches nothing', async (t) => {
+  const s = scene({ instances: [{ id: 'claudeAgent', driver: 'claudeAgent' }] })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const call = (extra) => server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.', ...extra })
+
+  for (const sessionMode of ['default', 'manual']) {
+    const answer = await call({ runtime: 'auto', sessionMode })
+    assert.equal(answer.isError, true)
+    assert.deepEqual(
+      answer.json,
+      FAILURE(
+        'runtime_mode_escalation_denied',
+        "Runtime mode auto is above the ceiling approval-required for this task: the config allows auto-accept-edits (ceiling.runtime) and the session's permission mode allows approval-required. " +
+          'To allow auto, raise ceiling.runtime in ~/.config/orq/config.json and use a session permission mode that allows it; otherwise ask for approval-required at most.',
+      ),
+      sessionMode,
+    )
+  }
+  const noSession = await call({ runtime: 'auto' })
+  assert.deepEqual(
+    noSession.json,
+    FAILURE(
+      'runtime_mode_escalation_denied',
+      'Runtime mode auto is above the ceiling auto-accept-edits for this task: the config allows auto-accept-edits (ceiling.runtime). ' +
+        'To allow auto, raise ceiling.runtime in ~/.config/orq/config.json; otherwise ask for auto-accept-edits at most.',
+    ),
+    'without a session mode the config alone refuses it',
+  )
+  const shared = await call({ runtime: 'auto-accept-edits', isolation: 'shared', sessionMode: 'auto' })
+  assert.equal(shared.json.error.code, 'runtime_mode_escalation_denied')
+  assert.ok(shared.json.error.message.includes('(ceiling.sharedRuntime)'), shared.json.error.message)
+  assert.ok(shared.json.error.message.includes('raise ceiling.sharedRuntime in ~/.config/orq/config.json'))
+  const plan = await call({ interaction: 'default', sessionMode: 'plan' })
+  assert.equal(plan.json.error.code, 'interaction_mode_escalation_denied')
+  assert.ok(plan.json.error.message.startsWith('Interaction mode default is above the ceiling plan for this task: '), plan.json.error.message)
+
+  const forged = await call({ runtime: 'full-access', sessionMode: 'bypassPermissions' })
+  assert.equal(forged.json.error.code, 'runtime_mode_escalation_denied', 'a forged mode cannot lift the ceiling above the config')
+  assert.deepEqual(jobDirs(s), [], 'nothing was launched')
+})
+
+test('delegate holds cwd to the session directory and the allowed roots, and answers what the launch refuses as typed failures', async (t) => {
+  const s = scene()
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const elsewhere = join(s.root, 'elsewhere')
+  mkdirSync(elsewhere)
+  const plain = join(session, 'not-a-checkout')
+  mkdirSync(plain)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const call = (extra) => server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.', ...extra })
+
+  const outside = await call({ cwd: elsewhere })
+  assert.deepEqual(outside.json, FAILURE('cwd_out_of_scope', `cwd ${elsewhere} is outside the session directory and the allowed roots (${session}).`))
+  assert.deepEqual((await call({ cwd: join(session, 'missing') })).json, FAILURE('invalid_request', `directory does not exist: ${join(session, 'missing')}`))
+  assert.deepEqual((await call({ cwd: join(repo, 'shared.txt') })).json, FAILURE('invalid_request', `not a directory: ${join(repo, 'shared.txt')}`))
+  const notRepo = await call({ cwd: plain })
+  assert.equal(notRepo.json.error.code, 'not_a_repository')
+  assert.ok(notRepo.json.error.message.endsWith('Pass `isolation: shared` to run the task in this directory as it is.'), notRepo.json.error.message)
+  assert.equal(notRepo.isError, true)
+
+  const bare = s.start()
+  t.after(() => bare.close())
+  const noSessionDir = await bare.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.' })
+  assert.deepEqual(noSessionDir.json, FAILURE('cwd_out_of_scope', `cwd ${repo} is outside the session directory and the allowed roots (none).`), 'without CLAUDE_PROJECT_DIR only allowedRoots count')
+  s.setConfig({ allowedRoots: [session] })
+  const roots = await bare.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: plain, prompt: 'Go.' })
+  assert.equal(roots.json.error.code, 'not_a_repository', 'an allowed root lets the call past the scope check, to the refusal that comes after it')
+})
+
+test('delegate launches through a fake worker, answers running at once, and leaves a job of kind mcp that status, list and integrate read', async (t) => {
+  const s = scene({ bin: { claude: FAKE_HELD_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const statusOf = (taskId) => server.call('status', { taskId })
+
+  const answer = await server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Add a file and commit it.', sessionMode: 'acceptEdits' })
+  assert.equal(answer.isError, false, answer.text)
+  assert.deepEqual(Object.keys(answer.json), ['taskId', 'status'])
+  assert.equal(answer.json.status, 'running')
+  const taskId = answer.json.taskId
+  assert.match(taskId, /^mcp-\d+-[0-9a-z]+-[0-9a-z]+$/)
+  assert.equal((await statusOf(taskId)).json.status, 'running', 'the worker is held, so the job is running when delegate has answered')
+  writeFileSync(join(s.jobsDir, taskId, 'go'), '')
+
+  const dir = join(s.jobsDir, taskId)
+  const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8'))
+  assert.equal(meta.kind, 'mcp')
+  assert.equal(meta.agentId, SESSION_ID)
+  assert.equal(meta.questions, 'parent')
+  assert.equal(meta.instanceId, 'claudeAgent')
+  assert.equal(meta.driver, 'claudeAgent')
+  assert.equal(meta.model, 'haiku')
+  assert.equal(meta.runtimeMode, 'auto-accept-edits')
+  assert.equal(meta.interactionMode, 'default')
+  assert.equal(meta.branch, `orq/${taskId}`)
+  assert.equal(meta.repo, repo)
+  assert.equal(readFileSync(join(dir, 'flags'), 'utf8'), '--permission-mode\nacceptEdits\n')
+  assert.ok(readFileSync(join(dir, 'prompt.txt'), 'utf8').startsWith('Add a file and commit it.'))
+
+  const ended = await untilEnded(statusOf, taskId)
+  assert.equal(ended.status, 'completed')
+  assert.equal(ended.kind, 'mcp')
+  assert.ok(ended.result.startsWith('FAKE-WORKER'), ended.result)
+  const argv = readFileSync(join(dir, 'argv.txt'), 'utf8').split('\n')
+  assert.deepEqual(argv.slice(argv.indexOf('--permission-mode'), argv.indexOf('--permission-mode') + 2), ['--permission-mode', 'acceptEdits'], 'the CLI got the flag')
+
+  const listed = (await server.call('list')).json.jobs.find((row) => row.taskId === taskId)
+  assert.equal(listed.kind, 'mcp')
+  assert.equal(listed.status, 'completed')
+  assert.equal(listed.instanceId, 'claudeAgent')
+  assert.equal(listed.branch, `orq/${taskId}`)
+  const merged = await server.call('integrate', { taskId })
+  assert.equal(merged.isError, false, merged.text)
+  assert.equal(merged.json.ok, true)
+  assert.equal(readFileSync(join(repo, `${taskId}.txt`), 'utf8'), 'worker output\n')
+})
+
+test('a job that delegate launches records the session id as its agentId, and mcp when the server has none', async (t) => {
+  const s = scene({ bin: { claude: FAKE_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const input = { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.' }
+  const withSession = startIn(s, session)
+  t.after(() => withSession.close())
+  const withoutSession = startIn(s, session, { CLAUDE_CODE_SESSION_ID: '' })
+  t.after(() => withoutSession.close())
+  const first = (await withSession.call('delegate', input)).json.taskId
+  const second = (await withoutSession.call('delegate', input)).json.taskId
+  const agentOf = (taskId) => JSON.parse(readFileSync(join(s.jobsDir, taskId, 'meta.json'), 'utf8')).agentId
+  assert.equal(agentOf(first), SESSION_ID)
+  assert.equal(agentOf(second), 'mcp')
+  for (const [server, taskId] of [[withSession, first], [withoutSession, second]]) {
+    assert.equal((await untilEnded((id) => server.call('status', { taskId: id }), taskId)).status, 'completed')
+  }
+})
+
+test('under "ceiling": {"runtime": "auto"} and a session in auto mode, a delegate to the claudeAgent instance runs with the auto policy', async (t) => {
+  const s = scene({ bin: { claude: FAKE_WORKER } })
+  s.setConfig({ ceiling: { runtime: 'auto' } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = startIn(s, session)
+  t.after(() => server.close())
+  const input = { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Go.' }
+  const flagsOf = (answer) => readFileSync(join(s.jobsDir, answer.json.taskId, 'flags'), 'utf8')
+  const metaOf = (answer) => JSON.parse(readFileSync(join(s.jobsDir, answer.json.taskId, 'meta.json'), 'utf8'))
+
+  const asked = await server.call('delegate', { ...input, runtime: 'auto', sessionMode: 'auto' })
+  assert.equal(asked.isError, false, asked.text)
+  assert.equal(flagsOf(asked), '--permission-mode\nauto\n')
+  assert.equal(metaOf(asked).runtimeMode, 'auto')
+
+  const inherited = await server.call('delegate', { ...input, sessionMode: 'auto' })
+  assert.equal(flagsOf(inherited), '--permission-mode\nauto\n', 'a runtime left out inherits the effective ceiling')
+
+  const configAlone = await server.call('delegate', { ...input, runtime: 'auto' })
+  assert.equal(flagsOf(configAlone), '--permission-mode\nauto\n', 'without a session mode the config alone decides')
+
+  const lowered = await server.call('delegate', { ...input, sessionMode: 'acceptEdits' })
+  assert.equal(flagsOf(lowered), '--permission-mode\nacceptEdits\n', 'the session mode lowers what the config allows')
+
+  const stricter = await server.call('delegate', { ...input, runtime: 'approval-required', sessionMode: 'auto' })
+  assert.equal(flagsOf(stricter), '--permission-mode\nmanual\n', 'a task may ask for less than the ceiling')
+
+  const ended = async (answer) => (await untilEnded((id) => server.call('status', { taskId: id }), answer.json.taskId)).status
+  for (const answer of [asked, inherited, configAlone, lowered, stricter]) assert.equal(await ended(answer), 'completed')
+
+  // A shared launch is refused while a live job holds the checkout, so it goes last, once the worktree jobs have ended.
+  const shared = await server.call('delegate', { ...input, isolation: 'shared', sessionMode: 'auto' })
+  assert.equal(shared.isError, false, shared.text)
+  assert.equal(flagsOf(shared), '--permission-mode\nmanual\n', 'a shared task keeps the sharedRuntime limit, approval-required')
+  assert.equal(metaOf(shared).worktree, undefined)
+  assert.equal(await ended(shared), 'completed')
 })
 
 // ---------------------------------------------------------------------------------------------------------------------

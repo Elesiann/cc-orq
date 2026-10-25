@@ -438,6 +438,191 @@ test('a launch whose scan outlasts the grace while a second launcher breaks its 
   }
 })
 
+test('a launch whose job files stall past the grace after its last touch, while a second launcher breaks its lock and starts a job, refuses before its own start, so one job runs', async () => {
+  const { root, jobsDir } = scratch()
+  try {
+    const bin = join(root, 'bin')
+    mkdirSync(bin)
+    writeFileSync(
+      join(bin, 'claude'),
+      `#!/bin/bash\nprintf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"X","usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"m":{}}}'\n`,
+    )
+    chmodSync(join(bin, 'claude'), 0o755)
+    const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+    const real = nodeEngine({ env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, pluginRoot })
+    const repo = checkoutWithSubdirectory(root)
+    const config = { ...defaultConfig(root), jobsDir }
+    const spec = (agentId) => ({
+      kind: 'task', agentId, runner: 'claude', model: 'haiku', cwd: repo, prompt: 'x', env: {}, instanceId: 'claudeAgent', driver: 'claudeAgent', flags: [],
+    })
+    let second
+    const stalledWrites = {
+      ...real,
+      fs: {
+        ...real.fs,
+        write: async (path, text) => {
+          await real.fs.write(path, text)
+          if (path.endsWith('/prompt.txt')) {
+            backdate(join(jobsDir, '.locks', sha256Hex(repo)), 30)
+            second = await launchJob(real, config, spec('agent-second'))
+          }
+        },
+      },
+    }
+    const first = await launchJob(stalledWrites, config, spec('agent-first'))
+    assert.ok('job' in second, JSON.stringify(second))
+    assert.equal('refusal' in first, true, JSON.stringify(first))
+    assert.match(first.refusal, /worktree_busy/)
+    const started = readdirSync(jobsDir).filter((name) => existsSync(join(jobsDir, name, 'pgid')))
+    assert.deepEqual(started, [second.job.id], 'only the second launcher started a supervisor')
+    assert.equal(readFileSync(join(jobsDir, '.locks', sha256Hex(repo), 'owner'), 'utf8').trim(), second.job.id)
+    const abandoned = readdirSync(jobsDir).find((name) => name !== '.locks' && name !== second.job.id)
+    assert.equal(readFileSync(join(jobsDir, abandoned, 'exit'), 'utf8'), '125', 'the refused launch marks its job as one that never started')
+    for (let waited = 0; !existsSync(join(jobsDir, second.job.id, 'exit')) && waited < 100; waited += 1) await sleep(100)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+function launchScene() {
+  const { root, jobsDir } = scratch()
+  const bin = join(root, 'bin')
+  mkdirSync(bin)
+  writeFileSync(
+    join(bin, 'claude'),
+    `#!/bin/bash\nprintf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"X","usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"m":{}}}'\n`,
+  )
+  chmodSync(join(bin, 'claude'), 0o755)
+  const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+  const real = nodeEngine({ env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, pluginRoot })
+  const repo = checkoutWithSubdirectory(root)
+  const config = { ...defaultConfig(root), jobsDir }
+  const spec = (agentId) => ({
+    kind: 'task', agentId, runner: 'claude', model: 'haiku', cwd: repo, prompt: 'x', env: {}, instanceId: 'claudeAgent', driver: 'claudeAgent', flags: [],
+  })
+  return { root, jobsDir, real, repo, config, spec, lock: join(jobsDir, '.locks', sha256Hex(repo)) }
+}
+
+const supervised = (jobsDir) => readdirSync(jobsDir).filter((name) => existsSync(join(jobsDir, name, 'pgid')))
+
+async function untilExit(jobsDir, id) {
+  for (let waited = 0; !existsSync(join(jobsDir, id, 'exit')) && waited < 100; waited += 1) await sleep(100)
+}
+
+// The Nth touch script that the launch runs is replaced by one that throws, times out or exits with a code that is not 0.
+// A quick launch runs two: the check before meta.json, then the check before the start script.
+function failingTouch(real, nth, how) {
+  let seen = 0
+  const run = (argv, init) => {
+    if (!argv[2].startsWith('# orq:lock touch')) return real.process.run(argv, init)
+    seen += 1
+    if (seen !== nth) return real.process.run(argv, init)
+    if (how === 'throws') return Promise.reject(new Error('the touch could not run'))
+    if (how === 'times out') return real.process.run(['bash', '-c', '# orq:lock touch\nsleep 5'], { ...init, timeoutMs: 200 })
+    return real.process.run(['bash', '-c', '# orq:lock touch\nexit 7'], init)
+  }
+  return { ...real, process: { ...real.process, run } }
+}
+
+for (const [nth, which] of [[1, 'before meta.json'], [2, 'before the start script']]) {
+  for (const how of ['throws', 'times out', 'exits with 7']) {
+    test(`a launch whose check ${which} ${how} starts nothing, is refused as a lost lock, and gives its lock back`, async () => {
+      const { root, jobsDir, real, config, spec, lock } = launchScene()
+      try {
+        const first = await launchJob(failingTouch(real, nth, how), config, spec('agent-first'))
+        assert.equal('refusal' in first, true, JSON.stringify(first))
+        assert.match(first.refusal, /worktree_busy: .* is in use by a launch in progress/)
+        assert.deepEqual(supervised(jobsDir), [], 'no supervisor started')
+        const [job] = readdirSync(jobsDir).filter((name) => name !== '.locks')
+        assert.equal(readFileSync(join(jobsDir, job, 'exit'), 'utf8'), '125')
+        assert.equal(existsSync(lock), false, 'the lock was given back')
+        assert.deepEqual(readdirSync(join(jobsDir, '.locks')), [], 'and no mutex was left')
+        const second = await launchJob(real, config, spec('agent-second'))
+        assert.ok('job' in second, `the next launch takes the checkout: ${JSON.stringify(second)}`)
+        await untilExit(jobsDir, second.job.id)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+}
+
+test('a launch whose final check cannot take the mutex in time counts that as a failed check, starts nothing, and is refused', async () => {
+  const { root, jobsDir, real, config, spec, lock } = launchScene()
+  try {
+    mkdirSync(`${lock}.mutex`, { recursive: true })
+    const first = await launchJob(real, config, spec('agent-first'))
+    assert.equal('refusal' in first, true, JSON.stringify(first))
+    assert.match(first.refusal, /worktree_busy/)
+    assert.deepEqual(supervised(jobsDir), [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a final check and a break never interleave: a breaker inside the mutex with a stale reading evicts first, the check that waited for the mutex finds the lock gone, and one job starts', async () => {
+  const { root, jobsDir, real, config, spec, lock } = launchScene()
+  try {
+    let resumeFirst
+    const resumed = new Promise((resolve) => (resumeFirst = resolve))
+    let firstIsPaused
+    const paused = new Promise((resolve) => (firstIsPaused = resolve))
+    let firstChecks = false
+    let firstCheckBegan
+    const began = new Promise((resolve) => (firstCheckBegan = resolve))
+    // The first launcher stops after it writes its job files, so its final check is the next thing it does.
+    const first = {
+      ...real,
+      fs: {
+        ...real.fs,
+        write: async (path, text) => {
+          await real.fs.write(path, text)
+          if (path.endsWith('/prompt.txt')) {
+            firstIsPaused()
+            await resumed
+            firstChecks = true
+          }
+        },
+      },
+      process: {
+        ...real.process,
+        run: (argv, init) => {
+          if (firstChecks && /^# orq:lock (mutex|touch)/.test(argv[2])) firstCheckBegan()
+          return real.process.run(argv, init)
+        },
+      },
+    }
+    // The breaker has read the lock inside the mutex and is about to move it aside when the first launcher's check starts.
+    const breaker = {
+      ...real,
+      process: {
+        ...real.process,
+        run: async (argv, init) => {
+          if (argv[2].startsWith('# orq:lock aside')) {
+            resumeFirst()
+            await began
+            await sleep(300)
+          }
+          return real.process.run(argv, init)
+        },
+      },
+    }
+    const firstLaunch = launchJob(first, config, spec('agent-first'))
+    await paused
+    backdate(lock, 30)
+    const second = await launchJob(breaker, config, spec('agent-second'))
+    const firstResult = await firstLaunch
+    assert.ok('job' in second, JSON.stringify(second))
+    assert.equal('refusal' in firstResult, true, `the first launcher started as well: ${JSON.stringify(firstResult)}`)
+    assert.match(firstResult.refusal, /worktree_busy/)
+    assert.deepEqual(supervised(jobsDir), [second.job.id], 'one supervisor started')
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8').trim(), second.job.id)
+    await untilExit(jobsDir, second.job.id)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('twenty claims at once on one checkout give exactly one holder, and the others name it', async () => {
   const { root, engine, jobsDir } = scratch()
   try {

@@ -37,7 +37,8 @@ export function plainArgument(text: string): boolean {
   return !text.startsWith('-') && !hasControlCharacters(text)
 }
 
-function runtimeModeRank(mode: RuntimeMode): number {
+/** The one place the order is decided: runtime modes widen from 0. */
+export function runtimeModeRank(mode: RuntimeMode): number {
   switch (mode) {
     case 'approval-required':
       return 0
@@ -50,7 +51,8 @@ function runtimeModeRank(mode: RuntimeMode): number {
   }
 }
 
-function interactionModeRank(mode: InteractionMode): number {
+/** Interaction modes in the order they widen: plan, then default. */
+export function interactionModeRank(mode: InteractionMode): number {
   return mode === 'plan' ? 0 : 1
 }
 
@@ -91,6 +93,8 @@ export function parentRuntimeModeFromPermissionMode(mode: string | undefined): {
       return { runtimeMode: 'approval-required', interactionMode: 'default' }
     case 'bypassPermissions':
       return { runtimeMode: 'full-access', interactionMode: 'default' }
+    // The 2.1.310 CLI names the prompting mode `manual`, and a hook of a session started with it reports `default`.
+    case 'manual':
     case 'default':
     default:
       return { runtimeMode: 'approval-required', interactionMode: 'default' }

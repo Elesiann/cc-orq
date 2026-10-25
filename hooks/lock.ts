@@ -10,7 +10,8 @@ import { isSafeJobId, shellWord } from './types.ts'
  * Breaking a lock and giving one back are the only ways a lock directory with an owner goes away, and both run
  * under a second directory, NAME.mutex, which `mkdir` makes the same way. Under it the owner is read again, so a
  * lock that someone else broke and took in the meantime is never removed, and the lock moves aside to a name of
- * its own in one rename. A claim needs no mutex: `mkdir` fails while a lock exists. A claim that cannot write its
+ * its own in one rename. The two final checks of a launch run under the same mutex, so a check and a break never
+ * interleave. A claim needs no mutex: `mkdir` fails while a lock exists. A claim that cannot write its
  * owner removes the empty directory it has just made.
  */
 type LockEngine = Pick<CoreEngine, 'clock' | 'fs' | 'process'>
@@ -132,6 +133,7 @@ const EXIT_TAKEN = 0
 const EXIT_HELD = 1
 const EXIT_LOST = 3
 const EXIT_UNWRITTEN = 4
+const EXIT_UNTOUCHED = 5
 
 async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   try {
@@ -186,7 +188,7 @@ function touchScript(dir: string, owner: string): string {
   return (
     `# orq:lock touch\n` +
     `[ "$(cat ${quoted(`${dir}/owner`)} 2>/dev/null)" = ${quoted(owner)} ] || exit ${EXIT_LOST}\n` +
-    `touch -c ${quoted(dir)} 2>/dev/null\n` +
+    `touch -c ${quoted(dir)} 2>/dev/null || exit ${EXIT_UNTOUCHED}\n` +
     `exit 0`
   )
 }
@@ -319,18 +321,27 @@ export async function claimCheckout(
 
 /**
  * Starts the age of the lock over, so a launch that works longer than LAUNCH_GRACE_MS still reads as a launch in
- * progress. It does nothing until REARM_EVERY_MS have passed since the last touch, unless `force` is set. It answers
- * false when the lock is no longer this launch's, because another launcher broke it, and the launch must not go on.
- * Never throws; a touch that cannot be made leaves the answer true.
+ * progress. Never throws. It answers false when the launch must not go on.
+ *
+ * Without `force` it is the periodic touch of a scan: it does nothing until REARM_EVERY_MS have passed since the last
+ * touch, and it is best effort. It answers false only when the lock is no longer this launch's, and a touch that
+ * cannot be made leaves the answer true.
+ *
+ * With `force` it is a final check, which a launch makes before it writes its job and again before it starts it, and
+ * it fails closed. It runs under the mutex that breaks and releases hold, so no break can read the lock's age, have
+ * a check touch the lock, and still evict it. It answers true only when the mutex was taken, the lock is still this
+ * launch's, and the touch was made. An exception, a timeout, a mutex that cannot be had in time and any other exit
+ * code all answer false.
  */
 export async function rearmLock($: LockEngine, held: HeldLock, { force = false }: { force?: boolean } = {}): Promise<boolean> {
   try {
     const now = await $.clock.now()
     if (!force && now - held.touchedAt < REARM_EVERY_MS) return true
     held.touchedAt = now
+    if (force) return (await withMutex($, held.paths, () => exitCodeOf($, touchScript(held.paths.dir, held.owner)))) === EXIT_TAKEN
     return (await exitCodeOf($, touchScript(held.paths.dir, held.owner))) !== EXIT_LOST
   } catch {
-    return true
+    return !force
   }
 }
 

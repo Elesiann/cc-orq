@@ -85,5 +85,5 @@ test('session.start registers the cc-orq:task agent with the guidance for the pa
 test('hooks/hooks.json loads the mod and injects no text at session start', () => {
   const hooks = JSON.parse(readFileSync(`${ROOT}/hooks/hooks.json`, 'utf8'))
   assert.deepEqual(hooks.modules, ['./register.ts'])
-  assert.equal(hooks.hooks, undefined)
+  assert.equal(hooks.hooks?.SessionStart, undefined)
 })
