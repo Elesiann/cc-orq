@@ -7,6 +7,7 @@
 #   ORQ_ROOT=DIR        launch through the engine of another checkout, such as an older commit
 #   ORQ_LOCK_ROUNDS=N   rounds of the twenty-launch scenario (default 1)
 #   ORQ_DEAD_ROUNDS=N   rounds of the twenty launches into a dead lock (default 5)
+#   ORQ_HANDSHAKE_SECONDS=N  how long the launchers and this script wait for each other before they fail (default 60)
 #   race                run only the twenty-launch rounds and print their counts, which is how the race of an
 #                       engine without the lock shows
 #   dead                run only the dead-lock rounds and print their counts
@@ -15,10 +16,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ENGINE=${ORQ_ROOT:-$ROOT}
 ROUNDS=${ORQ_LOCK_ROUNDS:-1}
 DEAD_ROUNDS=${ORQ_DEAD_ROUNDS:-5}
+HANDSHAKE_SECONDS=${ORQ_HANDSHAKE_SECONDS:-60}
 T="$ROOT/.ref/tmp/lock-shell-$(date +%s)-$$"
 mkdir -p "$T/bin" "$T/slow-bin"
 T=$(cd -P "$T" && pwd)
 PASS=0; FAIL=0
+TIMEOUT=$(command -v timeout || command -v gtimeout || true)
 ok() { PASS=$((PASS+1)); echo "ok: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
@@ -34,7 +37,7 @@ trap cleanup EXIT
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=orq-test GIT_AUTHOR_EMAIL=orq-test@example.invalid
 export GIT_COMMITTER_NAME=orq-test GIT_COMMITTER_EMAIL=orq-test@example.invalid
-export ORQ_ROOT="$ENGINE"
+export ORQ_ROOT="$ENGINE" ORQ_HANDSHAKE_SECONDS="$HANDSHAKE_SECONDS"
 
 cat > "$T/bin/claude" <<'EOF'
 #!/bin/bash
@@ -85,8 +88,15 @@ async function launch() {
   return launchTaskFromHeader(engine, config, { agentId, header, ceiling, sessionDir })
 }
 
+const giveUpAt = Date.now() + Number(process.env.ORQ_HANDSHAKE_SECONDS) * 1000
 if (readyFile) writeFileSync(readyFile, '')
-if (goFile) while (!existsSync(goFile)) await new Promise((resolve) => setTimeout(resolve, 1))
+while (goFile && !existsSync(goFile)) {
+  if (Date.now() > giveUpAt) {
+    console.log(`error no go signal within ${process.env.ORQ_HANDSHAKE_SECONDS} s`)
+    process.exit(2)
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1))
+}
 try {
   const r = await launch()
   console.log('job' in r ? `launched ${r.job.id}` : `${r.refusal.includes('worktree_busy') ? 'busy' : 'refused'} ${r.refusal}`)
@@ -119,13 +129,21 @@ launch_one() {
 }
 
 launch_many() {
-  local count=$1 i pids=()
+  local count=$1 i pids=() deadline=$((SECONDS + HANDSHAKE_SECONDS))
   rm -rf "$T/ready" "$T/go" "$T/many"; mkdir -p "$T/ready" "$T/many"
   for i in $(seq 1 "$count"); do
     node "$T/driver.mjs" header "$JOBS" "$SESSION" "$2" "$3" "$T/ready/$i" "$T/go" > "$T/many/$i" 2>&1 &
     pids+=($!)
   done
-  until [ "$(ls "$T/ready" | wc -l)" -ge "$count" ]; do sleep 0.05; done
+  until [ "$(ls "$T/ready" | wc -l)" -ge "$count" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill "${pids[@]}" 2>/dev/null || true
+      echo "FAIL: only $(ls "$T/ready" | wc -l) of $count launchers were ready after $HANDSHAKE_SECONDS s; a launcher that died said:"
+      cat "$T"/many/* | grep -m3 -i 'error' | cut -c1-200
+      exit 1
+    fi
+    sleep 0.05
+  done
   : > "$T/go"
   for i in "${pids[@]}"; do wait "$i" || true; done
   cat "$T"/many/* > "$T/many.out"
@@ -292,6 +310,9 @@ out=$(launch_one "$SESSION/link" shared raw)
 [ "$(words "$out")" = busy ] && echo "$out" | grep -q "is in use by job $wt" && ok "a shared launch at that same spelling is refused for the worktree job" || bad "shared launch at the link: $out"
 [ ! -d "$(lock_of "$repo")" ] && ok "and it gave its lock back" || bad "its lock is still there, owned by $(owner_of "$repo")"
 rm -f "$HOLD"; unset HOLD
+
+out=$(ORQ_ROOT="$T/no-such-engine" ORQ_HANDSHAKE_SECONDS=2 ${TIMEOUT:+"$TIMEOUT" 60} bash "$0" dead 2>&1) && code=0 || code=$?
+[ "$code" -eq 1 ] && echo "$out" | grep -q "launchers were ready after 2 s" && ok "launchers that never get ready fail the suite with a message after the limit" || bad "handshake limit: exit $code: $(echo "$out" | sed -n 1,2p | cut -c1-160)"
 
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]
