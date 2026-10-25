@@ -4,7 +4,7 @@ import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
 import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
 import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
-import { claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
+import { LAUNCH_GRACE_MS, claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
 import { scopedCwd } from './scope.ts'
 import type { TaskHeader } from './task-header.ts'
 import {
@@ -667,21 +667,43 @@ export async function launchTaskFromHeader(
   })
 }
 
-/** finished | running | gone: the exit file, else the supervisor's process group. */
-export async function jobLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
+/** finished | running | gone: the exit file, else the supervisor's process group. Rejects when the probe cannot run. */
+async function probeLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   if (await exists($, `${job.dir}/exit`)) return 'finished'
   const script =
     `# orq:liveness\npgid=$(cat ${shellWord(`${job.dir}/pgid`)} 2>/dev/null | tr -d ' \\t\\n')\n` +
     `case "$pgid" in ''|*[!0-9]*) exit 12 ;; esac\n` +
     `kill -0 -"$pgid" 2>/dev/null && exit 11\n` +
     `[ -e ${shellWord(`${job.dir}/exit`)} ] && exit 0 || exit 12`
+  const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
+  if (r.exitCode === 0) return 'finished'
+  if (r.exitCode === 11) return 'running'
+  return 'gone'
+}
+
+/** finished | running | gone: the exit file, else the supervisor's process group. A probe that cannot run counts as running. */
+export async function jobLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   try {
-    const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
-    if (r.exitCode === 0) return 'finished'
-    if (r.exitCode === 11) return 'running'
-    return 'gone'
+    return await probeLiveness($, job)
   } catch {
     return 'running'
+  }
+}
+
+/**
+ * Whether a job may still be working, for a caller that must not act under a live job. jobLiveness reads a job
+ * with no pgid yet as gone, though its supervisor is about to write one, and a probe that cannot run as running
+ * for good. Here a job younger than LAUNCH_GRACE_MS counts as running in both states, and an older one as gone.
+ */
+export async function jobIsLive($: CoreEngine, job: JobRecord): Promise<boolean> {
+  if (await exists($, `${job.dir}/exit`)) return false
+  const starting = (await $.clock.now()) - job.startedAt < LAUNCH_GRACE_MS
+  const pgid = ((await readText($, `${job.dir}/pgid`)) ?? '').trim()
+  if (!/^\d+$/.test(pgid)) return starting
+  try {
+    return (await probeLiveness($, job)) === 'running'
+  } catch {
+    return starting
   }
 }
 

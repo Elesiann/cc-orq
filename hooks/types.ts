@@ -52,6 +52,10 @@ export function isWithin(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith('/') ? root : `${root}/`)
 }
 
+export function shortBranch(ref: string): string {
+  return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

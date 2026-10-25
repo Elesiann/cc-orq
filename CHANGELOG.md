@@ -38,6 +38,37 @@ All notable changes to cc-orq are recorded here. The format follows
   through could carry a mode the model forged. A session's own limit holds only
   while the hook runs: without it, the configuration's limit is the most a task
   can get.
+- `integrate` answers `task_running`, and names the job, while a job is still
+  running on the task branch or inside its worktree, a shared job included. A
+  job that has not written its process group yet counts as running for its
+  first 10 seconds. It runs no git command before that answer.
+- After a merge fails, `integrate` undoes the merge itself only when it can read
+  the whole state and every changed tracked path, staged or not, is one that the
+  task branch changes, which it records before the merge. It then aborts a
+  pending merge, or resets a half-made one that a killed git left with no
+  `MERGE_HEAD`. Otherwise it changes nothing and leaves a pending merge pending.
+  A tracked change outside those paths is probably yours. A list that git printed
+  beyond the 4 MiB the engine reads, or a path that is not valid UTF-8, cannot be
+  compared. The answer names the paths or the reason, lists the rest, and names
+  `git merge --abort` or `git reset --merge` for you to run after you check;
+  either drops staged changes of your own too. Both reads pass
+  `--ignore-submodules=none`. The check goes by path, so these cases are
+  limits: a change of yours to a path that the task also changes counts as the
+  merge's, a change you stage between the status read and the abort goes with the
+  merge, and a rename that git follows during the merge writes a path outside the
+  list and stops the cleanup.
+- After a failed merge, `integrate` reads the checkout and lists up to 10 paths
+  that stay, such as a file a hook made, a `reference-transaction` refusal
+  included. It skips that read only when the check whether the branch is already
+  in HEAD fails with exit 128, and then answers `git_failed`. A merge that git's
+  60 second limit kills answers `git_failed` and names the timeout.
+- The config key `integrate.gitHooks`. With `"run"`, `integrate` runs the git
+  hooks of the checkout as they are, and a hook that refuses the merge, such as
+  a failing `pre-merge-commit`, makes it abort the merge, when the cleanup rule
+  allows it, and answer `hook_failed` with the hook's output from stdout and
+  stderr. The README says what the opt-in risks: a worker that can write the
+  checkout's shared git directory, or a hooks path in the work tree, decides what
+  runs. Any other value, and the default, run no hook.
 
 ### Changed
 
@@ -66,9 +97,17 @@ All notable changes to cc-orq are recorded here. The format follows
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
+- The README says what a worktree task shares with your checkout: the `.git`
+  directory. A worker that can write it can change git config or hooks that
+  run programs in any later git command there, `integrate` and your own `git`
+  commands included, so untrusted workers belong in modes that cannot write
+  outside their worktree.
 
 ### Fixed
 
+- The README said that `integrate` runs the hooks of your checkout. It never
+  did, because the mod's engine runs git with hooks off, and it still runs none
+  unless the config sets `integrate.gitHooks` to `"run"`.
 - A finished job could show as failed in the task card or the `/orq-panel`
   pane when either read its `exit` file while the supervisor was writing it.
   The supervisor now writes the file in one step, so a reader sees either no
