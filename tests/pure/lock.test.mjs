@@ -303,6 +303,36 @@ test('a mutex released between the mutex script\'s failed mkdir and its look at 
   }
 })
 
+test('an owner that cannot be written leaves no lock behind and is answered as a failure to lock', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const claim = await claimCheckout(withShim(engine, 'claim', 'ulimit -f 0'), jobsDir, 'job-a', repo, probeOf({}))
+    assert.equal(claim.kind, 'failed', JSON.stringify(claim))
+    assert.deepEqual(locksIn(jobsDir), [])
+    assert.equal((await claimCheckout(engine, jobsDir, 'job-b', repo, probeOf({}))).kind, 'held')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a dead lock that cannot be moved aside is answered as a failure to lock, and stays for the next launch to break', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner'), 'job-dead\n')
+    const probe = probeOf({ 'job-dead': 'finished' })
+    const claim = await claimCheckout(withShim(engine, 'aside', 'mv() { return 1; }'), jobsDir, 'job-a', repo, probe)
+    assert.equal(claim.kind, 'failed', JSON.stringify(claim))
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), 'job-dead\n')
+    assert.equal((await claimCheckout(engine, jobsDir, 'job-b', repo, probe)).kind, 'held')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('twenty claims at once on one checkout give exactly one holder, and the others name it', async () => {
   const { root, engine, jobsDir } = scratch()
   try {

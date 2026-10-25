@@ -128,6 +128,7 @@ const MUTEX_GENERATIONS = 4
 const EXIT_TAKEN = 0
 const EXIT_HELD = 1
 const EXIT_LOST = 3
+const EXIT_UNWRITTEN = 4
 
 async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   try {
@@ -152,7 +153,10 @@ function claimScript({ locks, dir }: LockPaths, owner: string, key: string): str
     `  [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}\n` +
     `  mkdir ${quoted(dir)} 2>/dev/null || { [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}; exit 9; }\n` +
     `fi\n` +
-    `( set -C; printf '%s\\n' ${quoted(owner)} > ${quoted(`${dir}/owner`)} ) 2>/dev/null || exit ${EXIT_LOST}\n` +
+    `( set -C; printf '%s\\n' ${quoted(owner)} > ${quoted(`${dir}/owner`)} ) 2>/dev/null || {\n` +
+    `  [ -s ${quoted(`${dir}/owner`)} ] && exit ${EXIT_LOST}\n` +
+    `  rm -f ${quoted(`${dir}/owner`)}; rmdir ${quoted(dir)} 2>/dev/null; exit ${EXIT_UNWRITTEN}\n` +
+    `}\n` +
     `printf '%s\\n' ${quoted(key)} > ${quoted(`${dir}/key`)} 2>/dev/null\n` +
     `exit 0`
   )
@@ -179,7 +183,7 @@ function unmutexScript(mutex: string): string {
 function asideScript(dir: string, tombstone: string): string {
   return (
     `# orq:lock aside\n` +
-    `mv ${quoted(dir)} ${quoted(tombstone)}.$$ 2>/dev/null || exit 1\n` +
+    `mv ${quoted(dir)} ${quoted(tombstone)}.$$ 2>/dev/null || { [ -d ${quoted(dir)} ] && exit 1; exit 0; }\n` +
     `rm -rf ${quoted(tombstone)}.$$ 2>/dev/null\n` +
     `exit 0`
   )
@@ -257,13 +261,12 @@ async function evict(
   actor: string,
   eviction: Eviction,
   ownerState: OwnerProbe,
-): Promise<'removed' | 'changed' | 'contended'> {
+): Promise<'removed' | 'changed' | 'contended' | 'failed'> {
   return withMutex($, paths, async () => {
     const facts = await inspect($, paths, ownerState)
     if (facts === null || facts.owner !== eviction.owner) return 'changed'
     if (eviction.reason === 'dead' && judgeLock(facts).kind !== 'dead') return 'changed'
-    await exitCodeOf($, asideScript(paths.dir, `${paths.dir}.dead.${actor}`))
-    return 'removed'
+    return (await exitCodeOf($, asideScript(paths.dir, `${paths.dir}.dead.${actor}`))) === 0 ? 'removed' : 'failed'
   })
 }
 
@@ -293,6 +296,7 @@ export async function claimCheckout(
       if (attempt === 1) return { kind: 'busy', owner: null }
       const evicted = await evict($, paths, owner, { reason: 'dead', owner: facts.owner }, ownerState)
       if (evicted === 'contended') return { kind: 'busy', owner: null }
+      if (evicted === 'failed') return { kind: 'failed', detail: 'the old lock could not be moved aside' }
     }
     return { kind: 'busy', owner: null }
   } catch (err) {

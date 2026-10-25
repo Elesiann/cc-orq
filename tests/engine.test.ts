@@ -51,6 +51,8 @@ type State = {
   locks: Map<string, string | null>
   /** The exit code the claim script answers with when it is not 0: 1 means the lock directory is there already. */
   lockExit: number
+  /** The exit code the aside script answers with; when it is not 0 the lock stays where it is. */
+  asideExit: number
   /** Jobs whose supervisor has not written its pgid yet. */
   noPgid: Set<string>
   /** The steps of a launch in the order they ran: mkdir, lock claim, write meta.json, start. */
@@ -83,6 +85,7 @@ function fresh(o: Partial<State> = {}): State {
     locking: false,
     locks: new Map(),
     lockExit: 0,
+    asideExit: 0,
     noPgid: new Set(),
     events: [],
     onStart: null,
@@ -179,6 +182,7 @@ function runLockScript(s: State, script: string): number {
   }
   if (action === 'mutex') s.onMutex?.()
   if (action === 'aside') {
+    if (s.asideExit !== 0) return s.asideExit
     const dir = /^mv (\S+) /m.exec(script)?.[1] ?? ''
     s.locks.delete(dir)
     s.files.delete(`${dir}/owner`)
@@ -842,6 +846,18 @@ test('a lock script that fails refuses the launch, starts nothing and records ex
   stubs(on, s)
   await start($)
   expect(await orq($, LAUNCH)).toBe('orq: manual could not lock its checkout (exit 9)')
+  expect(s.startScripts.length).toBe(0)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('a dead lock that cannot be moved aside refuses the launch as a failure to lock, not as a launch in progress', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, asideExit: 1 })
+  seedLock(s, 'job-dead', 0)
+  s.files.set(`${JOBS}/job-dead/exit`, '1')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual could not lock its checkout (the old lock could not be moved aside)')
+  expect(s.locks.get(WORK_LOCK)).toBe('job-dead')
   expect(s.startScripts.length).toBe(0)
   expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
 })
