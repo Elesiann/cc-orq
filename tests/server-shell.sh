@@ -17,6 +17,9 @@ export GIT_COMMITTER_NAME=orq-test GIT_COMMITTER_EMAIL=orq-test@example.invalid
 
 REPO="$T/session/repo"
 git init -q -b main "$REPO"
+# A job started through systemd-run gets a fresh environment, so the identity also lives in the repository the worktrees share.
+git -C "$REPO" config user.name orq-test
+git -C "$REPO" config user.email orq-test@example.invalid
 printf 'base\n' > "$REPO/shared.txt"
 git -C "$REPO" add shared.txt
 git -C "$REPO" commit -q -m base
