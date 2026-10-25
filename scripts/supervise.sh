@@ -37,6 +37,13 @@ read_prompt() {
   IFS= read -r -d '' prompt < "$dir/prompt.txt" || :
 }
 
+# $BASHPID, not $$: the runner and the watcher are subshells, and bash keeps $$
+# at the supervisor's pid inside them.
+write_exit() {
+  local tmp="$dir/exit.$BASHPID.tmp"
+  printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$dir/exit"
+}
+
 run_codex() {
   args=(exec --json -o "$dir/last.txt")
   [ -n "$model" ] && args+=(-m "$model")
@@ -50,7 +57,7 @@ run_opencode() {
   read_prompt
   ( cd "$cwd" && opencode run --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
-  if [ -e "$dir/cancel" ]; then echo 124 > "$dir/exit"; return $code; fi
+  if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
 import json, sys
 last = None
@@ -79,7 +86,7 @@ run_agy() {
   args+=("${flags[@]}" --print "$prompt")
   ( cd "$cwd" && agy "${args[@]}" </dev/null ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
-  if [ -e "$dir/cancel" ]; then echo 124 > "$dir/exit"; return $code; fi
+  if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
 import json, sys
 last = None
@@ -109,7 +116,7 @@ run_claude() {
   args+=("${flags[@]}" -- "$prompt")
   ( cd "$cwd" && claude "${args[@]}" </dev/null ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
-  if [ -e "$dir/cancel" ]; then echo 124 > "$dir/exit"; return $code; fi
+  if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
 import json, sys
 last = None
@@ -134,7 +141,7 @@ case "$runner" in
   opencode) run_cli() { run_opencode; } ;;
   agy) run_cli() { run_agy; } ;;
   claude) run_cli() { run_claude; } ;;
-  *) echo "orq: unknown runner $runner" > "$dir/stderr.txt"; echo 3 > "$dir/exit"; exit 0 ;;
+  *) echo "orq: unknown runner $runner" > "$dir/stderr.txt"; write_exit 3; exit 0 ;;
 esac
 
 run_cli > /dev/null 2>&1 &
@@ -145,7 +152,7 @@ child=$!
     if [ -e "$dir/cancel" ]; then
       kill -TERM -$$ 2>/dev/null
       sleep 5
-      if [ ! -e "$dir/exit" ]; then echo 124 > "$dir/exit"; fi
+      if [ ! -e "$dir/exit" ]; then write_exit 124; fi
       kill -KILL -$$ 2>/dev/null
       exit 0
     fi
@@ -157,5 +164,5 @@ watcher=$!
 wait "$child"
 code=$?
 kill "$watcher" 2>/dev/null
-if [ -e "$dir/cancel" ]; then echo 124 > "$dir/exit"; elif [ ! -e "$dir/exit" ]; then echo "$code" > "$dir/exit"; fi
+if [ -e "$dir/cancel" ]; then write_exit 124; elif [ ! -e "$dir/exit" ]; then write_exit "$code"; fi
 exit 0
