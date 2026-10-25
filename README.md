@@ -376,10 +376,33 @@ A manual launch asks for one with `--worktree`:
 
 The launch starts nothing and says why when the directory is not inside a git
 checkout (`not_a_repository`), or when git cannot create the worktree
-(`git_failed`). A shared launch, a task with `isolation: shared` or a `/orq launch`
-without `--worktree`, writes into its directory, so it is refused with
-`worktree_busy` while a live job runs there or in a worktree of that checkout.
-A worktree launch is never refused for that.
+(`git_failed`).
+
+A shared launch, a task with `isolation: shared` or a `/orq launch` without
+`--worktree`, writes into its directory, so only one job at a time runs in a
+checkout. The launch takes a lock on the checkout before it starts anything:
+the top level of the git checkout that holds the directory, or the directory
+itself outside a repository. A subdirectory and a symlink of one checkout are
+that checkout, and the lock holds between processes, so two sessions that
+launch at the same moment cannot both run. The later launch starts nothing and
+is refused with `worktree_busy` and the id of the job that holds the lock, also
+while that job is still starting. A shared launch is also refused while a live
+job runs in the checkout or in a worktree of it. A worktree launch is never
+refused for that, and it does not take the lock.
+
+The refusal names no job, and reads `is in use by a launch in progress`, only
+when the lock holds no job id yet, when two launches claim it at the same
+moment, when another launch is taking over the lock of a job that ended, or
+when this launch lost its lock while it scanned the jobs directory. Try again a
+moment later.
+
+The lock is a directory under `.locks` in the jobs directory. It stays after
+its job ends. The next shared launch takes it over, as it does the lock of a
+job that was killed or of a launch that died before its job started. If four
+launches die while they take over one lock, every shared launch into that
+checkout keeps answering `is in use by a launch in progress`. Remove `NAME*`
+from `.locks` by hand, where NAME is the lock directory whose `key` file holds
+the checkout's path.
 
 A launch that fails after git created its worktree removes that worktree and
 its branch again, on a best-effort basis. When that removal fails, the debug log

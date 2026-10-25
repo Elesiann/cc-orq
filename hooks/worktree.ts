@@ -86,15 +86,6 @@ export function worktreePathFor(toplevel: string, taskId: string): string {
   return `${parent}/${name}-wt/${taskId}`
 }
 
-/** One job's place as the busy check reads it: where it runs, the checkout it is a worktree of, and whether it is live. */
-export type JobPlace = { id: string; cwd: string; repo?: string; live: boolean }
-
-/** The id of the first live job that runs in `path` or is a worktree of the checkout `path`, or null. */
-export function busyJob(jobs: readonly JobPlace[], path: string): string | null {
-  const holder = jobs.find((job) => job.live && (job.cwd === path || job.repo === path))
-  return holder?.id ?? null
-}
-
 /** The first line of a git error, redacted and cut, so it can sit in a failure message. */
 export function gitDetail(stderr: string): string {
   const line = outputLines(stderr)[0] ?? ''

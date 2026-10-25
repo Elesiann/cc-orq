@@ -40,6 +40,16 @@ All notable changes to cc-orq are recorded here. The format follows
   pane when either read its `exit` file while the supervisor was writing it.
   The supervisor now writes the file in one step, so a reader sees either no
   file or the whole exit code.
+- Two shared launches into one checkout could both start when they began at
+  the same moment, for example from two sessions, because each looked for a
+  live job before either had written its own. A shared launch now takes a lock
+  on its checkout first, and the later one is refused with `worktree_busy` and
+  the id of the job that holds it. A subdirectory or a symlink of a checkout is
+  the same checkout, and a live job in a subdirectory now blocks a shared
+  launch at the top level. A launch that cannot make, write or take over the
+  lock is refused with `could not lock its checkout`. A launch keeps its lock
+  while it scans the jobs directory, and one whose lock another launch took
+  over during the scan is refused with `worktree_busy`.
 - OpenCode jobs and the `capabilities` probe no longer go through OpenCode's
   shared background service. That service started your OpenCode MCP servers
   again for each command and kept them running, which left 41 processes and
