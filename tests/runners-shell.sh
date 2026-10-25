@@ -126,7 +126,7 @@ expect_argv codex-plain codex exec --json -o "$JOB/last.txt" -C "$T/work" --skip
 expect_file "$DUMP/codex.stdin" 'plain codex prompt' codex-plain-stdin-prompt
 
 run_job job-opencode-plain opencode plain-model '' '' 'plain opencode prompt'
-expect_argv opencode-plain opencode run --format json -m plain-model -- 'plain opencode prompt'
+expect_argv opencode-plain opencode run --standalone --format json -m plain-model -- 'plain opencode prompt'
 
 run_job job-codex codex m1 medium read-only 'do it via codex' -c 'foo=bar'
 expect_argv codex-flags codex exec --json -o "$JOB/last.txt" -m m1 -c 'model_reasoning_effort="medium"' -s read-only -C "$T/work" --skip-git-repo-check -c 'foo=bar' -
@@ -139,7 +139,7 @@ expect_argv codex-approve-flags codex exec --json -o "$JOB/last.txt" -m m3 -C "$
 expect_file "$JOB/exit" 0 codex-approve-exit
 
 run_job job-opencode opencode m2 '' '' 'do it via opencode' --agent plan
-expect_argv opencode-flags opencode run --format json -m m2 --agent plan -- 'do it via opencode'
+expect_argv opencode-flags opencode run --standalone --format json -m m2 --agent plan -- 'do it via opencode'
 expect_file "$JOB/exit" 0 opencode-exit
 [ "$(cat "$DUMP/opencode.cwd")" = "$T/work" ] && ok opencode-cwd || bad opencode-cwd
 

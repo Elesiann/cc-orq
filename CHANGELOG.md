@@ -40,6 +40,15 @@ All notable changes to cc-orq are recorded here. The format follows
   pane when either read its `exit` file while the supervisor was writing it.
   The supervisor now writes the file in one step, so a reader sees either no
   file or the whole exit code.
+- OpenCode jobs and the `capabilities` probe no longer go through OpenCode's
+  shared background service. That service started your OpenCode MCP servers
+  again for each command and kept them running, which left 41 processes and
+  about 2 GB of memory in use after one probe on OpenCode 2.0.27. Every command
+  also ran with the environment the service was started with. Jobs and the
+  probe now pass `--standalone`, so OpenCode runs on a private server that uses
+  the command's environment and ends with the command. One MCP server that is
+  still starting when the command ends can stay running, about 250 MB each time
+  (see Known limitations in the README).
 
 ## [0.1.1] - 2026-10-21
 

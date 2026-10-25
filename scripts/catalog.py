@@ -14,9 +14,10 @@ Drivers:
   codex       `codex debug models` (visibility == "list" only, as T3 does),
               reasoning effort from supported_reasoning_levels, auth via
               `codex login status`. One instance per CODEX_HOME.
-  opencode    `opencode models` (one provider/model per line). OpenCode lists
-              only the providers it can use, logged in or configured through
-              the environment, so every listed model is kept, as T3 does.
+  opencode    `opencode models --standalone` (one provider/model per line).
+              OpenCode lists only the providers it can use, logged in or
+              configured through the environment, so every listed model is
+              kept, as T3 does.
   antigravity `agy models` (tab-separated id and label; effort is in the id).
   claudeAgent the `claude` CLI; models are the haiku/sonnet/opus aliases
               accepted by `claude -p --model`, mirroring T3's
@@ -36,6 +37,11 @@ TIMEOUT_S = 60
 CLAUDE_ALIASES = ("haiku", "sonnet", "opus")
 
 OPENCODE_SLUG = re.compile(r"^\s*[^\s/]+/\S+\s*$")
+
+# --standalone lists on a private server that ends with the command. Without it OpenCode hands the
+# command to its shared background service, which starts the user's MCP servers on every call and
+# leaves them running.
+OPENCODE_MODELS = ["opencode", "models", "--standalone"]
 
 
 def run(cmd, env, timeout=TIMEOUT_S):
@@ -127,13 +133,13 @@ def probe_codex(env):
 def probe_opencode(env):
     if shutil.which("opencode", path=env.get("PATH")) is None:
         return False, None, [], "Executable 'opencode' was not found on PATH."
-    code, out = run(["opencode", "models"], env)
+    code, out = run(OPENCODE_MODELS, env)
     if code not in (0, 127):
         # OpenCode commands share one SQLite database, so a concurrent run can fail it once.
         time.sleep(1)
-        code, out = run(["opencode", "models"], env)
+        code, out = run(OPENCODE_MODELS, env)
     if code != 0:
-        return True, None, [], "'opencode models' failed (exit %d)." % code
+        return True, None, [], "'%s' failed (exit %d)." % (" ".join(OPENCODE_MODELS), code)
     # The label would repeat the id after the slash, and OpenCode can list hundreds of models.
     models = [{"id": line.strip(), "label": None} for line in out.splitlines() if OPENCODE_SLUG.match(line)]
     if not models:

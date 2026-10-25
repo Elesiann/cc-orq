@@ -55,7 +55,10 @@ run_codex() {
 
 run_opencode() {
   read_prompt
-  ( cd "$cwd" && opencode run --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
+  # --standalone runs a private server that ends with the job. Without it OpenCode hands the run to
+  # its shared background service, which leaves the user's MCP servers running and keeps the
+  # environment it started with.
+  ( cd "$cwd" && opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
   if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null

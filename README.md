@@ -77,6 +77,7 @@ ceiling, and its answer comes back to the conversation when it ends.
 | Linux | | Jobs run under `systemd-run` or `setsid` |
 | `bash`, `python3`, `git` | | The supervisor, the event extractor and worktrees |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
+| [OpenCode](https://github.com/sst/opencode) | 2.0.27 (tested) | orq passes `--standalone` to `opencode run` and `opencode models` |
 
 The five tools of the MCP server work in every session. The `cc-orq:task`
 agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
@@ -458,8 +459,9 @@ and the modes a task may run in. Each provider has its
 `providerInstanceId`, its `driverKind`, its `models` (each with the `options`
 the CLI reports, such as `reasoningEffort` and its allowed values),
 `canRunChildTask` and `constraints`, the reasons it cannot run now. An
-OpenCode instance lists every model of `opencode models`, which names only the
-providers OpenCode can use, logged in or configured through the environment.
+OpenCode instance lists every model of `opencode models --standalone`, which
+names only the providers OpenCode can use, logged in or configured through the
+environment.
 
 <details>
 <summary>Example answer</summary>
@@ -818,7 +820,9 @@ flowchart LR
    task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
    detached under `systemd-run` or `setsid`. The supervisor runs the provider
    CLI, writes its events and final message, and stops the process group when
-   a `cancel` file appears.
+   a `cancel` file appears. An OpenCode job passes `--standalone`, so it runs on
+   a private OpenCode server with the job's environment, not on OpenCode's
+   shared background service.
 4. Each following step calls `mcp__cc-orq__wait`, which blocks for up to
    `waitSeconds` and answers whether the job has finished.
 5. When the job ends, the engine reads its final message from `last.txt` and
@@ -853,8 +857,12 @@ directories.
 - A task cannot be resumed or sent a follow-up message. A review round or an
   answer to a child's question is a new task that carries the earlier brief.
 - Cancelling a job stops its process group. A process that leaves the group
-  keeps running, and so do the tools of an `opencode run` job, which execute
-  in the shared OpenCode server.
+  keeps running.
+- OpenCode's private server ends your MCP servers with the command, except that
+  a server still starting at that moment can stay running. On OpenCode 2.0.27
+  this happened after most `opencode models --standalone` probes and after some
+  jobs, and the leftover held about 250 MB. Look for an orphaned launcher, such
+  as an `npm exec`, in `ps -eo pid,ppid,rss,etime,comm`, and stop it with `kill`.
 - OpenCode tasks do not get the task's effort, and their footer says
   `effort n/a`.
 - A task's worktree gets ignored files only through `.worktreeinclude`, and a
