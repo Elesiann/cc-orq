@@ -41,6 +41,18 @@ function elapsedText(job: JobRecord, view: JobView, now: number): string {
   return '—'
 }
 
+function originText(job: JobRecord): string {
+  if (job.parent !== undefined) return `↳ ${job.parent}`
+  switch (job.kind) {
+    case 'mcp':
+      return 'delegate'
+    case 'task':
+      return 'agent'
+    default:
+      return 'manual'
+  }
+}
+
 async function listText($: Engine, config: OrqConfig): Promise<string> {
   const jobs = await listJobs($, config.jobsDir)
   if (jobs.length === 0) return 'orq: no jobs yet'
@@ -48,7 +60,14 @@ async function listText($: Engine, config: OrqConfig): Promise<string> {
   const rows: TableRow[] = await Promise.all(
     jobs.map(async (job) => {
       const view = await jobView($, job)
-      return { id: job.id, kind: job.kind, status: view.status, elapsed: elapsedText(job, view, now), cwd: job.cwd }
+      return {
+        id: job.id,
+        kind: job.kind,
+        status: view.status,
+        elapsed: elapsedText(job, view, now),
+        origin: originText(job),
+        cwd: job.cwd,
+      }
     }),
   )
   return renderTable(rows)
