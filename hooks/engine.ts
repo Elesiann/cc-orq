@@ -57,6 +57,7 @@ export type QuestionMode = 'parent' | 'human'
 
 export type LaunchSpec = {
   kind: string
+  reservedId?: string
   agentId: string
   runner: Runner
   model: string
@@ -82,6 +83,7 @@ export type LaunchSpec = {
 export type TaskLaunchSpec = {
   /** The job kind: `task` for the cc-orq:task agent, which is the default, and `mcp` for the server's delegate. */
   kind?: string
+  reservedId?: string
   questions?: QuestionMode
   agentId: string
   instance: InstanceConfig
@@ -455,14 +457,17 @@ export async function prepareWorktree($: CoreEngine, cwd: string, taskId: string
   }
 }
 
+export function newJobId(kind: string, now: number, agentId: string): string {
+  return `${kind}-${now}-${agentId.slice(-8)}-${rand36()}`
+}
+
 /** Create a job directory, write meta.json and prompt.txt, and start the supervisor detached. */
 export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
   const now = await $.clock.now()
   const supervise = `${$.plugin.root}/scripts/supervise.sh`
-  const agentSuffix = spec.agentId.slice(-8)
   const ownerOf = ownerStateProbe($, config.jobsDir)
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const id = `${spec.kind}-${now}-${agentSuffix}-${rand36()}`
+    const id = spec.reservedId ?? newJobId(spec.kind, now, spec.agentId)
     const dir = `${config.jobsDir}/${id}`
     let mkdirCode: number
     try {
@@ -471,7 +476,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
     } catch (err) {
       return { refusal: `orq: ${spec.kind} could not create its job directory: ${String(err)}` }
     }
-    if (mkdirCode === 7 && attempt === 0) continue
+    if (mkdirCode === 7 && attempt === 0 && spec.reservedId === undefined) continue
     if (mkdirCode !== 0) {
       return { refusal: `orq: ${spec.kind} could not create its job directory (exit ${mkdirCode})` }
     }
@@ -597,6 +602,7 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
   const kind = spec.kind ?? 'task'
   const launched = await launchJob($, config, {
     kind,
+    ...(spec.reservedId !== undefined ? { reservedId: spec.reservedId } : {}),
     agentId: spec.agentId,
     runner: DRIVER_RUNNER[spec.instance.driver],
     model: spec.model,
@@ -624,20 +630,19 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
   return { refusal: refusal + hint }
 }
 
+export type TaskLaunchArgs = {
+  agentId: string
+  header: TaskHeader
+  ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+  sessionDir: string
+  kind?: string
+  reservedId?: string
+  questions?: QuestionMode
+}
+
 /** A refused header comes back as `{ refusal }`, not as a throw. */
-export async function launchTaskFromHeader(
-  $: CoreEngine,
-  config: OrqConfig,
-  args: {
-    agentId: string
-    header: TaskHeader
-    ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
-    sessionDir: string
-    kind?: string
-    questions?: QuestionMode
-  },
-): Promise<LaunchResult> {
-  const { agentId, header, ceiling, sessionDir, kind, questions } = args
+export async function planTaskLaunch($: CoreEngine, config: OrqConfig, args: TaskLaunchArgs): Promise<{ spec: TaskLaunchSpec } | { refusal: string }> {
+  const { agentId, header, ceiling, sessionDir, kind, reservedId, questions } = args
   const resolved = resolveTarget({
     target: header.target,
     instances: config.instances,
@@ -652,21 +657,29 @@ export async function launchTaskFromHeader(
   const scoped = await scopedCwd($, config, sessionDir, header.cwd)
   if ('refusal' in scoped) return scoped
   const effort = appliedEffort(resolved.instance.driver, resolved.options)
-  return launchTaskJob($, config, {
-    ...(kind !== undefined ? { kind } : {}),
-    ...(questions !== undefined ? { questions } : {}),
-    agentId,
-    instance: resolved.instance,
-    model: resolved.model,
-    cwd: scoped.cwd,
-    prompt: taskPrompt(header.prompt, header.role),
-    flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
-    runtimeMode: resolved.runtimeMode,
-    interactionMode: resolved.interactionMode,
-    ...(effort !== undefined ? { effort } : {}),
-    isolation: header.isolation,
-    scopeRoots: scoped.roots,
-  })
+  return {
+    spec: {
+      ...(kind !== undefined ? { kind } : {}),
+      ...(reservedId !== undefined ? { reservedId } : {}),
+      ...(questions !== undefined ? { questions } : {}),
+      agentId,
+      instance: resolved.instance,
+      model: resolved.model,
+      cwd: scoped.cwd,
+      prompt: taskPrompt(header.prompt, header.role),
+      flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
+      runtimeMode: resolved.runtimeMode,
+      interactionMode: resolved.interactionMode,
+      ...(effort !== undefined ? { effort } : {}),
+      isolation: header.isolation,
+      scopeRoots: scoped.roots,
+    },
+  }
+}
+
+export async function launchTaskFromHeader($: CoreEngine, config: OrqConfig, args: TaskLaunchArgs): Promise<LaunchResult> {
+  const planned = await planTaskLaunch($, config, args)
+  return 'refusal' in planned ? planned : launchTaskJob($, config, planned.spec)
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. Rejects when the probe cannot run. */
@@ -789,8 +802,8 @@ export function blockedText(id: string, question: string): string {
   return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.`
 }
 
-export async function composeAnswer($: CoreEngine, config: OrqConfig, job: JobRecord): Promise<string> {
-  const view = await jobView($, job)
+export async function composeAnswer($: CoreEngine, config: OrqConfig, job: JobRecord, knownView?: JobView): Promise<string> {
+  const view = knownView ?? (await jobView($, job))
   if (!('exitCode' in view)) return notEndedText(job.id, view.status)
   if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
   if (view.question !== null) return blockedText(job.id, view.question)

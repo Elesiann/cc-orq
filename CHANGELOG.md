@@ -17,14 +17,41 @@ All notable changes to cc-orq are recorded here. The format follows
 - The tool `list`: the newest jobs first, whatever started them, with each
   job's status, instance, model, duration, working directory, branch and
   whether it ended on a question.
-- The tool `delegate` starts a job and answers `{"taskId", "status": "running"}`
-  at once. Its fields are the header of a `cc-orq:task` prompt, read by the same
+- The tool `delegate` starts a job. A client that declares the MCP tasks
+  extension gets a task (below), and any other client gets `{"taskId", "status":
+  "running"}` at once. Its fields are the header of a `cc-orq:task` prompt, read by the same
   parser, so a mistake gets the same message. It works in a worktree by default,
   holds the request to the permission ceiling, and refuses what is above it with
   the escalation code and what lifts the limit. It takes a prompt of at most
   200,000 characters. Its job has kind `mcp`, the session id as its `agentId`
   (or `mcp`), and `questions` in `meta.json`. `questions: human` is refused for
-  now, because it needs MCP tasks and forms.
+  now, because this version cannot resume a worker with an answer from a form.
+- `delegate` returns an MCP task to a client that declares the tasks extension
+  on the request, as the Claude Code CLI does. `/tasks` lists it with the
+  worker's instance, model and last action, and the session wakes by itself with
+  the worker's answer, the footer, and for a worktree job the branch and the
+  `integrate` call. The task has the id of its job, so `status`, `list` and
+  `integrate` take it. `tasks/get` derives its state from the files in the job
+  directory on every request and holds nothing in memory, so a server that
+  starts after Claude Code was closed answers for the tasks of the session
+  before. `tasks/cancel` is idempotent, as Claude Code sends it twice;
+  `tasks/update` ignores a key that is not outstanding; `tasks/result` and
+  `tasks/list` answer -32601. A client without the extension gets the same
+  bytes as before, and a subagent's call declares none (measured on Claude Code
+  2.1.310).
+- A request above the ceiling opens a form in the CLI instead of being refused,
+  when the client declares tasks and form input. The form says who asks, the
+  real directory, whether the task runs in its own worktree or in your checkout
+  itself, and which limit each level is above (`ceiling.runtime`,
+  `ceiling.sharedRuntime` or `ceiling.interaction`, and the session's mode when
+  it is the lower). What the model chose is quoted, cut and escaped. Accepting
+  starts the job at the level asked, for that task only, and only when the launch
+  still matches what the form showed; declining or Esc ends the task with the
+  escalation error. A request that could not start is refused before any form.
+- `.tasks/ID/` in the jobs directory holds the record of a task (`task.json`,
+  written once before the task is answered) and the markers `approved`,
+  `declined`, `refused` and `cancelled`. Old tasks and jobs of the `cc-orq:task`
+  agent have none and read as tasks from their job alone.
 - The `ceiling` field of `~/.config/orq/config.json`: `runtime` (default
   `auto-accept-edits`) limits a task in its own worktree, `sharedRuntime`
   (default `approval-required`) limits a task with `isolation: shared`, and
@@ -92,6 +119,10 @@ All notable changes to cc-orq are recorded here. The format follows
   worker only reads, so a session in `auto` or `bypassPermissions` mode no
   longer gets workers in that mode. To give workers `auto` in an `auto`
   session, set `"ceiling": {"runtime": "auto"}`.
+- `capabilities` reports `client.forms` as true for an `elicitation` capability
+  that names no mode, which the MCP spec defines as form mode.
+- The tool descriptions and `server/instructions.md` tell the session that a task
+  wakes it with the result, so it ends its turn and does not poll.
 - A task refused for asking above its ceiling gets a message that names the
   limit in the way and what lifts it: the `ceiling` field of the configuration,
   the session's permission mode, or both.

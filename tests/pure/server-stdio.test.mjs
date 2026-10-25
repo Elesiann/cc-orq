@@ -1135,6 +1135,7 @@ const FAKE_HELD_WORKER = FAKE_WORKER.replace(
   '#!/bin/bash\nprintf "%s\\n" "$@" > "$ORQ_JOB_DIR/argv.txt"\nfor _ in $(seq 1 300); do [ -e "$ORQ_JOB_DIR/go" ] && break; sleep 0.1; done\n',
 )
 
+const NO_TASKS = {}
 const ENUMS = (text) => /one of: (.*)\.$/.exec(parseTaskHeader(text).error.message)[1].split(', ')
 const HEADER = 'target: a b\ncwd: /x\n'
 
@@ -1257,7 +1258,7 @@ test('delegate takes a prompt of at most 200,000 characters, counted as characte
   assert.deepEqual(jobDirs(s), [], 'nothing was launched')
 })
 
-test('delegate refuses questions: human, which needs tasks and forms that this server does not offer yet', async (t) => {
+test('delegate refuses questions: human, which needs the answer of a form to resume a worker', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())
   const { session, repo } = checkout(s)
@@ -1269,7 +1270,7 @@ test('delegate refuses questions: human, which needs tasks and forms that this s
     assert.equal(answer.json.error.code, 'invalid_request')
     assert.equal(
       answer.json.error.message,
-      'questions: human is not available yet: it needs a client with MCP tasks and form input, which this server does not offer. Leave questions out, and a question the worker asks comes back to you in its result.',
+      'questions: human is not available yet: this version cannot resume a worker with an answer from a form. Leave questions out, and a question the worker asks comes back to you in its result.',
     )
   }
   assert.deepEqual(jobDirs(s), [])
@@ -1357,7 +1358,7 @@ test('delegate launches through a fake worker, answers running at once, and leav
   t.after(() => server.close())
   const statusOf = (taskId) => server.call('status', { taskId })
 
-  const answer = await server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Add a file and commit it.', sessionMode: 'acceptEdits' })
+  const answer = await server.call('delegate', { target: 'claudeAgent', model: 'haiku', cwd: repo, prompt: 'Add a file and commit it.', sessionMode: 'acceptEdits' }, NO_TASKS)
   assert.equal(answer.isError, false, answer.text)
   assert.deepEqual(Object.keys(answer.json), ['taskId', 'status'])
   assert.equal(answer.json.status, 'running')
@@ -1408,8 +1409,8 @@ test('a job that delegate launches records the session id as its agentId, and mc
   t.after(() => withSession.close())
   const withoutSession = startIn(s, session, { CLAUDE_CODE_SESSION_ID: '' })
   t.after(() => withoutSession.close())
-  const first = (await withSession.call('delegate', input)).json.taskId
-  const second = (await withoutSession.call('delegate', input)).json.taskId
+  const first = (await withSession.call('delegate', input, NO_TASKS)).json.taskId
+  const second = (await withoutSession.call('delegate', input, NO_TASKS)).json.taskId
   const agentOf = (taskId) => JSON.parse(readFileSync(join(s.jobsDir, taskId, 'meta.json'), 'utf8')).agentId
   assert.equal(agentOf(first), SESSION_ID)
   assert.equal(agentOf(second), 'mcp')
@@ -1429,28 +1430,28 @@ test('under "ceiling": {"runtime": "auto"} and a session in auto mode, a delegat
   const flagsOf = (answer) => readFileSync(join(s.jobsDir, answer.json.taskId, 'flags'), 'utf8')
   const metaOf = (answer) => JSON.parse(readFileSync(join(s.jobsDir, answer.json.taskId, 'meta.json'), 'utf8'))
 
-  const asked = await server.call('delegate', { ...input, runtime: 'auto', sessionMode: 'auto' })
+  const asked = await server.call('delegate', { ...input, runtime: 'auto', sessionMode: 'auto' }, NO_TASKS)
   assert.equal(asked.isError, false, asked.text)
   assert.equal(flagsOf(asked), '--permission-mode\nauto\n')
   assert.equal(metaOf(asked).runtimeMode, 'auto')
 
-  const inherited = await server.call('delegate', { ...input, sessionMode: 'auto' })
+  const inherited = await server.call('delegate', { ...input, sessionMode: 'auto' }, NO_TASKS)
   assert.equal(flagsOf(inherited), '--permission-mode\nauto\n', 'a runtime left out inherits the effective ceiling')
 
-  const configAlone = await server.call('delegate', { ...input, runtime: 'auto' })
+  const configAlone = await server.call('delegate', { ...input, runtime: 'auto' }, NO_TASKS)
   assert.equal(flagsOf(configAlone), '--permission-mode\nauto\n', 'without a session mode the config alone decides')
 
-  const lowered = await server.call('delegate', { ...input, sessionMode: 'acceptEdits' })
+  const lowered = await server.call('delegate', { ...input, sessionMode: 'acceptEdits' }, NO_TASKS)
   assert.equal(flagsOf(lowered), '--permission-mode\nacceptEdits\n', 'the session mode lowers what the config allows')
 
-  const stricter = await server.call('delegate', { ...input, runtime: 'approval-required', sessionMode: 'auto' })
+  const stricter = await server.call('delegate', { ...input, runtime: 'approval-required', sessionMode: 'auto' }, NO_TASKS)
   assert.equal(flagsOf(stricter), '--permission-mode\nmanual\n', 'a task may ask for less than the ceiling')
 
   const ended = async (answer) => (await untilEnded((id) => server.call('status', { taskId: id }), answer.json.taskId)).status
   for (const answer of [asked, inherited, configAlone, lowered, stricter]) assert.equal(await ended(answer), 'completed')
 
   // A shared launch is refused while a live job holds the checkout, so it goes last, once the worktree jobs have ended.
-  const shared = await server.call('delegate', { ...input, isolation: 'shared', sessionMode: 'auto' })
+  const shared = await server.call('delegate', { ...input, isolation: 'shared', sessionMode: 'auto' }, NO_TASKS)
   assert.equal(shared.isError, false, shared.text)
   assert.equal(flagsOf(shared), '--permission-mode\nmanual\n', 'a shared task keeps the sharedRuntime limit, approval-required')
   assert.equal(metaOf(shared).worktree, undefined)
@@ -1475,18 +1476,17 @@ test('tasks/get, tasks/update and tasks/cancel answer -32021 without the extensi
   assert.equal(bare.error.code, -32021)
 })
 
-test('tasks/get, tasks/update and tasks/cancel answer -32602 for any id when the extension is declared', async (t) => {
+test('tasks/get, tasks/update and tasks/cancel answer -32602 for an id that names no task, and for an unsafe one', async (t) => {
   const s = scene()
   t.after(() => s.cleanup())
-  job(s.jobsDir, 'job-real', { files: { exit: '0', 'last.txt': 'OK' }, exitAt: SECOND + 1 })
   const server = s.start()
   t.after(() => server.close())
   const request = { jsonrpc: '2.0', id: 1, method: 'tasks/get', params: { taskId: 'x', ...modern() } }
   conforms(GetTaskRequestV2Schema, request, 'the tasks/get request this test sends')
   for (const method of ['tasks/get', 'tasks/update', 'tasks/cancel']) {
-    for (const taskId of ['task-unknown', 'job-real']) {
+    for (const taskId of ['task-unknown', '../escape', '']) {
       const answer = await server.request(method, { taskId, ...modern() })
-      assert.equal(answer.error.code, -32602, `${method} ${taskId}`)
+      assert.equal(answer.error.code, -32602, `${method} ${JSON.stringify(taskId)}`)
       assert.match(answer.error.message, /Task not found$/)
     }
   }
@@ -1509,7 +1509,8 @@ test('clientInfoOf reads the tasks extension and the form capability from the en
   assert.deepEqual(clientInfoOf(both), { tasks: true, forms: true })
   assert.deepEqual(clientInfoOf({ [key]: { extensions: { [TASKS]: {} } } }), { tasks: true, forms: false })
   assert.deepEqual(clientInfoOf({ [key]: { elicitation: { form: {} } } }), { tasks: false, forms: true })
-  assert.deepEqual(clientInfoOf({ [key]: { elicitation: {}, extensions: { 'other/extension': {} } } }), { tasks: false, forms: false })
+  assert.deepEqual(clientInfoOf({ [key]: { elicitation: {}, extensions: { 'other/extension': {} } } }), { tasks: false, forms: true }, 'an elicitation capability with no mode is form mode')
+  assert.deepEqual(clientInfoOf({ [key]: { elicitation: { url: {} }, extensions: { [TASKS]: {} } } }), { tasks: true, forms: false })
   assert.deepEqual(clientInfoOf({ [key]: { extensions: { [TASKS]: null } } }), { tasks: false, forms: false })
   assert.deepEqual(clientInfoOf({ [key]: { extensions: { [TASKS]: true } } }), { tasks: false, forms: false })
   for (const absent of [undefined, null, {}, 'envelope', 7, [], { [key]: null }, { [key]: 'x' }, { [key]: {} }]) {

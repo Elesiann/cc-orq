@@ -2,10 +2,9 @@
 // text block, the JSON that the mod's tools answered in 0.1, and a refusal is the typed `{ error: { code, message } }`
 // with `isError`. The answers come from the job core, so the server and the mod read a job the same way.
 
-import { describeCeiling, resolveCeiling, sessionCeiling } from '../hooks/ceiling.ts'
+import { describeCeiling } from '../hooks/ceiling.ts'
 import { loadConfig, type OrqConfig } from '../hooks/config.ts'
 import {
-  FAILURE_CODES,
   INTEGRATE_DESCRIPTION,
   INTEGRATE_INPUT_SCHEMA,
   INTEGRATE_TOOL,
@@ -16,20 +15,20 @@ import {
   type Failure,
   type TaskStatus,
 } from '../hooks/contract.ts'
-import { LIST_LIMIT, jobView, launchTaskFromHeader, listJobs, taskStatusOf, type CoreEngine, type QuestionMode } from '../hooks/engine.ts'
+import { LIST_LIMIT, jobView, listJobs, taskStatusOf, type CoreEngine, type QuestionMode } from '../hooks/engine.ts'
 import { integrate, integratePayload, parseIntegrateInput } from '../hooks/integrate.ts'
 import { parseTaskHeader, type TaskHeader } from '../hooks/task-header.ts'
 import { CANCEL_REASON_MAX, cancelAnswer, capabilitiesAnswer, statusAnswer, type CatalogCache } from '../hooks/tools.ts'
-import { isRecord, TASK_REFUSAL } from '../hooks/types.ts'
+import { isRecord } from '../hooks/types.ts'
 import { nodeEngine } from './node-engine.ts'
-import { clientInfoOf } from './protocol.ts'
+import { clientInfoOf, taskTool, type TaskSource } from './protocol.ts'
 import type { CallToolResult, McpServer, ServerContext, StandardSchemaWithJSON } from './vendor/mcp-sdk.mjs'
 
 const LIST_DEFAULT = 20
 
 const ISOLATIONS = ['worktree', 'shared']
 const ROLES = ['implementation', 'research', 'review', 'design', 'test', 'general']
-const QUESTION_MODES = ['parent', 'human'] as const satisfies readonly QuestionMode[]
+export const QUESTION_MODES = ['parent', 'human'] as const satisfies readonly QuestionMode[]
 const PROMPT_MAX_CHARS = 200_000
 
 const SESSION_MODE_INPUT = { type: 'string', description: 'Filled by the cc-orq hook; leave it out.' }
@@ -112,11 +111,13 @@ const CAPABILITIES_DESCRIPTION =
   'Read it before you name a target in a task brief, and do not guess model ids. Takes no input; sessionMode is filled by the cc-orq hook, so leave it out.'
 const DELEGATE_DESCRIPTION =
   'Start one orq job: a Codex, OpenCode, Antigravity or Claude CLI working on one self-contained task in the background. ' +
-  'The answer comes at once, as {"taskId", "status": "running"}; read the job with status until it ends. ' +
+  'A client with MCP tasks gets a background task that /tasks shows and that wakes the session with the result when the job ends: end your turn, and do not poll. ' +
+  'Any other client gets {"taskId", "status": "running"} at once, and reads the job with status until it ends. ' +
   'The worker has no history, so the prompt carries the whole brief, at most 200,000 characters. ' +
   'isolation worktree, the default, gives the worker its own git worktree on a new branch: tell it to commit, because integrate merges commits only. ' +
   'The worker runs at most as broad as the ceiling that capabilities reports, the lower of the config ceiling and the session permission mode, which counts as far as the cc-orq hook supplies it. ' +
-  'runtime and interaction ask for less; a request above the ceiling is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
+  'runtime and interaction ask for less. A request above the ceiling opens a form that asks the user to allow it for this task only, when the client has tasks and forms; ' +
+  'otherwise it is refused with runtime_mode_escalation_denied or interaction_mode_escalation_denied, and the refusal says how to lift it. ' +
   'questions parent, the default, ends a job that asks a question with BLOCKED in its result; questions human is not available yet. ' +
   'Input: {"target", "model", "cwd", "prompt"}, and optionally effort, isolation, role, runtime, interaction and questions.'
 const STATUS_DESCRIPTION =
@@ -161,7 +162,7 @@ async function failed($: CoreEngine, tool: string, err: unknown): Promise<CallTo
   return { content: [{ type: 'text', text }], isError: true }
 }
 
-async function configOf($: CoreEngine): Promise<OrqConfig> {
+export async function configOf($: CoreEngine): Promise<OrqConfig> {
   const { config, warning } = await loadConfig($)
   if (warning) await $.ui.log(`orq: ${warning}`)
   return config
@@ -251,10 +252,6 @@ const ONE_WORD_FIELDS = ['target', 'model', 'effort', 'runtime', 'interaction'] 
 /** The other header fields, where a line break would start another line. */
 const ONE_LINE_FIELDS = ['cwd', 'isolation', 'role'] as const
 
-const HUMAN_REFUSAL =
-  'questions: human is not available yet: it needs a client with MCP tasks and form input, which this server does not offer. ' +
-  'Leave questions out, and a question the worker asks comes back to you in its result.'
-
 /**
  * The header a cc-orq:task prompt would carry for these fields, so that the header parser holds each field to its rules
  * and a mistake gets the same message. A blank line ends the header, so the prompt is never read as a header line.
@@ -280,9 +277,9 @@ function characterCount(text: string): number {
   return count
 }
 
-type DelegateCall = { header: TaskHeader; questions: QuestionMode; sessionMode: string | undefined }
+export type DelegateCall = { header: TaskHeader; questions: QuestionMode; sessionMode: string | undefined; request: Record<string, string> }
 
-function parseDelegateInput(input: unknown): DelegateCall | Failure {
+export function parseDelegateInput(input: unknown): DelegateCall | Failure {
   if (!isRecord(input)) {
     return fail('invalid_request', 'delegate needs {"target": "<instance>", "model": "<model>", "cwd": "/absolute/path", "prompt": "<the whole brief>"}')
   }
@@ -310,51 +307,11 @@ function parseDelegateInput(input: unknown): DelegateCall | Failure {
   if (isFailure(header)) return header
   const questions = QUESTION_MODES.find((mode) => mode === (text.questions ?? 'parent'))
   if (questions === undefined) return fail('invalid_request', `questions must be one of: ${QUESTION_MODES.join(', ')}.`)
-  return { header, questions, sessionMode: text.sessionMode }
+  const { sessionMode, ...request } = text
+  return { header, questions, sessionMode, request }
 }
 
-/** Launch refusals that name no code and are the caller's to fix. */
-const REQUEST_PROBLEMS = ['directory does not exist: ', 'not a directory: ']
-
-/** The launch words a refusal as the text the cc-orq:task agent answers, so the code is read back from it. */
-async function launchRefusal($: CoreEngine, text: string): Promise<CallToolResult> {
-  const prefix = `${TASK_REFUSAL}: `
-  const body = text.startsWith(prefix) ? text.slice(prefix.length) : text
-  const named = /^([a-z_]+): ([\s\S]*)$/.exec(body)
-  const code = FAILURE_CODES.find((candidate) => candidate === named?.[1])
-  if (code !== undefined && named?.[2] !== undefined) return reply(fail(code, named[2]))
-  if (REQUEST_PROBLEMS.some((start) => body.startsWith(start))) return reply(fail('invalid_request', body))
-  const failure = `orq: delegate failed: ${body}`
-  await $.ui.log(failure)
-  return { content: [{ type: 'text', text: failure }], isError: true }
-}
-
-/** The job is of kind mcp, and belongs to the session that the environment names, or to mcp without one. */
-async function delegateAnswer($: CoreEngine, config: OrqConfig, input: unknown): Promise<CallToolResult> {
-  const call = parseDelegateInput(input)
-  if (isFailure(call)) return reply(call)
-  if (call.questions === 'human') return reply(fail('invalid_request', HUMAN_REFUSAL))
-  const { header } = call
-  const { effective, refusal } = resolveCeiling({
-    config: config.ceiling,
-    session: sessionCeiling(call.sessionMode),
-    isolation: header.isolation,
-    request: { runtimeMode: header.runtimeMode, interactionMode: header.interactionMode },
-  })
-  if (refusal !== null) return reply(refusal)
-  const launched = await launchTaskFromHeader($, config, {
-    agentId: (await $.env.get('CLAUDE_CODE_SESSION_ID')) || 'mcp',
-    header,
-    ceiling: effective,
-    sessionDir: (await $.env.get('CLAUDE_PROJECT_DIR')) ?? '',
-    kind: 'mcp',
-    questions: call.questions,
-  })
-  if ('job' in launched) return textResult({ taskId: launched.job.id, status: 'running' }, false)
-  return launchRefusal($, launched.refusal)
-}
-
-export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCache): void {
+export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCache, tasks: TaskSource): void {
   mcp.registerTool(
     'capabilities',
     { description: CAPABILITIES_DESCRIPTION, inputSchema: advertise(CAPABILITIES_INPUT) },
@@ -370,7 +327,7 @@ export function registerTools(mcp: McpServer, $: CoreEngine, catalog: CatalogCac
   mcp.registerTool(
     'delegate',
     { description: DELEGATE_DESCRIPTION, inputSchema: advertise(DELEGATE_INPUT) },
-    guarded($, 'delegate', async (input) => delegateAnswer($, await configOf($), input)),
+    guarded($, 'delegate', taskTool(tasks, 'delegate')),
   )
   mcp.registerTool(
     'status',
