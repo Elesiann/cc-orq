@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,16 +13,29 @@ const marker = () => `ORQ_SWEEP_TEST=${process.pid}-${(counter += 1)}-${Date.now
 const envWith = (pair) => ({ ...process.env, [pair.split('=')[0]]: pair.slice(pair.indexOf('=') + 1) })
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-// A process in a session of its own, as an MCP server that left its CLI's group would be. It is killed when
-// the test ends, whatever the test found.
+// A process in a session of its own, as an MCP server that left its CLI's group would be. Its whole group is
+// killed when the test ends, whatever the test found, so that nothing it started outlives the suite.
+const endGroup = (pid) => {
+  try {
+    process.kill(-pid, 'SIGKILL')
+  } catch {
+    /* the group is already gone */
+  }
+}
 function stray(t, script, env) {
   const child = spawn('bash', ['-c', script], { env, detached: true, stdio: 'ignore' })
   child.unref()
   const gone = new Promise((resolve) => child.on('exit', () => resolve(true)))
-  t.after(() => {
-    child.kill('SIGKILL')
-  })
+  t.after(() => endGroup(child.pid))
   return { gone, alive: () => child.exitCode === null && child.signalCode === null }
+}
+const running = (pid) => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2)[0] !== 'Z'
+  } catch {
+    return false
+  }
 }
 const settled = (p, ms) => Promise.race([p.gone, pause(ms).then(() => false)])
 const sweep = (args, options = {}) => spawnSync('python3', [SWEEP, ...args], { encoding: 'utf8', ...options })
@@ -83,9 +96,7 @@ test('sweep.py spares what runs below --spare-tree, and still ends a marked proc
   const mark = marker()
   const holder = spawn('bash', ['-c', 'sleep 60 & wait'], { env: envWith(mark), detached: true, stdio: 'ignore' })
   holder.unref()
-  t.after(() => {
-    holder.kill('SIGKILL')
-  })
+  t.after(() => endGroup(holder.pid))
   const elsewhere = stray(t, 'exec sleep 60', envWith(mark))
   await pause(300)
   const run = sweep([mark, '--spare-tree', String(holder.pid)])
@@ -95,6 +106,21 @@ test('sweep.py spares what runs below --spare-tree, and still ends a marked proc
   assert.equal(holder.exitCode === null && holder.signalCode === null, true, 'the process at the root of the spared tree was ended')
   const below = spawnSync('pgrep', ['-P', String(holder.pid), '-x', 'sleep'], { encoding: 'utf8' })
   assert.notEqual(below.stdout.trim(), '', 'the process below the spared root was ended')
+})
+
+test('sweep.py scans again for a process that a marked process starts when it gets SIGTERM', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'orq-sweep-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const mark = marker()
+  const respawner = stray(t, `trap 'sleep 60 & echo $! > ${dir}/started; exit 0' TERM; sleep 60 & wait`, envWith(mark))
+  await pause(300)
+  const run = sweep([mark, '0.6'])
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(await settled(respawner, 3000), true, 'the process that handles SIGTERM is still running')
+  const started = Number(readFileSync(join(dir, 'started'), 'utf8'))
+  assert.ok(started > 0, 'the process did not start another one when it got SIGTERM')
+  for (let waited = 0; running(started) && waited < 2000; waited += 50) await pause(50)
+  assert.equal(running(started), false, 'the process started during the sweep is still running')
 })
 
 test('sweep.py exits 0 and ends nothing when no process carries the marker', () => {
