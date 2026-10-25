@@ -6,21 +6,34 @@
 # It fails closed. With no python3, input it cannot read, or a permission_mode that is present but empty or not text,
 # it exits 2: the call is blocked and the reason reaches the model. A call let through that way would reach the server
 # without the session's mode, and a sessionMode the model forged would lift the ceiling above the session's real mode.
+# A hook that outlives its timeout in hooks.json does not block the call, so the hook ends itself first: it reads at
+# most 8 MiB and gives up after 20 s, both with exit 2, well inside the 30 s of the timeout.
 if ! command -v python3 > /dev/null 2>&1; then
   echo "cc-orq: python3 is required to read the session's permission mode" >&2
   exit 2
 fi
 python3 -I -c '
 import json
+import signal
 import sys
+
+MAX_INPUT_BYTES = 8 * 1024 * 1024
+DEADLINE_SECONDS = 20
 
 
 class Unusable(Exception):
     pass
 
 
+def out_of_time(signum, frame):
+    raise Unusable("it did not finish within " + str(DEADLINE_SECONDS) + " s")
+
+
 def main():
-    data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        raise Unusable("the input is over 8 MiB")
+    data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, dict):
         raise Unusable("the input is not a JSON object")
     tool_input = data.get("tool_input")
@@ -40,6 +53,8 @@ def main():
     sys.stdout.buffer.write(text)
 
 
+signal.signal(signal.SIGALRM, out_of_time)
+signal.alarm(DEADLINE_SECONDS)
 try:
     main()
 except Unusable as error:

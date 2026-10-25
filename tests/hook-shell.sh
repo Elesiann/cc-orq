@@ -13,7 +13,12 @@ HOOK="$ROOT/scripts/session-mode-hook.sh"
 BASH_BIN=$(command -v bash)
 T="$ROOT/.ref/tmp/hook-shell-$(date +%s)-$$"
 mkdir -p "$T"
-trap 'rm -rf "$T"' EXIT
+STALL_WRITER=
+cleanup() {
+  if [ -n "$STALL_WRITER" ]; then kill "$STALL_WRITER" 2>/dev/null || true; fi
+  rm -rf "$T"
+}
+trap cleanup EXIT
 PASS=0; FAIL=0; RUNS=0; DECISIONS=0
 
 ok() { PASS=$((PASS+1)); echo "ok: $1"; }
@@ -47,6 +52,20 @@ input() { # permission_mode_json tool_input_json
 }
 
 PLAIN='{"target":"codex","model":"m","cwd":"/work","prompt":"Say OK."}'
+
+# A stdin that never ends and never has data: the hook must give up by itself, well inside the 30 s of hooks.json.
+# It runs in the background from here, so its 20 s overlap the checks below, and its verdict is read at the end.
+mkfifo "$T/stalled"
+sleep 60 > "$T/stalled" &
+STALL_WRITER=$!
+(
+  began=$(date +%s)
+  set +e
+  bash "$HOOK" < "$T/stalled" > "$T/stall-out" 2> "$T/stall-err"
+  echo $? > "$T/stall-code"
+  echo $(( $(date +%s) - began )) > "$T/stall-seconds"
+) &
+STALL_RUN=$!
 
 # A mode is present: it is injected as sessionMode, over any value the model sent.
 for mode in default manual acceptEdits auto bypassPermissions dontAsk plan; do
@@ -129,6 +148,24 @@ set +e; bash "$HOOK" < "$T/bad-bytes" > "$T/out" 2> "$T/err"; code=$?; set -e
 no_decision "the run on bytes that are not UTF-8"
 if [ "$code" = 2 ] && [ ! -s "$T/out" ] && grep -q '^cc-orq: ' "$T/err"; then ok blocks-bytes-that-are-not-utf-8; else bad "blocks-bytes-that-are-not-utf-8 (exit $code)"; fi
 
+# The hook reads at most 8 MiB. Exactly that much valid JSON is read, and one byte more is refused before it is parsed.
+python3 -I -c 'import sys
+head = b"{\"permission_mode\":\"auto\",\"tool_input\":{\"prompt\":\""
+tail = b"\"}}"
+sys.stdout.buffer.write(head + b"x" * (8 * 1024 * 1024 - len(head) - len(tail)) + tail)' > "$T/exact-8-mib.json"
+set +e; bash "$HOOK" < "$T/exact-8-mib.json" > "$T/out" 2> "$T/err"; echo $? > "$T/code"; set -e
+no_decision "the run on exactly 8 MiB"
+if [ "$(wc -c < "$T/exact-8-mib.json")" = 8388608 ] && [ "$(cat "$T/code")" = 0 ] && check 'import json
+got = json.loads(out)["hookSpecificOutput"]["updatedInput"]
+sys.exit(0 if len(got["prompt"]) > 8000000 and got["sessionMode"] == "auto" else 1)'; then ok reads-exactly-8-MiB; else bad "reads-exactly-8-MiB (exit $(cat "$T/code"))"; fi
+printf ' ' >> "$T/exact-8-mib.json"
+set +e; bash "$HOOK" < "$T/exact-8-mib.json" > "$T/out" 2> "$T/err"; echo $? > "$T/code"; set -e
+no_decision "the run on 8 MiB and a byte"
+if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && [ "$(wc -l < "$T/err")" = 1 ] && grep -q 'the input is over 8 MiB' "$T/err"; then ok blocks-8-MiB-and-a-byte; else bad "blocks-8-MiB-and-a-byte (exit $(cat "$T/code"), err: $(head -c 200 "$T/err"))"; fi
+set +e; head -c 20000000 /dev/zero | bash "$HOOK" > "$T/out" 2> "$T/err"; echo $? > "$T/code"; set -e
+no_decision "the run on 20 MB of zeros"
+if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && grep -q 'the input is over 8 MiB' "$T/err"; then ok blocks-20-MB-without-reading-it-all; else bad "blocks-20-MB-without-reading-it-all (exit $(cat "$T/code"))"; fi
+
 # bash is given by its path, because the PATH this run gives the hook holds nothing.
 mkdir -p "$T/empty-path"
 set +e; printf '%s' "$(input '"auto"' "$PLAIN")" | env PATH="$T/empty-path" "$BASH_BIN" "$HOOK" > "$T/out" 2> "$T/err"; code=$?; set -e
@@ -158,6 +195,14 @@ start=$(date +%s%N)
 for _ in 1 2 3 4 5; do printf '%s' "$(input '"auto"' "$PLAIN")" | bash "$HOOK" > /dev/null; done
 elapsed_ms=$(( ($(date +%s%N) - start) / 5000000 ))
 if [ "$elapsed_ms" -lt 500 ]; then ok "runs-quickly (${elapsed_ms} ms a run)"; else bad "runs-quickly (${elapsed_ms} ms a run)"; fi
+
+wait "$STALL_RUN"
+kill "$STALL_WRITER" 2>/dev/null || true
+STALL_WRITER=
+seconds=$(cat "$T/stall-seconds")
+cp "$T/stall-out" "$T/out"; cp "$T/stall-err" "$T/err"
+no_decision "the run on a stdin that never ends"
+if [ "$(cat "$T/stall-code")" = 2 ] && [ ! -s "$T/stall-out" ] && [ "$(wc -l < "$T/stall-err")" = 1 ] && grep -q 'it did not finish within 20 s' "$T/stall-err" && [ "$seconds" -ge 19 ] && [ "$seconds" -le 27 ]; then ok "gives-up-on-a-stalled-input-after-20-s (${seconds} s)"; else bad "gives-up-on-a-stalled-input-after-20-s (exit $(cat "$T/stall-code"), ${seconds} s, err: $(head -c 200 "$T/stall-err"))"; fi
 
 if [ "$DECISIONS" -eq 0 ]; then ok "never-prints-a-permission-decision (in $RUNS runs of every branch)"; fi
 
