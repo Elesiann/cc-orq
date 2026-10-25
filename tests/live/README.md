@@ -98,6 +98,8 @@ needs logged-in `codex` and `claude` CLIs and costs a few cents. `ORQ_TASKS_CODE
 - a request above the ceiling opens the approval form, whose first three lines show the level, where the task runs
   and the worker, model and directory, without expanding it; accepting starts the job at the level that was asked,
   and the task record has its `approved` marker
+- the debug log of the interactive session says that no `CLAUDE.md` or rules file loaded and never names an
+  excluded path
 
 The Claude worker runs through a `claude` wrapper in the scratch directory that adds the same isolation flags as the
 nested session, so your hooks and connectors stay out of it. The scenario reads your `~/.config/orq/config.json`,
