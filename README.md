@@ -13,8 +13,9 @@ that brings the orchestrator of [T3 Code](https://github.com/pingdotgg/t3code)
 into Claude Code. Your session delegates self-contained tasks through the agent
 type `cc-orq:task`, or through the `delegate` tool, to the coding agent CLIs you
 already use. Each task runs as a detached job in its own git worktree, under a
-permission ceiling. The answer of a `cc-orq:task` comes back to the conversation
-when the task ends, and a `delegate` job is read with `status`.
+permission ceiling. In the Claude Code CLI, `delegate` returns an MCP task that
+`/tasks` lists and that wakes the session with the worker's answer when it ends.
+The answer of a `cc-orq:task` comes back to the conversation when the task ends.
 
 <p align="center">
   <img src="docs/images/card.gif" width="900" alt="The task card above the prompt: a Claude, an OpenCode and a Codex task, each with its model, status, last action and a running timer; the OpenCode task finishes and shows its token counts">
@@ -51,10 +52,16 @@ when the task ends, and a `delegate` job is read with `status`.
 - **A permission ceiling.** A task never runs with a broader mode than your
   `ceiling` configuration allows, nor, while the hook that reads the session's
   permission mode runs, than that mode allows. A driver refuses a mode it cannot
-  enforce with a CLI flag.
+  enforce with a CLI flag. In the CLI, a request above the ceiling opens a form
+  that asks you to allow it for that one task.
 - **Jobs that outlive the session.** Workers run detached, keep their prompt,
   events and answer on disk, and can be read, cancelled or integrated from a
   later session.
+- **Delegation as a native task.** In the Claude Code CLI, `delegate` answers
+  with an [MCP task](https://code.claude.com/docs/en/mcp#mcp-tasks-that-run-on-the-server).
+  `/tasks` lists it with the worker's model and last action, the footer counts
+  it, and the session wakes by itself with the worker's answer. A client without
+  tasks gets the job's id and reads it with `status`.
 - **Worktree isolation.** A task works on its own branch in its own checkout,
   gets the ignored files your `.worktreeinclude` names, and `integrate` merges
   it back with a fast-forward or a merge commit.
@@ -85,6 +92,12 @@ The six tools of the MCP server work in every session. The `cc-orq:task`
 agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
 default from 2.1.287 on, and an organization can turn them off, which leaves
 only the server's tools.
+
+`delegate` answers with an MCP task only when the request declares the tasks
+extension. Claude Code's documentation says that 2.1.304 or newer does so for a
+call from the main conversation of the interactive CLI, and from an Agent SDK or
+stream-json session with `CLAUDE_AUTO_BACKGROUND_TASKS=1`. Any other call gets the
+job's id and no task: see [`delegate`](#mcp__plugin_cc-orq_orq__delegate).
 
 macOS is not supported yet: the job start script needs `systemd-run` or
 `setsid` to give each job its own session, and macOS has neither by default.
@@ -130,6 +143,10 @@ target, and the description of the `cc-orq:task` agent tells it how to write the
 prompt. The job appears on the card. When it ends, the answer comes back with a
 footer that carries its `taskId`, and `mcp__plugin_cc-orq_orq__integrate` merges
 the task's branch into your checkout.
+
+The session can call `mcp__plugin_cc-orq_orq__delegate` instead, with the header
+fields as JSON. In the CLI the call returns at once with a background task: `/tasks`
+lists it until the worker ends, and the session wakes with the answer.
 
 ## Commands
 
@@ -363,13 +380,55 @@ section says.
 
 A request that leaves out `runtime` or `interaction` gets the effective ceiling.
 A request above it is refused before anything starts, with
-`runtime_mode_escalation_denied` or `interaction_mode_escalation_denied`. The
+`runtime_mode_escalation_denied` or `interaction_mode_escalation_denied`, unless
+`delegate` can ask you first: see [Asking for more](#asking-for-more). The
 message gives each limit and names what lifts each one that stands in the way:
 raise the `ceiling` field it names in the configuration, run the session in a
 mode that allows the request, or both. `capabilities` reports the limits as
 `ceiling.config`, `ceiling.session` and `ceiling.effective`, with one effective
 ceiling per isolation. Its top-level `runtimeMode` and `interactionMode` are the
 effective ceiling of a `worktree` task.
+
+### Asking for more
+
+A client that declared MCP tasks and form input, as the interactive Claude Code
+CLI does, is not refused when it asks `delegate` for more than the ceiling. The
+call returns a task, and the first status check of the task answers
+`input_required`: Claude Code opens a form. The form tells you:
+
+- who asks: the instance and the model;
+- the directory, as the real path that the scope check found, so that a link
+  cannot hide where the task runs;
+- where it runs: `in its own worktree`, or `in your checkout itself (shared, no
+  worktree)`;
+- each level that is above the ceiling, and the limit it is above:
+  `ceiling.runtime`, `ceiling.sharedRuntime` or `ceiling.interaction`, and the
+  session's permission mode when it is the lower one.
+
+The instance, the model and the directory come from the model's request. The form
+quotes each one, cuts it at 120 characters and writes out any control or format
+character, so a value cannot add a line to the question. The levels, the place
+and the limits come from fixed lists, and the field you answer repeats the levels
+and the place in its title.
+
+Accepting launches the job at the level that was asked, for that task only; the
+configuration does not change. Declining, or pressing Esc, ends the task as
+`completed` with `runtime_mode_escalation_denied` or
+`interaction_mode_escalation_denied`, and the message says what would lift the
+limit. `x` in `/tasks` cancels a task whose form is open.
+
+Before the form opens, `delegate` checks the instance, the modes the driver can
+enforce and the directory, so a request that could not start is refused at once
+and no form asks about it. After you accept, the launch is checked against what
+the form showed: if the instance, the model, the directory, the isolation or the
+modes are not what you saw, for example because a link moved in the meantime,
+nothing starts and the task ends with an error. A launch that fails for another
+reason after you accepted, such as `worktree_busy`, ends the task `completed`
+with that error.
+
+A client without tasks or without forms gets no form: the request is refused as
+before. In a session in `default` mode with the default ceiling, a task that
+edits asks you twice, in the permission prompt of the tool call and in this form.
 
 ### What each driver can enforce
 
@@ -406,7 +465,9 @@ the worker's CLI receives. In the `auto` and `bypassPermissions` modes, the
 permission prompt of the tool call does not show you the requested level: the
 classifier decides under `auto`, and nothing asks under `bypassPermissions`. For
 sessions in those modes, the configuration's `ceiling` and the hook are the real
-limits.
+limits. An `Elicitation` hook in your settings can answer the form without you
+(`{"decision": "block"}` declines it), so the form is a question to you and not
+a barrier against your own hooks.
 
 ### Upgrading from 0.1
 
@@ -713,11 +774,12 @@ tools to the parent session, named `mcp__plugin_cc-orq_orq__capabilities`,
 `mcp__plugin_cc-orq_orq__list`, `mcp__plugin_cc-orq_orq__cancel` and
 `mcp__plugin_cc-orq_orq__integrate`. They are there whether or not the mod
 loads, and `/mcp` shows the server.
-Each answers with a JSON text. A refusal has the shape
+Each answers with a JSON text, except `delegate` for a client with MCP tasks,
+which gets a task. A refusal has the shape
 `{"error": {"code": "...", "message": "..."}}` and comes with `isError`. The
 codes include `task_not_found`, `task_not_cancellable` and `invalid_request`,
 and the ceiling, scope and launch codes that `delegate` answers. A task is one
-job: its `taskId` is the job id that `/orq list` shows. `integrate` is
+job: its `taskId` is the job id that `/orq list` shows and that `/tasks` shows. `integrate` is
 described under [Worktrees and integrate](#worktrees-and-integrate).
 
 The server sends its own instructions to the session, which tell it how to use
@@ -802,9 +864,12 @@ declared MCP tasks and form input on this request. See
 
 ### `mcp__plugin_cc-orq_orq__delegate`
 
-Starts a job and answers `{"taskId": "<id>", "status": "running"}` at once. The
-fields are the header of a `cc-orq:task` prompt as JSON, and the server reads
-them with the same parser, so a mistake gets the same message as in a header.
+Starts a job. A request that declared the MCP tasks extension gets a task, which
+[the next section](#the-task-that-delegate-returns) describes. Any other request
+gets `{"taskId": "<id>", "status": "running"}` at once, byte for byte the answer
+of 0.1. The fields are the header of a `cc-orq:task` prompt as JSON, and the
+server reads them with the same parser, so a mistake gets the same message as in
+a header.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -816,25 +881,51 @@ them with the same parser, so a mistake gets the same message as in a header.
 | `isolation` | no | `worktree` (the default) or `shared` |
 | `role` | no | `implementation`, `research`, `review`, `design`, `test` or `general` |
 | `runtime`, `interaction` | no | A mode at most as broad as the ceiling. Left out, the task gets the ceiling |
-| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result. `human` is refused for now, because it needs MCP tasks and form input |
+| `questions` | no | `parent` (the default): a worker that asks a question ends the job with `BLOCKED on a question` in its result. `human` is refused for now: this version cannot resume a worker with an answer from a form |
 | `sessionMode` | no | Filled by the cc-orq hook; leave it out |
 
 A call checks, in this order, its fields, `questions`, the ceiling, the target and
 the driver, and the working directory. A refusal comes back at once with
-`isError` and a typed code, and nothing starts:
+`isError` and a typed code, as a result, and nothing starts:
 `invalid_request`, `runtime_mode_escalation_denied`,
 `interaction_mode_escalation_denied`, `provider_unavailable`,
 `runtime_mode_unsupported`, `cwd_out_of_scope`, `not_a_repository`,
 `worktree_busy` or `git_failed`. A refusal for a request above the ceiling says
-which limit stands in the way and what lifts it. A launch that fails for a reason
-that no code names answers `orq: delegate failed: ...` with `isError`.
+which limit stands in the way and what lifts it. The exception is a request above
+the ceiling from a client that can show a form: it becomes a task that asks you
+(see [Asking for more](#asking-for-more)). A launch that fails for a reason that
+no code names answers `orq: delegate failed: ...` with `isError`.
 
 The job is of kind `mcp`. Its `agentId` is the `CLAUDE_CODE_SESSION_ID` that
 Claude Code sets for the server, or `mcp` when there is none, and its
 `meta.json` records `questions`. `/orq list`, the task card, `/orq-panel`,
 `status`, `list` and `integrate` read it like any other job. The mod's
-`cc-orq:task` never claims it. The answer carries no wake-up, so read the job with
-`status`; a finished worktree job merges with `integrate`.
+`cc-orq:task` never claims it. A client without tasks gets no wake-up, so it reads
+the job with `status`; a finished worktree job merges with `integrate`.
+
+#### The task that `delegate` returns
+
+The task has the id of its first job, and `status`, `list` and `integrate` take
+it. `.tasks/ID/task.json` is written before the task is answered, so the first
+status check already finds it. The task is created `working`; each `tasks/get`
+then derives its state from the files and holds nothing in memory, so a server
+that starts after Claude Code was closed answers for the tasks of the session
+before.
+
+| Task status | Meaning |
+| --- | --- |
+| `working` | The job runs, including while a cancel is pending, or the launch that you approved is starting. The message is the card's line: instance, model, the worker's last action and the time |
+| `input_required` | A request above the ceiling waits for your form, under the key `approve` |
+| `completed` | The job ended, or the request was refused after you answered. `result` is what `status` gives, the worker's final message and the footer, and for a worktree job the branch and the `integrate` call, cut at 100 KB, with `isError: true` for a worker that failed or was lost. A worker that stopped on a question gives `BLOCKED on a question` |
+| `cancelled` | The job exited 124, or the task was cancelled before it started |
+| `failed` | The record of the task cannot be read. A worker that fails is `completed` with `isError`, since `failed` is for protocol errors |
+
+The task polls at the 2,000 ms that `pollIntervalMs` asks for and never expires
+(`ttlMs` is `null`), since no job is deleted. `x` in `/tasks` sends `tasks/cancel`,
+which Claude Code sends twice; each is acked, the job gets its cancel marker and
+ends `cancelled`, and a cancel of a task that ended changes nothing.
+`tasks/update` answers the form, and an answer to a key that is not outstanding is
+acked and ignored. `tasks/result` and `tasks/list` do not exist, and answer -32601.
 
 ### `mcp__plugin_cc-orq_orq__status`
 
@@ -1077,6 +1168,16 @@ The `exit` file holds one number:
 - `125`: the supervisor did not start, so the job never ran.
 - Any other number: the CLI's own exit code. The job is `failed`.
 
+A task that `delegate` returns also gets `<jobsDir>/.tasks/<id>/`:
+
+| File | Contents |
+| --- | --- |
+| `task.json` | Written once, before the task is answered: the id, the creation time, the tool, `questions`, the request as it was written and, for a task that asks for a form, what the form showed (instance, model, real directory, isolation, levels and limits) and the error that a declined form answers |
+| `approved` | The user accepted the form, and the launch started |
+| `declined` | The user declined the form or pressed Esc |
+| `refused` | The launch that was approved was refused, with the answer that the task ends with |
+| `cancelled` | `tasks/cancel` came before the job started, or while the form was open |
+
 A file that does not hold one whole number, an empty file for example, counts as `failed`. `/orq list` and `/orq result` apply this same rule, so a job shows the same status in both.
 
 A `meta.json` without `runner` takes the runner of its `driver`. A job with neither
@@ -1177,7 +1278,10 @@ three of them (the provider probe is `scripts/catalog.py`), `hooks/integrate.ts`
 merges a task's branch, and `server/node-engine.ts` gives them the engine's `$`
 in plain Node. `delegate` builds a task header from its fields, holds it to the
 ceiling in `hooks/ceiling.ts`, and launches it through the same engine call as
-the agent. The session's permission mode reaches it through the `PreToolUse` hook
+the agent. `server/protocol.ts` reads what the client declared on each request and
+serves `tasks/get`, `tasks/update` and `tasks/cancel` through a task source;
+`server/job-tasks.ts` is the source for `delegate`, which creates the task, keeps
+`.tasks/ID/task.json` and derives the state from the job directory. The session's permission mode reaches it through the `PreToolUse` hook
 in `scripts/session-mode-hook.sh`, which `hooks/hooks.json` runs before
 `delegate` and `capabilities`.
 `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane from the job
@@ -1191,7 +1295,8 @@ directories.
 | The `mcp__plugin_cc-orq_orq__*` tools are missing, or `/mcp` shows `plugin:cc-orq:orq` as failed | Check that `cc-orq` is enabled in `/plugin`. The server writes the reason for a failed start to stderr: `the orq server needs Node 22.18 or newer` means the `node` on your PATH is older; `node --version` shows which one Claude Code finds |
 | `capabilities` lists no providers, or misses one | Run the provider CLI once in a shell and log in. The debug log (`claude --debug-file`) gives the probe's reason |
 | `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
-| `delegate` answers `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied` | The request is above the ceiling. The message names the limit in the way: raise that `ceiling` field in `~/.config/orq/config.json`, or run the session in a mode that allows it. See [Permission ceiling](#permission-ceiling) |
+| `delegate` answers `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied` | The request is above the ceiling, and the client could not ask you in a form or you declined it. The message names the limit in the way: raise that `ceiling` field in `~/.config/orq/config.json`, or run the session in a mode that allows it. See [Permission ceiling](#permission-ceiling) |
+| A task reads `working` with `starting after your approval` and nothing runs | The server stopped between your answer and the start of the job. Stop the task with `x` in `/tasks` |
 | A call to `delegate` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
@@ -1206,9 +1311,16 @@ directories.
 - Linux only. macOS has neither `systemd-run` nor `setsid` by default.
 - A task cannot be resumed or sent a follow-up message. A review round or an
   answer to a child's question is a new task that carries the earlier brief.
-- `delegate` returns the job's id and no MCP task, so the session gets no
-  wake-up when the job ends and reads it with `status`. `questions: human` is
-  refused.
+- A client without MCP tasks, such as a subagent, the VS Code extension, the
+  desktop app or a one-shot `claude -p`, gets the job's id and no wake-up, and
+  reads the job with `status`. Such a client cannot be asked for approval, so a
+  request above the ceiling is refused there. `questions: human` is refused.
+- Closing Claude Code stops the server and leaves the workers running. The exit
+  dialog lists an MCP task as one that stops on exit, but no exit option cancels
+  it on the server, and the option that moves the session to the background left
+  a session and a server running until `claude stop` (measured on 2.1.310 with a
+  test server). `claude --resume` starts a new server, which answers for the task
+  from the files.
 - A supervisor that writes its pid after its launcher gave up, so after the
   launcher wrote `exit` 125 and gave the lock back, still runs its worker next to
   the job of whoever took the lock. The supervisor has to close this by not
