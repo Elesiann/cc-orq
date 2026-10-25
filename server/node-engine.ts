@@ -29,6 +29,7 @@ export type NodeEngineOptions = {
 }
 
 const READ_LIMIT_BYTES = 4 * 1024 * 1024
+const WRITE_LIMIT_BYTES = 4 * 1024 * 1024
 const STREAM_LIMIT_BYTES = 4 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_TIMEOUT_MS = 600_000
@@ -80,6 +81,7 @@ async function readText(path: string): Promise<string> {
 }
 
 async function writeText(path: string, text: string): Promise<void> {
+  if (Buffer.byteLength(text, 'utf8') > WRITE_LIMIT_BYTES) throw new Error(`the text for ${path} is larger than 4 MiB, so fs.write refuses it`)
   await fsp.mkdir(dirname(path), { recursive: true })
   const temp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString('hex')}.tmp`)
   try {

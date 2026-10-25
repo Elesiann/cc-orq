@@ -263,6 +263,30 @@ test('fs.write creates parent folders, replaces an existing file, and leaves no 
   assert.deepEqual(readdirSync(join(dir, 'a', 'b')), ['note.txt'])
 })
 
+test('fs.write accepts text of exactly 4 MiB, and rejects one byte more with nothing created or changed', async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  await $.fs.write('exact.txt', 'x'.repeat(LIMIT))
+  assert.equal(readFileSync(join(dir, 'exact.txt')).length, LIMIT)
+
+  await $.fs.write('keep.txt', 'old')
+  await assert.rejects($.fs.write('keep.txt', 'x'.repeat(LIMIT + 1)), /larger than 4 MiB/)
+  await assert.rejects($.fs.write('new/folder/over.txt', 'x'.repeat(LIMIT + 1)), /larger than 4 MiB/)
+  assert.equal(readFileSync(join(dir, 'keep.txt'), 'utf8'), 'old')
+  assert.deepEqual(readdirSync(dir).sort(), ['exact.txt', 'keep.txt'], 'a rejected write left a file, a folder or a temporary file')
+})
+
+test('fs.write counts the 4 MiB limit in UTF-8 bytes, not in characters', async (t) => {
+  const dir = tempDir(t)
+  const $ = nodeEngine({ cwd: dir, env: baseEnv() })
+  const euros = '€'.repeat(Math.floor(LIMIT / 3))
+  assert.equal(Buffer.byteLength(euros), LIMIT - 1)
+  await $.fs.write('fits.txt', `${euros}x`)
+  assert.equal(readFileSync(join(dir, 'fits.txt')).length, LIMIT)
+  await assert.rejects($.fs.write('over.txt', `${euros}xx`), /larger than 4 MiB/)
+  assert.equal(existsSync(join(dir, 'over.txt')), false)
+})
+
 test('fs.read rejects a missing file and a file over 4 MiB, and reads a file of exactly 4 MiB', async (t) => {
   const dir = tempDir(t)
   const $ = nodeEngine({ cwd: dir, env: baseEnv() })
