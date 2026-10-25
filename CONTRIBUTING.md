@@ -35,9 +35,10 @@ bash tests/integrate-shell.sh  # worktree launch and integrate against real git
 bash tests/question-shell.sh   # the child question protocol
 bash tests/worktree-include-shell.sh  # .worktreeinclude copies into task worktrees
 bash tests/allowlist-shell.sh  # only allowed paths are tracked
+bash tests/lock-shell.sh       # the checkout lock with real processes
 ```
 
-CI runs `npm ci`, the vendor check, `npm test` and the five shell suites. The
+CI runs `npm ci`, the vendor check, `npm test` and the six shell suites. The
 other checks need a logged-in Claude Code CLI, so run them locally.
 
 ## Rules
