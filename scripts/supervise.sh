@@ -69,9 +69,16 @@ interrupt_cli() {
   done
 }
 
-# The watcher's sleep outlives it, and a cancel's sleep lasts 5 s.
+# The watcher's sleep outlives it, and a cancel's sleep lasts 5 s. Stopping the watcher first keeps it from
+# starting another before its children are collected.
 stop_watcher() {
-  local kids
+  local kids stat i
+  kill -STOP "$watcher" 2>/dev/null
+  for i in $(seq 1 50); do
+    stat=$(< "/proc/$watcher/stat") 2>/dev/null || break
+    [[ "${stat##*) }" == T* ]] && break
+    sleep 0.002
+  done
   kids=$(pgrep -P "$watcher" 2>/dev/null)
   kill -KILL "$watcher" $kids 2>/dev/null
   wait "$watcher" 2>/dev/null
