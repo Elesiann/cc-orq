@@ -9,8 +9,7 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'check-links.mjs')
 
-// A git repository with the given files, so the script finds them the way it does in the checkout.
-function fixture(files) {
+function gitRepoWith(files) {
   const dir = mkdtempSync(join(tmpdir(), 'check-links-'))
   for (const [path, text] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, path)), { recursive: true })
@@ -27,7 +26,7 @@ function check(dir) {
 }
 
 test('links to existing files and anchors resolve, including duplicate headings', () => {
-  const dir = fixture({
+  const dir = gitRepoWith({
     'README.md': [
       '# Title',
       '',
@@ -49,14 +48,14 @@ test('links to existing files and anchors resolve, including duplicate headings'
 })
 
 test('a link to a missing file fails the check and names the file and the target', () => {
-  const dir = fixture({ 'README.md': '[gone](docs/missing.md)\n' })
+  const dir = gitRepoWith({ 'README.md': '[gone](docs/missing.md)\n' })
   const result = check(dir)
   assert.equal(result.status, 1, result.output)
   assert.match(result.output, /README\.md:1: broken link "docs\/missing\.md": no such file or directory/)
 })
 
 test('an anchor that matches no heading fails the check and names the anchor', () => {
-  const dir = fixture({
+  const dir = gitRepoWith({
     'README.md': '[bad anchor](docs/guide.md#no-such-heading)\n',
     'docs/guide.md': '## Setup steps\n',
   })

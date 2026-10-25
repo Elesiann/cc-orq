@@ -1,11 +1,7 @@
 #!/usr/bin/env node
-// Checks the relative links and anchors of Markdown files. A link to a file or a directory must
-// name one that exists inside the repository. A #anchor must match a heading or an id of the file
-// it points into, with headings slugged the way GitHub slugs them. External links are not fetched.
-//
 // Usage, from the repository root: node scripts/check-links.mjs [FILE...]
 // With no FILE, every Markdown file that git tracks is checked. Exit 0 when every link resolves,
-// 1 when one does not.
+// 1 when one does not. External links are not fetched.
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -13,8 +9,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i
 
-// The heading text as GitHub slugs it: link syntax keeps its text, letters, digits, marks,
-// hyphens and underscores stay, and each space becomes a hyphen.
+// GitHub's heading-anchor rule, which the README's #anchor links depend on.
 function slugify(text) {
   return text
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -23,8 +18,7 @@ function slugify(text) {
     .replace(/ /g, '-')
 }
 
-// The lines with fenced code blocks blanked, so a line inside a block is neither a heading nor a link.
-function proseLines(text) {
+function linesOutsideFences(text) {
   let open = null
   return text.split('\n').map((line) => {
     if (open === null) {
@@ -57,7 +51,6 @@ function anchorsOf(lines) {
   return anchors
 }
 
-// Inline and image links, and src or href attributes. Code spans are blanked first.
 function linksOf(lines) {
   const links = []
   lines.forEach((raw, i) => {
@@ -74,12 +67,11 @@ function linksOf(lines) {
 
 function anchorsFor(file, cache) {
   if (!cache.has(file)) {
-    cache.set(file, anchorsOf(proseLines(readFileSync(file, 'utf8'))))
+    cache.set(file, anchorsOf(linesOutsideFences(readFileSync(file, 'utf8'))))
   }
   return cache.get(file)
 }
 
-// Returns the reason a link is broken, or null when it resolves.
 function brokenReason(file, root, target, cache) {
   if (target === '') return 'empty target'
   if (SCHEME.test(target) || target.startsWith('//')) return null
@@ -135,7 +127,7 @@ function main(args) {
   let links = 0
 
   for (const file of files) {
-    const lines = proseLines(readFileSync(file, 'utf8'))
+    const lines = linesOutsideFences(readFileSync(file, 'utf8'))
     for (const { line, target } of linksOf(lines)) {
       links += 1
       const reason = brokenReason(file, root, target, cache)
