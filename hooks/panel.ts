@@ -205,6 +205,8 @@ function drawSnapshot($: Engine, e: RenderInput<'Pane'>, snap: PanelSnapshot): R
   }
   if (snap.selectedId) {
     rows.push(Text({ bold: true, children: `— ${snap.selectedId}` }))
+    const parent = snap.jobs.find((job) => job.id === snap.selectedId)?.parent
+    if (parent !== undefined) rows.push(Text({ dimColor: true, children: `↳ continues ${parent}` }))
     if (snap.tail.length === 0) rows.push(Text({ dimColor: true, children: '(no events yet)' }))
     for (const [i, line] of snap.tail.entries()) {
       rows.push(
