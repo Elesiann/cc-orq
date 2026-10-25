@@ -183,6 +183,7 @@ function stubs(on: any, s: State) {
     }
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) return run(0)
+    if (script.includes('# orq:lock')) return run(0)
     if (script.includes('# orq:start')) {
       s.startScripts.push(script)
       s.flagsWrittenBeforeStart.push(s.writes.some((w) => w.path.endsWith('/flags')))
