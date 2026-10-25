@@ -139,8 +139,8 @@ answer, and `cancel` and `launch` print one line.
 
 ### `/orq list`
 
-Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed` and `cwd`.
-Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
+Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed`, `origin` and
+`cwd`. Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
 `cancelled`. A `waiting` job has a non-blank `question.txt`, its supervisor is still
 running, and it waits for an answer (see [Child questions](#child-questions)). An `interrupted` job has no `exit` file and no
 live supervisor. A finished job keeps the elapsed time it had when its `exit` file
@@ -148,6 +148,22 @@ was written.
 
 ```
 /orq list
+```
+
+The `origin` column says where a job came from. A job that continues another one
+records that job's id as `parent` in its `meta.json`, and its origin is `↳`
+followed by that id. Any other job shows `delegate` when the `delegate` tool started
+it (kind `mcp`), `agent` when the `cc-orq:task` agent did (kind `task`), and
+`manual` otherwise, which includes `/orq launch`. A `parent` that is not a safe job
+id is ignored, and the job shows the origin of its kind. Here is a list with a
+continuation, the delegate job it continues, an agent job and a manual job:
+
+```
+id                                  kind    status   elapsed  origin                               cwd
+mcp-1760000300000-3f9a2c1d-r7s1b4   mcp     running  40s      ↳ mcp-1760000100000-3f9a2c1d-k3j9x2  /home/me/repo
+mcp-1760000100000-3f9a2c1d-k3j9x2   mcp     done     2m       delegate                             /home/me/repo
+task-1760000000000-a1b2c3d4-q9w8e7  task    done     6m       agent                                /home/me/repo
+manual-1759999000000-manual-z5x4c3  manual  failed   12m05s   manual                               /home/me/repo
 ```
 
 ### `/orq result JOB_ID`
@@ -999,7 +1015,8 @@ the end of the session as the card's does.
 - A running or waiting job has a `cancel` button. It asks the supervisor to stop
   the job, as `/orq cancel` does.
 - Pressing a job's row selects it. The pane then shows the last 30 rendered lines
-  of that job's `events.jsonl`, read from its last 32 KB.
+  of that job's `events.jsonl`, read from its last 32 KB. For a continuation, a line
+  under the job's id names the job it continues: `↳ continues PARENT_ID`.
 - `show <id>` selects a job and opens the pane. `cancel <id>` cancels a running
   or waiting job without opening the pane.
 

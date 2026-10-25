@@ -107,6 +107,12 @@ All notable changes to cc-orq are recorded here. The format follows
   run programs in any later git command there, `integrate` and your own `git`
   commands included, so untrusted workers belong in modes that cannot write
   outside their worktree.
+- `/orq list` has an `origin` column between `elapsed` and `cwd`, so `cwd` is now
+  the sixth column. A job that continues another one, and records that job's id
+  as `parent` in its `meta.json`, shows `↳` and that id. Any other job shows
+  `delegate` (kind `mcp`), `agent` (kind `task`) or `manual`. A `parent` that is
+  not a safe job id is ignored. In `/orq-panel`, the detail of a selected
+  continuation names its parent on a line under the job's id.
 
 ### Fixed
 
