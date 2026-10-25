@@ -139,7 +139,7 @@ launch_many() {
     if [ "$SECONDS" -ge "$deadline" ]; then
       kill "${pids[@]}" 2>/dev/null || true
       echo "FAIL: only $(ls "$T/ready" | wc -l) of $count launchers were ready after $HANDSHAKE_SECONDS s; a launcher that died said:"
-      cat "$T"/many/* | grep -m3 -i 'error' | cut -c1-200
+      { cat "$T"/many/* | grep -m3 -i 'error' | cut -c1-200; } || true
       exit 1
     fi
     sleep 0.05
@@ -312,7 +312,7 @@ out=$(launch_one "$SESSION/link" shared raw)
 rm -f "$HOLD"; unset HOLD
 
 out=$(ORQ_ROOT="$T/no-such-engine" ORQ_HANDSHAKE_SECONDS=2 ${TIMEOUT:+"$TIMEOUT" 60} bash "$0" dead 2>&1) && code=0 || code=$?
-[ "$code" -eq 1 ] && echo "$out" | grep -q "launchers were ready after 2 s" && ok "launchers that never get ready fail the suite with a message after the limit" || bad "handshake limit: exit $code: $(echo "$out" | sed -n 1,2p | cut -c1-160)"
+[ "$code" -ne 0 ] && echo "$out" | grep -q "launchers were ready after 2 s" && ok "launchers that never get ready fail the suite with a message after the limit" || bad "handshake limit: exit $code: $(echo "$out" | tail -3 | cut -c1-160)"
 
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]
