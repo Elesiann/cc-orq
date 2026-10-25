@@ -32,7 +32,7 @@ export type LockVerdict = { kind: 'busy'; owner: string | null } | { kind: 'dead
 export const LAUNCH_GRACE_MS = 10_000
 
 /** The mutex guards a few milliseconds of work, so one this old belongs to a launcher that died holding it. */
-export const MUTEX_STALE_MS = 30_000
+const MUTEX_STALE_MS = 30_000
 
 export function judgeLock(facts: LockFacts): LockVerdict {
   if (facts.owner === null) return facts.ageMs < LAUNCH_GRACE_MS ? { kind: 'busy', owner: null } : { kind: 'dead' }
