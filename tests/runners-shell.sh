@@ -182,6 +182,62 @@ for _ in $(seq 1 40); do [ -n "$CPGID" ] && pgrep -g "$CPGID" >/dev/null 2>&1 ||
 if [ -n "$CPGID" ] && ! pgrep -g "$CPGID" >/dev/null 2>&1; then ok cancel-group-gone; else bad "cancel-group-gone (group ${CPGID:-missing} still has processes)"; fi
 wait "$CPID" 2>/dev/null || true
 
+BURST="$T/burst"
+mkdir -p "$BURST"
+for n in $(seq 1 200); do
+  mkdir -p "$BURST/job-$n"
+  printf '%s' "burst $n" > "$BURST/job-$n/prompt.txt"
+done
+python3 - "$BURST" 200 "$T/burst.json" <<'PY' &
+import json, re, sys, time
+root, jobs, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+pending = set(range(1, jobs + 1))
+good = {}
+reads = empty = malformed = 0
+deadline = time.monotonic() + 60
+while pending and time.monotonic() < deadline:
+    for n in sorted(pending):
+        try:
+            with open(f"{root}/job-{n}/exit", "rb") as f:
+                data = f.read()
+        except FileNotFoundError:
+            continue
+        reads += 1
+        if not data:
+            empty += 1
+        elif re.fullmatch(rb"\d+\n", data):
+            good[n] = data
+            pending.discard(n)
+        else:
+            malformed += 1
+result = {"jobs": jobs, "reads": reads, "empty": empty, "malformed": malformed,
+          "nonzero": sum(1 for d in good.values() if d != b"0\n"),
+          "missing": len(pending)}
+with open(out, "w") as f:
+    json.dump(result, f)
+PY
+READER=$!
+for w in $(seq 0 9); do
+  pids=()
+  for i in $(seq 1 20); do
+    timeout 60 bash "$ROOT/scripts/supervise.sh" "$BURST/job-$((w * 20 + i))" agy "$T/work" m '' '' >/dev/null 2>&1 &
+    pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait "$p" || true; done
+done
+wait "$READER" || true
+if burst=$(python3 - "$T/burst.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+line = f"exit-reads {d['jobs']} jobs, {d['reads']} reads, {d['empty']} empty"
+if d["empty"] or d["malformed"] or d["nonzero"] or d["missing"]:
+    print(f"{line}, {d['malformed']} malformed, {d['nonzero']} not 0, {d['missing']} missing")
+    raise SystemExit(1)
+print(line)
+PY
+); then ok "$burst"; else bad "${burst:-exit-reads: no reader result}"; fi
+if [ -z "$(find "$BURST" -name 'exit.*.tmp')" ]; then ok exit-tmp-clean; else bad "exit-tmp-clean (exit.*.tmp left in a job dir)"; fi
+
 echo "---"
 echo "pass=$PASS fail=$FAIL scratch-cleaned"
 [ "$FAIL" -eq 0 ]

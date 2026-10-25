@@ -1,5 +1,5 @@
 import type { DriverKind } from './config.ts'
-import { INTERACTION_MODES, RUNTIME_MODES, type InteractionMode, type RuntimeMode } from './contract.ts'
+import { INTERACTION_MODES, RUNTIME_MODES, type Failure, type InteractionMode, type RuntimeMode } from './contract.ts'
 
 /** The CLI that runs a job; each provider driver maps to exactly one. */
 export type Runner = 'codex' | 'opencode' | 'agy' | 'claude'
@@ -110,6 +110,10 @@ export function formatDuration(ms: number): string {
 
 /** Starts every refusal a task step answers. "taskId none" tells the parent there is no job to query. */
 export const TASK_REFUSAL = 'orq: task refused (taskId none)'
+
+export function refusalText(failure: Failure): string {
+  return `${TASK_REFUSAL}: ${failure.error.code}: ${failure.error.message}`
+}
 
 /**
  * The one footer line of every answer. The taskId is the job id a parent passes to the job tools. Null token

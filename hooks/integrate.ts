@@ -1,7 +1,7 @@
 import type { EngineInterface, On } from 'claude-code'
 
 import { loadConfig } from './config.ts'
-import { readMeta, type Engine } from './engine.ts'
+import { readMeta, type CoreEngine } from './engine.ts'
 import {
   INTEGRATE_DESCRIPTION,
   INTEGRATE_INPUT_SCHEMA,
@@ -51,7 +51,7 @@ export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | {
  * Merge a finished task's branch into the checkout it was launched from. Every git call is an explicit
  * argv in the destination, with no force. A conflict is listed, then aborted; the worktree stays.
  */
-export async function integrate($: Engine, jobsDir: string, input: IntegrateInput): Promise<IntegrateOutcome> {
+export async function integrate($: CoreEngine, jobsDir: string, input: IntegrateInput): Promise<IntegrateOutcome> {
   const run = (argv: string[]) => $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
   try {
     const job = await readMeta($, jobsDir, input.taskId)

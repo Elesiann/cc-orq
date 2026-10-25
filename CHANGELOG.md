@@ -6,6 +6,13 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A finished job could show as failed in the task card or the `/orq-panel`
+  pane when either read its `exit` file while the supervisor was writing it.
+  The supervisor now writes the file in one step, so a reader sees either no
+  file or the whole exit code.
+
 ## [0.1.1] - 2026-10-21
 
 ### Added

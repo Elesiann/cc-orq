@@ -1,9 +1,11 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
-import type { GitFailure, InteractionMode, RuntimeMode, TaskIsolation, TaskStatus, TaskStatusResult, WorkState } from './contract.ts'
-import { hasControlCharacters, plainArgument } from './target.ts'
+import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
+import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
+import { scopedCwd } from './scope.ts'
+import type { TaskHeader } from './task-header.ts'
 import {
   DRIVER_RUNNER,
   buildFooter,
@@ -13,6 +15,7 @@ import {
   isSafeJobId,
   parseJobMeta,
   parseRolloutModelEffort,
+  refusalText,
   TASK_REFUSAL,
   rand36,
   shellWord,
@@ -36,6 +39,16 @@ import {
 } from './worktree.ts'
 
 export type Engine = Pick<EngineInterface, 'clock' | 'env' | 'fs' | 'plugin' | 'process' | 'session' | 'ui'>
+
+/** The part of `$` the job core calls: the mod passes its `$`, and the MCP server passes `server/node-engine.ts`. */
+export type CoreEngine = {
+  clock: Pick<EngineInterface['clock'], 'now'>
+  env: Pick<EngineInterface['env'], 'get'>
+  fs: Pick<EngineInterface['fs'], 'write' | 'list' | 'exists' | 'stat'> & { read: (path: string) => Promise<string> }
+  plugin: Pick<EngineInterface['plugin'], 'root'>
+  process: Pick<EngineInterface['process'], 'run'>
+  ui: Pick<EngineInterface['ui'], 'log'>
+}
 
 export const LIST_LIMIT = 50
 const PROCESS_TIMEOUT_MS = 30000
@@ -84,7 +97,7 @@ export type WorktreePlan = { repo: string; toplevel: string; baseSha: string; br
 
 export type WorktreeResult = { plan: WorktreePlan } | { failure: GitFailure }
 
-async function readText($: Engine, path: string): Promise<string | null> {
+async function readText($: CoreEngine, path: string): Promise<string | null> {
   try {
     return await $.fs.read(path)
   } catch {
@@ -92,7 +105,7 @@ async function readText($: Engine, path: string): Promise<string | null> {
   }
 }
 
-async function isDirectory($: Engine, path: string): Promise<boolean> {
+async function isDirectory($: CoreEngine, path: string): Promise<boolean> {
   try {
     return (await $.fs.stat(path)).kind === 'dir'
   } catch {
@@ -101,12 +114,12 @@ async function isDirectory($: Engine, path: string): Promise<boolean> {
 }
 
 /** The question a job wrote to question.txt, trimmed; null when the file is missing or blank. */
-async function readQuestion($: Engine, job: JobRecord): Promise<string | null> {
+export async function readQuestion($: CoreEngine, job: JobRecord): Promise<string | null> {
   const text = ((await readText($, `${job.dir}/${QUESTION_FILE}`)) ?? '').trim()
   return text === '' ? null : text
 }
 
-async function exists($: Engine, path: string): Promise<boolean> {
+async function exists($: CoreEngine, path: string): Promise<boolean> {
   try {
     return await $.fs.exists(path)
   } catch {
@@ -120,12 +133,12 @@ export function cancelText(reason?: string): string {
   return `cancelled at ${new Date().toISOString()}${why ? ` why=${JSON.stringify(why)}` : ''}\n`
 }
 
-export async function writeCancel($: Engine, job: JobRecord, reason?: string): Promise<void> {
+export async function writeCancel($: CoreEngine, job: JobRecord, reason?: string): Promise<void> {
   await $.fs.write(`${job.dir}/cancel`, cancelText(reason))
 }
 
 /** Read one job's meta.json. Unsafe ids and unreadable or incomplete metadata give null. */
-export async function readMeta($: Engine, jobsDir: string, id: string): Promise<JobRecord | null> {
+export async function readMeta($: CoreEngine, jobsDir: string, id: string): Promise<JobRecord | null> {
   if (!isSafeJobId(id)) return null
   const raw = await readText($, `${jobsDir}/${id}/meta.json`)
   if (raw === null) return null
@@ -137,7 +150,7 @@ export async function readMeta($: Engine, jobsDir: string, id: string): Promise<
 }
 
 /** The jobs in the directory, newest first, at most LIST_LIMIT. */
-export async function listJobs($: Engine, jobsDir: string): Promise<JobRecord[]> {
+export async function listJobs($: CoreEngine, jobsDir: string): Promise<JobRecord[]> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
@@ -153,7 +166,7 @@ export async function listJobs($: Engine, jobsDir: string): Promise<JobRecord[]>
     .slice(0, LIST_LIMIT)
 }
 
-async function mtimeMs($: Engine, path: string): Promise<number | null> {
+async function mtimeMs($: CoreEngine, path: string): Promise<number | null> {
   try {
     return (await $.fs.stat(path)).mtimeMs
   } catch {
@@ -182,7 +195,7 @@ export type Finished = {
  * done only when the exit is 0, last.txt holds a non-empty message, and the extractor reports no
  * error; anything else is failed.
  */
-export async function finishedOutcome($: Engine, job: JobRecord, exitText: string | null): Promise<Finished> {
+export async function finishedOutcome($: CoreEngine, job: JobRecord, exitText: string | null): Promise<Finished> {
   const exitCode = parseExit(exitText)
   const endedAt = await mtimeMs($, `${job.dir}/exit`)
   if (exitCode === 124) return { status: 'cancelled', exitCode, endedAt, lastText: '', summary: null, question: null }
@@ -203,7 +216,7 @@ export type JobView =
   | { status: 'running' | 'cancelling' | 'interrupted' | 'waiting'; endedAt: null }
   | Finished
 
-export async function jobView($: Engine, job: JobRecord): Promise<JobView> {
+export async function jobView($: CoreEngine, job: JobRecord): Promise<JobView> {
   const exit = await readText($, `${job.dir}/exit`)
   if (exit !== null) return finishedOutcome($, job, exit)
   const liveness = await jobLiveness($, job)
@@ -251,7 +264,7 @@ export function startScript(args: {
   )
 }
 
-async function markLaunchFailed($: Engine, dir: string): Promise<void> {
+async function markLaunchFailed($: CoreEngine, dir: string): Promise<void> {
   try {
     await $.fs.write(`${dir}/exit`, '125')
   } catch {
@@ -259,7 +272,7 @@ async function markLaunchFailed($: Engine, dir: string): Promise<void> {
   }
 }
 
-async function debugLog($: Engine, text: string): Promise<void> {
+async function debugLog($: CoreEngine, text: string): Promise<void> {
   try {
     await $.ui.log(text, { to: 'debug' })
   } catch {
@@ -271,7 +284,7 @@ async function debugLog($: Engine, text: string): Promise<void> {
  * Best effort after a launch failed once its worktree existed: remove the worktree, then its branch.
  * A failed undo goes to the debug log, and the refusal still names the launch's own failure.
  */
-async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
+async function unwindWorktree($: CoreEngine, plan: WorktreePlan): Promise<void> {
   const undo: [string, string[]][] = [
     ['remove the worktree', worktreeRemoveArgv(plan.repo, plan.worktree)],
     ['delete the branch', branchDeleteArgv(plan.repo, plan.branch)],
@@ -292,7 +305,7 @@ async function unwindWorktree($: Engine, plan: WorktreePlan): Promise<void> {
  * while its supervisor runs. Only the jobs that hold the path are asked, so a launch does not check every job
  * in the directory. It reads the job directory rather than memory, so it holds across sessions.
  */
-export async function checkoutBusy($: Engine, jobsDir: string, path: string): Promise<string | null> {
+export async function checkoutBusy($: CoreEngine, jobsDir: string, path: string): Promise<string | null> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
@@ -318,7 +331,7 @@ export async function checkoutBusy($: Engine, jobsDir: string, path: string): Pr
  * Best effort: the script stages the copy beside the worktree and renames it in only when it is complete, so a
  * copy that fails leaves the worktree as git made it, which is what a checkout without .worktreeinclude gets.
  */
-async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: string): Promise<void> {
+async function copyWorktreeIncludes($: CoreEngine, toplevel: string, worktree: string): Promise<void> {
   const script = `${$.plugin.root}/scripts/worktree-include.py`
   try {
     const argv = ['python3', script, toplevel, worktree, String(WORKTREE_INCLUDE_DEADLINE_S)]
@@ -352,7 +365,7 @@ async function copyWorktreeIncludes($: Engine, toplevel: string, worktree: strin
  * orq/TASK_ID, cut from the checkout's HEAD. Refuses, and creates nothing, when cwd is not a git
  * checkout. The path names the id the launch has just claimed, so no other job can hold it.
  */
-export async function prepareWorktree($: Engine, cwd: string, taskId: string, scope?: string[]): Promise<WorktreeResult> {
+export async function prepareWorktree($: CoreEngine, cwd: string, taskId: string, scope?: string[]): Promise<WorktreeResult> {
   try {
     const top = await $.process.run(revParseToplevelArgv(cwd), { timeoutMs: GIT_TIMEOUT_MS })
     if (top.exitCode !== 0) {
@@ -405,7 +418,7 @@ export async function prepareWorktree($: Engine, cwd: string, taskId: string, sc
 }
 
 /** Create a job directory, write meta.json and prompt.txt, and start the supervisor detached. */
-export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
+export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSpec): Promise<LaunchResult> {
   const now = await $.clock.now()
   const supervise = `${$.plugin.root}/scripts/supervise.sh`
   const agentSuffix = spec.agentId.slice(-8)
@@ -529,7 +542,7 @@ export async function launchJob($: Engine, config: OrqConfig, spec: LaunchSpec):
  * Launch one cc-orq:task job. The model and each runner flag reach the CLI as one argv item, so a value
  * that could read as an option or span lines is refused before anything is written.
  */
-export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
+export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: TaskLaunchSpec): Promise<LaunchResult> {
   if (!plainArgument(spec.model)) {
     return { refusal: `${TASK_REFUSAL}: the model must be one word that does not start with "-" and has no control characters.` }
   }
@@ -561,8 +574,49 @@ export async function launchTaskJob($: Engine, config: OrqConfig, spec: TaskLaun
   return { refusal: refusal + hint }
 }
 
+/** A refused header comes back as `{ refusal }`, not as a throw. */
+export async function launchTaskFromHeader(
+  $: CoreEngine,
+  config: OrqConfig,
+  args: {
+    agentId: string
+    header: TaskHeader
+    ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+    sessionDir: string
+  },
+): Promise<LaunchResult> {
+  const { agentId, header, ceiling, sessionDir } = args
+  const resolved = resolveTarget({
+    target: header.target,
+    instances: config.instances,
+    parentRuntimeMode: ceiling.runtimeMode,
+    parentInteractionMode: ceiling.interactionMode,
+    runtimeMode: header.runtimeMode ?? 'inherit',
+    interactionMode: header.interactionMode ?? 'inherit',
+  })
+  if (isFailure(resolved)) return { refusal: refusalText(resolved) }
+  const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
+  if (isFailure(policy)) return { refusal: refusalText(policy) }
+  const scoped = await scopedCwd($, config, sessionDir, header.cwd)
+  if ('refusal' in scoped) return scoped
+  const effort = appliedEffort(resolved.instance.driver, resolved.options)
+  return launchTaskJob($, config, {
+    agentId,
+    instance: resolved.instance,
+    model: resolved.model,
+    cwd: scoped.cwd,
+    prompt: taskPrompt(header.prompt, header.role),
+    flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
+    runtimeMode: resolved.runtimeMode,
+    interactionMode: resolved.interactionMode,
+    ...(effort !== undefined ? { effort } : {}),
+    isolation: header.isolation,
+    scopeRoots: scoped.roots,
+  })
+}
+
 /** finished | running | gone: the exit file, else the supervisor's process group. */
-export async function jobLiveness($: Engine, job: JobRecord): Promise<'finished' | 'running' | 'gone'> {
+export async function jobLiveness($: CoreEngine, job: JobRecord): Promise<'finished' | 'running' | 'gone'> {
   if (await exists($, `${job.dir}/exit`)) return 'finished'
   const script =
     `# orq:liveness\npgid=$(cat ${shellWord(`${job.dir}/pgid`)} 2>/dev/null | tr -d ' \\t\\n')\n` +
@@ -593,7 +647,7 @@ function parseSummary(raw: unknown): StreamSummary | null {
 }
 
 /** Run scripts/extract.py over the job's events; null when extraction fails. */
-export async function summarizeEvents($: Engine, job: JobRecord, runner: Runner): Promise<StreamSummary | null> {
+export async function summarizeEvents($: CoreEngine, job: JobRecord, runner: Runner): Promise<StreamSummary | null> {
   try {
     const r = await $.process.run(
       ['python3', `${$.plugin.root}/scripts/extract.py`, `${job.dir}/events.jsonl`, runner],
@@ -608,7 +662,7 @@ export async function summarizeEvents($: Engine, job: JobRecord, runner: Runner)
 }
 
 /** The last 20 stderr lines of a job, redacted; empty when none can be read. */
-export async function stderrSnippet($: Engine, job: JobRecord): Promise<string> {
+export async function stderrSnippet($: CoreEngine, job: JobRecord): Promise<string> {
   try {
     const script = `# orq:stderr\ntail -n 20 ${shellWord(`${job.dir}/stderr.txt`)} 2>/dev/null; exit 0`
     const r = await $.process.run(['bash', '-c', script], { timeoutMs: 15000 })
@@ -621,7 +675,7 @@ export async function stderrSnippet($: Engine, job: JobRecord): Promise<string> 
 
 /** Model and effort of a Codex job, read from its rollout under the instance's CODEX_HOME. */
 async function codexModelEffort(
-  $: Engine,
+  $: CoreEngine,
   config: OrqConfig,
   job: JobRecord,
   threadId: string,
@@ -659,7 +713,7 @@ export function blockedText(id: string, question: string): string {
   return `BLOCKED on a question (taskId ${id}): ${question}\n\nAnswer it in a new cc-orq:task with the original brief plus the answer.`
 }
 
-export async function composeAnswer($: Engine, config: OrqConfig, job: JobRecord): Promise<string> {
+export async function composeAnswer($: CoreEngine, config: OrqConfig, job: JobRecord): Promise<string> {
   const view = await jobView($, job)
   if (!('exitCode' in view)) return notEndedText(job.id, view.status)
   if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
@@ -741,7 +795,7 @@ function workStateOf(status: TaskStatus): WorkState {
 const INTERRUPTED_ERROR = 'its supervisor is gone and it left no exit file'
 
 /** One job as the task tools answer it, read from its directory alone. Null for an unknown or unsafe id. */
-export async function readJobStatus($: Engine, config: OrqConfig, jobId: string): Promise<TaskStatusResult | null> {
+export async function readJobStatus($: CoreEngine, config: OrqConfig, jobId: string): Promise<TaskStatusResult | null> {
   const job = await readMeta($, config.jobsDir, jobId)
   if (!job) return null
   const view = await jobView($, job)

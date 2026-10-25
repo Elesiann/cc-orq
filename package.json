@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p .",
+    "typecheck": "tsc -p . && tsc -p server",
     "test": "node --test tests/pure/*.test.mjs",
     "test:plugin": "claude plugin test .",
     "test:shell": "bash tests/runners-shell.sh",
@@ -14,6 +14,7 @@
     "validate": "claude plugin validate . --strict"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "typescript": "^5.9.3"
   }
 }

@@ -1,13 +1,12 @@
 import { expect, mock, test, type TestBody } from 'claude-code/testing'
 import type { On, UiPane } from 'claude-code'
 
+import { renderEventLine, renderTail } from '../hooks/event-line.ts'
 import {
   PANEL_COMMAND,
   PANEL_ID,
   PANEL_TITLE,
   clearPanelSelection,
-  renderEventLine,
-  renderTail,
 } from '../hooks/panel.ts'
 
 type Kit = Parameters<TestBody>[0]
