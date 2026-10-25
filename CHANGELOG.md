@@ -81,8 +81,12 @@ All notable changes to cc-orq are recorded here. The format follows
   the same checkout, and a live job in a subdirectory now blocks a shared
   launch at the top level. A launch that cannot make, write or take over the
   lock is refused with `could not lock its checkout`. A launch keeps its lock
-  while it scans the jobs directory, and one whose lock another launch took
-  over during the scan is refused with `worktree_busy`.
+  while it scans the jobs directory. It checks that the lock is still its own
+  before it writes its job and again right before it starts it, under the mutex
+  that a break takes, and the check fails closed. A launch whose lock another
+  launch took over, or whose check fails, is refused with `worktree_busy`. A
+  supervisor that writes its pid after its launch gave up still runs its
+  worker, which the supervisor has to close itself.
 
 ## [0.1.1] - 2026-10-21
 

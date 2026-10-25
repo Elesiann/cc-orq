@@ -499,18 +499,33 @@ refused for that, and it does not take the lock.
 The refusal names no job, and reads `is in use by a launch in progress`, only
 when the lock holds no job id yet, when two launches claim it at the same
 moment, when another launch is taking over the lock of a job that ended, or
-when this launch lost its lock while it scanned the jobs directory or wrote its
-job files. Try again a moment later.
+when this launch lost its lock, or could not check that it still held it, while
+it scanned the jobs directory or wrote its job files. Try again a moment later.
 
 A launch keeps its lock young while it works. It touches the lock, with a check
-that the lock is still its own, while it scans the jobs directory, after the scan,
-and again after it writes its job files, right before the start script. When a
-check finds that another launcher has taken the lock, the launch starts nothing
-and is refused. One window remains: a start script that takes more than 10 s,
-the time a launch with no supervisor pid yet counts as alive, to get its
-supervisor to write that pid. Another launcher can then take the lock and start
-its own job, and both run. Once the pid is written, the lock holds however old it
-is.
+that the lock is still its own, while it scans the jobs directory. Two touches
+are final checks: one after the scan, before it writes meta.json, and one after
+it writes its job files, right before the start script. A final check takes the
+same mutex as a launcher that breaks a lock, so a check and a break never
+interleave. It fails closed: when the check throws, times out, cannot take the
+mutex in time, exits with anything but success, or finds that another launcher
+has taken the lock, the launch starts nothing and is refused.
+
+The final checks leave a window that runs from the last of them to the moment the
+supervisor writes its pid. A launch with no supervisor pid counts as alive for
+10 s after its last touch, so the window has two parts:
+
+- A launcher that stops for more than 10 s after its last check, whether it is
+  suspended or its start script is slow, can find its lock broken. Another
+  launcher then takes the lock and starts its own job, and both run.
+- A supervisor that writes its pid after its launcher has given up still runs its
+  worker. The launcher gives up when the start script reports no pid within 5 s:
+  it writes `exit` 125 and gives the lock back, and the next launcher takes it.
+  The supervisor does not look for that `exit` file. This is a known limit, and
+  the supervisor itself has to close it, by not running a worker for a job
+  that already has an `exit` file. This release does not change the supervisor.
+
+Once a supervisor that runs has written its pid, the lock holds however old it is.
 
 The lock is a directory under `.locks` in the jobs directory. It stays after
 its job ends. The next shared launch takes it over, as it does the lock of a
@@ -1063,6 +1078,11 @@ directories.
 - `delegate` returns the job's id and no MCP task, so the session gets no
   wake-up when the job ends and reads it with `status`. `questions: human` is
   refused.
+- A supervisor that writes its pid after its launcher gave up, so after the
+  launcher wrote `exit` 125 and gave the lock back, still runs its worker next to
+  the job of whoever took the lock. The supervisor has to close this by not
+  running a job that already has an `exit` file. See
+  [Worktrees and integrate](#worktrees-and-integrate).
 - Cancelling a job stops its process group. A process that leaves the group
   keeps running, and so do the tools of an `opencode run` job, which execute
   in the shared OpenCode server.
