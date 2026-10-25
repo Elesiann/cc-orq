@@ -727,8 +727,9 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
 
   /**
    * The user answered the question form of a human task, or turned it down. Only the key of the question that is open counts. An
-   * answer resumes the worker as a job of this same task, at the level it had, since the task is the one the user approved.
-   * Declining, Esc, an answer that is blank, and a worker that cannot be resumed end the form: the task gets the BLOCKED text.
+   * answer resumes the worker as a job of this same task, held to the ceiling again. Declining, Esc, a level above the ceiling, a
+   * worker that cannot be resumed and a continuation that cannot start end the form: the task gets the BLOCKED text. A blank answer
+   * leaves the form open.
    */
   async function answerQuestion(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, jobId: string, response: InputResponse): Promise<void> {
     if (loaded.record.questions !== 'human') return

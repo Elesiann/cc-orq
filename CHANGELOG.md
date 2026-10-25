@@ -117,7 +117,10 @@ All notable changes to cc-orq are recorded here. The format follows
   never the path `meta.json` names), and a level above
   the ceiling opens the same form as `delegate`, or is refused for a client with no
   form. An approval carries over only from the server's own task records of the
-  same chain, for the same worker at no higher level, never from `meta.json`.
+  same chain, for the same worker at no higher level, never from `meta.json`. A
+  worker below `auto` cannot write its question outside its directory (measured
+  with a Claude worker at `manual` and `acceptEdits`, which could not), so only a
+  worker that could write it reaches `answer`.
 - `questions: human`, for a client that declares MCP tasks and form input. A worker
   that stops on a question puts its task in `input_required`, with a free-text form
   that shows the worker and its question, and the answer resumes the same worker

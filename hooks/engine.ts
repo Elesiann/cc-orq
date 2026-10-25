@@ -1014,12 +1014,10 @@ export type ContinuationPlan = {
   worktree?: NonNullable<Continuation['worktree']>
 }
 
-/** The real path of a directory that exists, with every link followed; null when it does not exist. */
+/** The real path of a path that exists, with every link followed; null when it does not exist. No realpath command: macOS has none with -e. */
 async function realPath($: CoreEngine, path: string): Promise<string | null> {
   try {
-    const r = await $.process.run(['realpath', '-e', '--', path], { timeoutMs: 10000 })
-    const resolved = r.stdout.trim()
-    return r.exitCode === 0 && resolved.startsWith('/') ? resolved : null
+    return (await $.fs.stat(path, { resolve: true })).realPath ?? null
   } catch {
     return null
   }

@@ -336,7 +336,8 @@ test('create launches within the ceiling and answers the id of the job, whose ta
   const { taskId } = created
   assert.deepEqual(jobDirs(s), [taskId], 'the id of the task is the id of its job')
   const record = JSON.parse(readFileSync(join(taskDir(taskId), 'task.json'), 'utf8'))
-  assert.deepEqual(Object.keys(record).sort(), ['createdAt', 'questions', 'request', 'taskId', 'tool', 'toolUseId'])
+  assert.deepEqual(Object.keys(record).sort(), ['createdAt', 'questions', 'request', 'sessionMode', 'taskId', 'tool', 'toolUseId'])
+  assert.equal(record.sessionMode, 'acceptEdits', 'the record keeps the session mode, which a form answer is judged by when its own request carries none')
   assert.equal(record.taskId, taskId)
   assert.equal(record.toolUseId, 'toolu_01')
   assert.equal(record.request.prompt, 'Go.')
