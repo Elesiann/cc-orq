@@ -45,6 +45,8 @@ export type JobRecord = {
   branch?: string
   /** The task's worktree path: cwd, or the directory above cwd when the task ran in a subdirectory. */
   worktree?: string
+  /** The job this one continues, when it was started to resume that job's worker. */
+  parent?: string
 }
 
 /** True when path is root or lies under it. Both are resolved paths. */
@@ -93,6 +95,7 @@ export function parseJobMeta(raw: unknown, jobsDir: string, id: string): JobReco
   if (typeof raw.baseSha === 'string' && raw.baseSha !== '') job.baseSha = raw.baseSha
   if (typeof raw.branch === 'string' && raw.branch !== '') job.branch = raw.branch
   if (typeof raw.worktree === 'string' && raw.worktree !== '') job.worktree = raw.worktree
+  if (typeof raw.parent === 'string' && isSafeJobId(raw.parent)) job.parent = raw.parent
   return job
 }
 
@@ -200,12 +203,12 @@ export function isSafeJobId(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,128}$/.test(id) && !id.includes('..')
 }
 
-export type TableRow = { id: string; kind: string; status: string; elapsed: string; cwd: string }
+export type TableRow = { id: string; kind: string; status: string; elapsed: string; origin: string; cwd: string }
 
 /** Render the /orq list text table. */
 export function renderTable(rows: TableRow[]): string {
-  const head = ['id', 'kind', 'status', 'elapsed', 'cwd']
-  const all = [head, ...rows.map((r) => [r.id, r.kind, r.status, r.elapsed, r.cwd])]
+  const head = ['id', 'kind', 'status', 'elapsed', 'origin', 'cwd']
+  const all = [head, ...rows.map((r) => [r.id, r.kind, r.status, r.elapsed, r.origin, r.cwd])]
   const widths = head.map((_, i) => Math.max(...all.map((r) => (r[i] ?? '').length)))
   const fmt = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i] ?? 0))).join('  ')
   return all.map(fmt).join('\n')
