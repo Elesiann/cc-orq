@@ -4,6 +4,7 @@ import type { DriverKind, InstanceConfig, OrqConfig } from './config.ts'
 import { isFailure, type GitFailure, type InteractionMode, type RuntimeMode, type TaskIsolation, type TaskStatus, type TaskStatusResult, type WorkState } from './contract.ts'
 import { appliedEffort, effortFlag, hasControlCharacters, plainArgument, resolveTarget, runnerPolicy, taskPrompt } from './target.ts'
 import { QUESTION_FILE } from './question.ts'
+import { claimCheckout, rearmLock, releaseLock, type Checkout, type HeldLock, type OwnerProbe } from './lock.ts'
 import { scopedCwd } from './scope.ts'
 import type { TaskHeader } from './task-header.ts'
 import {
@@ -26,9 +27,7 @@ import {
   GIT_TIMEOUT_MS,
   branchDeleteArgv,
   branchFor,
-  busyJob,
   gitDetail,
-  type JobPlace,
   revParseHeadArgv,
   revParseToplevelArgv,
   WORKTREE_INCLUDE_DEADLINE_S,
@@ -301,30 +300,51 @@ async function unwindWorktree($: CoreEngine, plan: WorktreePlan): Promise<void> 
 }
 
 /**
- * The id of a live job that runs in `path` or is a worktree of the checkout `path`, or null. A job is live
- * while its supervisor runs. Only the jobs that hold the path are asked, so a launch does not check every job
- * in the directory. It reads the job directory rather than memory, so it holds across sessions.
+ * The id of a live job that runs inside `checkout` or is a worktree of it, or null. A job is live while its
+ * supervisor runs. The lock covers the jobs that claimed one; this covers the rest, the jobs 0.1 launched and
+ * the worktree jobs, and it reads the job directory rather than memory, so it holds across sessions. A job
+ * stores the path its launch was given, so `spelling`, the path of this launch, finds a job stored under a
+ * symlink that leads to the checkout, as 0.1 did. `rearm` runs before each job is read, so a scan of a large
+ * jobs directory can keep the launch's lock young.
  */
-export async function checkoutBusy($: CoreEngine, jobsDir: string, path: string): Promise<string | null> {
+export async function checkoutBusy(
+  $: CoreEngine,
+  jobsDir: string,
+  checkout: Checkout,
+  launch: { spelling?: string; rearm?: () => Promise<unknown> } = {},
+): Promise<string | null> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
   } catch {
     return null
   }
-  const places: JobPlace[] = []
+  const roots = launch.spelling === undefined ? [checkout.key] : [checkout.key, launch.spelling]
+  // Outside a repository the directory itself is the checkout, so only a job in that very directory counts.
+  const holds = (path: string, root: string): boolean => (checkout.repository ? isWithin(path, root) : path === root)
+  const inside = (path: string | undefined): boolean => path !== undefined && roots.some((root) => holds(path, root))
   for (const entry of entries) {
     if (entry.kind !== 'dir') continue
+    await launch.rearm?.()
     const job = await readMeta($, jobsDir, entry.name)
-    if (job === null || (job.cwd !== path && job.repo !== path)) continue
-    places.push({
-      id: job.id,
-      cwd: job.cwd,
-      ...(job.repo !== undefined ? { repo: job.repo } : {}),
-      live: (await jobLiveness($, job)) === 'running',
-    })
+    if (job === null || !(inside(job.cwd) || inside(job.repo))) continue
+    if ((await jobLiveness($, job)) === 'running') return job.id
   }
-  return busyJob(places, path)
+  return null
+}
+
+/** Where the job that owns a lock stands: no exit file and no pgid yet is a launch that has not started its supervisor. */
+function ownerStateProbe($: CoreEngine, jobsDir: string): OwnerProbe {
+  return async (id) => {
+    const dir = `${jobsDir}/${id}`
+    if (await exists($, `${dir}/exit`)) return 'finished'
+    const pgid = ((await readText($, `${dir}/pgid`)) ?? '').trim()
+    return /^\d+$/.test(pgid) ? jobLiveness($, { dir }) : 'unstarted'
+  }
+}
+
+function busyRefusal(kind: string, cwd: string, owner: string | null): string {
+  return `orq: ${kind} refused: worktree_busy: ${cwd} is in use by ${owner === null ? 'a launch in progress' : `job ${owner}`}`
 }
 
 /**
@@ -422,6 +442,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
   const now = await $.clock.now()
   const supervise = `${$.plugin.root}/scripts/supervise.sh`
   const agentSuffix = spec.agentId.slice(-8)
+  const ownerOf = ownerStateProbe($, config.jobsDir)
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const id = `${spec.kind}-${now}-${agentSuffix}-${rand36()}`
     const dir = `${config.jobsDir}/${id}`
@@ -439,21 +460,31 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
     // The id is claimed by the mkdir, so the worktree path can name it. Nothing is created before the claim.
     let cwd = spec.cwd
     let plan: WorktreePlan | null = null
+    let held: HeldLock | null = null
+    const abandon = async (refusal: string): Promise<LaunchResult> => {
+      await markLaunchFailed($, dir)
+      if (plan) await unwindWorktree($, plan)
+      if (held) await releaseLock($, held, ownerOf)
+      return { refusal }
+    }
     if (spec.isolation === 'worktree') {
       const prepared = await prepareWorktree($, spec.cwd, id, spec.worktreeScope)
       if ('failure' in prepared) {
-        await markLaunchFailed($, dir)
-        return { refusal: `orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}` }
+        return abandon(`orq: ${spec.kind} refused: ${prepared.failure.code}: ${prepared.failure.message}`)
       }
       plan = prepared.plan
       cwd = plan.workdir
     } else {
-      // A shared launch writes into its checkout, so a live job there, or in a worktree of it, refuses it.
-      const busy = await checkoutBusy($, config.jobsDir, spec.cwd)
-      if (busy !== null) {
-        await markLaunchFailed($, dir)
-        return { refusal: `orq: ${spec.kind} refused: worktree_busy: ${spec.cwd} is in use by job ${busy}` }
-      }
+      // The scan after the claim sees what holds no lock: jobs 0.1 launched, and worktree jobs.
+      const claim = await claimCheckout($, config.jobsDir, id, spec.cwd, ownerOf)
+      if (claim.kind === 'failed') return abandon(`orq: ${spec.kind} could not lock its checkout (${claim.detail})`)
+      if (claim.kind === 'busy') return abandon(busyRefusal(spec.kind, spec.cwd, claim.owner))
+      const lock = claim.held
+      held = lock
+      const busy = await checkoutBusy($, config.jobsDir, claim.checkout, { spelling: spec.cwd, rearm: () => rearmLock($, lock) })
+      if (busy !== null) return abandon(busyRefusal(spec.kind, spec.cwd, busy))
+      // A scan that outlasted the grace may have let another launcher break this lock and start its job.
+      if (!(await rearmLock($, lock, { force: true }))) return abandon(busyRefusal(spec.kind, spec.cwd, null))
     }
     const worktreeFields = plan
       ? { repo: plan.repo, baseSha: plan.baseSha, branch: plan.branch, worktree: plan.worktree }
@@ -483,9 +514,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
         await $.fs.write(`${dir}/flags`, spec.flags.map((flag) => `${flag}\n`).join(''))
       }
     } catch (err) {
-      await markLaunchFailed($, dir)
-      if (plan) await unwindWorktree($, plan)
-      return { refusal: `orq: ${spec.kind} could not write its job directory: ${String(err)}` }
+      return abandon(`orq: ${spec.kind} could not write its job directory: ${String(err)}`)
     }
     const script = startScript({
       id,
@@ -501,19 +530,14 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       const r = await $.process.run(['bash', '-c', script], { timeoutMs: PROCESS_TIMEOUT_MS })
       startCode = r.exitCode
     } catch (err) {
-      await markLaunchFailed($, dir)
-      if (plan) await unwindWorktree($, plan)
-      return { refusal: `orq: ${spec.kind} could not start its job: ${String(err)}` }
+      return abandon(`orq: ${spec.kind} could not start its job: ${String(err)}`)
     }
     if (startCode !== 0) {
-      await markLaunchFailed($, dir)
-      if (plan) await unwindWorktree($, plan)
-      return {
-        refusal:
-          startCode === 11
-            ? `orq: ${spec.kind} failed to start (supervisor did not report within 5 s)`
-            : `orq: ${spec.kind} failed to start (exit ${startCode})`,
-      }
+      return abandon(
+        startCode === 11
+          ? `orq: ${spec.kind} failed to start (supervisor did not report within 5 s)`
+          : `orq: ${spec.kind} failed to start (exit ${startCode})`,
+      )
     }
     const pgid = ((await readText($, `${dir}/pgid`)) ?? '').trim()
     const job: JobRecord = {
@@ -616,7 +640,7 @@ export async function launchTaskFromHeader(
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. */
-export async function jobLiveness($: CoreEngine, job: JobRecord): Promise<'finished' | 'running' | 'gone'> {
+export async function jobLiveness($: CoreEngine, job: Pick<JobRecord, 'dir'>): Promise<'finished' | 'running' | 'gone'> {
   if (await exists($, `${job.dir}/exit`)) return 'finished'
   const script =
     `# orq:liveness\npgid=$(cat ${shellWord(`${job.dir}/pgid`)} 2>/dev/null | tr -d ' \\t\\n')\n` +

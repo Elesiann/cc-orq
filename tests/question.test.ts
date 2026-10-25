@@ -79,6 +79,7 @@ function stubs(on: any, s: State) {
     if (argv[0] === 'python3') return result(1)
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) return result(0)
+    if (script.includes('# orq:lock')) return result(0)
     if (script.includes('# orq:start')) {
       s.startScripts.push(script)
       return result(0)
