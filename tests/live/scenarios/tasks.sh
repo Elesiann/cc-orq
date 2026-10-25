@@ -157,3 +157,6 @@ id=$(basename "$dir")
 [ -f "$JOBS_DIR/.tasks/$id/approved" ] || live_fail "the task record has no approved marker"
 
 live_tmux_exit "$SESSION"
+
+# Claude Code writes its memory lines only in an interactive session, so the excluded-CLAUDE.md check reads this log.
+live_assert_no_memory_loaded "$EX/debug.log" "$EX/memory-lines.txt"

@@ -407,9 +407,10 @@ Claude Code collapses a longer one:
    found, so that a link cannot hide where the task runs.
 
 The field you answer says where the task runs in its title, and its description
-names the limit that each level is above: `ceiling.runtime`,
+names the limits that are below each level: `ceiling.runtime`,
 `ceiling.sharedRuntime` or `ceiling.interaction`, and the session's permission
-mode when it is the lower one.
+mode. It names only a limit that is in the way, so a level that the configuration
+allows names the session's mode alone.
 
 The worker, the model and the directory come from the model's request. The form
 quotes each one, cuts it at 120 characters and writes out any control or format
