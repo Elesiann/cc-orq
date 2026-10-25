@@ -822,7 +822,11 @@ flowchart LR
    CLI, writes its events and final message, and stops the process group when
    a `cancel` file appears. An OpenCode job passes `--standalone`, so it runs on
    a private OpenCode server with the job's environment, not on OpenCode's
-   shared background service.
+   shared background service, and a cancel sends it SIGINT first, so OpenCode
+   aborts the session and the shared service does not resume it later. When
+   the CLI is gone, finished or cancelled, `scripts/sweep.py` ends any process
+   that still carries the job's `ORQ_JOB_DIR`, such as an MCP server that was
+   still starting.
 4. Each following step calls `mcp__cc-orq__wait`, which blocks for up to
    `waitSeconds` and answers whether the job has finished.
 5. When the job ends, the engine reads its final message from `last.txt` and
@@ -858,11 +862,6 @@ directories.
   answer to a child's question is a new task that carries the earlier brief.
 - Cancelling a job stops its process group. A process that leaves the group
   keeps running.
-- OpenCode's private server ends your MCP servers with the command, except that
-  a server still starting at that moment can stay running. On OpenCode 2.0.27
-  this happened after most `opencode models --standalone` probes and after some
-  jobs, and the leftover held about 250 MB. Look for an orphaned launcher, such
-  as an `npm exec`, in `ps -eo pid,ppid,rss,etime,comm`, and stop it with `kill`.
 - OpenCode tasks do not get the task's effort, and their footer says
   `effort n/a`.
 - A task's worktree gets ignored files only through `.worktreeinclude`, and a

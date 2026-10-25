@@ -12,7 +12,14 @@ cd "$ROOT"
 T="$ROOT/.ref/tmp/runners-shell-$(date +%s)-$$"
 BIN="$T/bin"; DUMP="$T/dump"
 mkdir -p "$BIN" "$DUMP"
-trap 'rm -rf "$T"' EXIT
+cleanup() {
+  local f
+  for f in "$DUMP"/*.leftover "$T"/*.pid; do
+    [ -f "$f" ] && kill -KILL "$(cat "$f")" 2>/dev/null || true
+  done
+  rm -rf "$T"
+}
+trap cleanup EXIT
 PASS=0; FAIL=0
 
 ok() { PASS=$((PASS+1)); echo "ok: $1"; }
@@ -29,12 +36,31 @@ cat > "$BIN/opencode" <<'EOF'
 #!/bin/bash
 printf '%s\0' "$@" > "$ARGV_DUMP/opencode.argv"
 pwd > "$ARGV_DUMP/opencode.cwd"
+if [ -n "$OPENCODE_LEFTOVER" ]; then
+  setsid sleep 300 </dev/null >/dev/null 2>&1 &
+  echo $! > "$ARGV_DUMP/opencode.leftover"
+fi
+if [ -n "$OPENCODE_HOLD" ]; then
+  exec python3 -c '
+import ctypes, signal, sys, time
+ctypes.CDLL(None).prctl(15, b"opencode", 0, 0, 0)
+def on_int(*_):
+    open(sys.argv[1], "w").write("interrupted\n")
+    sys.exit(130)
+signal.signal(signal.SIGINT, on_int)
+time.sleep(float(sys.argv[2]))
+' "$ARGV_DUMP/opencode.int" "$OPENCODE_HOLD"
+fi
 exit 0
 EOF
 cat > "$BIN/agy" <<'EOF'
 #!/bin/bash
 printf '%s\0' "$@" > "$ARGV_DUMP/agy.argv"
 pwd > "$ARGV_DUMP/agy.cwd"
+if [ -n "$AGY_LEFTOVER" ]; then
+  setsid sleep 300 </dev/null >/dev/null 2>&1 &
+  echo $! > "$ARGV_DUMP/agy.leftover"
+fi
 if [ -n "$AGY_SLEEP" ]; then sleep "$AGY_SLEEP"; fi
 printf '{"event":"init","conversation_id":"conv-fake","init":{"model":"fake-model"}}\n'
 printf '{"event":"result","result":{"conversation_id":"conv-fake","status":"SUCCESS","response":"FAKE-AGY\\n","usage":{"input_tokens":10,"output_tokens":3}}}\n'
@@ -44,6 +70,10 @@ cat > "$BIN/claude" <<'EOF'
 #!/bin/bash
 printf '%s\0' "$@" > "$ARGV_DUMP/claude.argv"
 pwd > "$ARGV_DUMP/claude.cwd"
+if [ -n "$CLAUDE_LEFTOVER" ]; then
+  setsid sleep 300 </dev/null >/dev/null 2>&1 &
+  echo $! > "$ARGV_DUMP/claude.leftover"
+fi
 printf '{"type":"system","subtype":"init","session_id":"ses-fake"}\n'
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"ses-fake","result":"FAKE-CLAUDE","usage":{"input_tokens":11,"output_tokens":4},"modelUsage":{"fake-claude-model":{}}}\n'
 exit 0
@@ -75,6 +105,18 @@ expect_argv() {
 }
 expect_file() {
   if [ "$(cat "$1")" = "$2" ]; then ok "$3"; else bad "$3 (got: $(cat "$1" | head -c 200))"; fi
+}
+
+# dead PID: the process is gone, or is only a zombie that its parent has not collected.
+dead() {
+  local state
+  state=$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1)
+  [ -z "$state" ] || [ "$state" = Z ]
+}
+await_dead() {
+  local i
+  for i in $(seq 1 60); do dead "$1" && return 0; sleep 0.1; done
+  return 1
 }
 
 mkdir -p "$T/work"
@@ -143,6 +185,39 @@ expect_argv opencode-flags opencode run --standalone --format json -m m2 --agent
 expect_file "$JOB/exit" 0 opencode-exit
 [ "$(cat "$DUMP/opencode.cwd")" = "$T/work" ] && ok opencode-cwd || bad opencode-cwd
 
+# The job's marker is its ORQ_JOB_DIR. The timeout wrapper carries it too and is an ancestor of the supervisor.
+setsid sleep 300 </dev/null >/dev/null 2>&1 &
+echo $! > "$T/bystander.pid"
+ORQ_JOB_DIR=/another/job setsid sleep 300 </dev/null >/dev/null 2>&1 &
+echo $! > "$T/other-job.pid"
+LJOB="$T/job-leftover"
+mkdir -p "$LJOB"
+printf 'leave one behind' > "$LJOB/prompt.txt"
+CLAUDE_LEFTOVER=1 ORQ_JOB_DIR="$LJOB" timeout 60 bash "$ROOT/scripts/supervise.sh" "$LJOB" claude "$T/work" m '' '' > "$LJOB/child.log" 2>&1
+expect_file "$LJOB/exit" 0 leftover-exit
+expect_file "$LJOB/last.txt" FAKE-CLAUDE leftover-last
+expect_file "$LJOB/child.log" 'orq: ended 1 process that carried ORQ_JOB_DIR' leftover-reported
+if await_dead "$(cat "$DUMP/claude.leftover")"; then ok leftover-ended; else bad leftover-ended; fi
+if dead "$(cat "$T/bystander.pid")"; then bad leftover-spares-unmarked; else ok leftover-spares-unmarked; fi
+if dead "$(cat "$T/other-job.pid")"; then bad leftover-spares-other-job; else ok leftover-spares-other-job; fi
+kill -KILL "$(cat "$T/bystander.pid")" "$(cat "$T/other-job.pid")" 2>/dev/null || true
+
+CJOB0="$T/job-clean"
+mkdir -p "$CJOB0"
+printf 'leave nothing' > "$CJOB0/prompt.txt"
+ORQ_JOB_DIR="$CJOB0" timeout 60 bash "$ROOT/scripts/supervise.sh" "$CJOB0" claude "$T/work" m '' '' > "$CJOB0/child.log" 2>&1
+expect_file "$CJOB0/exit" 0 clean-job-exit
+expect_file "$CJOB0/child.log" '' clean-job-child-log-empty
+
+# A worker that runs this suite inside another job inherits that job's ORQ_JOB_DIR and must not end its processes.
+OJOB="$T/job-not-its-marker"
+mkdir -p "$OJOB"
+printf 'x' > "$OJOB/prompt.txt"
+CLAUDE_LEFTOVER=1 ORQ_JOB_DIR="$T/an-outer-job" timeout 60 bash "$ROOT/scripts/supervise.sh" "$OJOB" claude "$T/work" m '' ''
+sleep 0.5
+if dead "$(cat "$DUMP/claude.leftover")"; then bad foreign-marker-sweeps-nothing; else ok foreign-marker-sweeps-nothing; fi
+kill -KILL "$(cat "$DUMP/claude.leftover")" 2>/dev/null || true
+
 check_extract() {
   local got
   got=$(python3 "$ROOT/scripts/extract.py" "$1" "$2")
@@ -167,7 +242,7 @@ check_extract "$T/opencode-tokens.jsonl" opencode '{"tid": "s-tok", "in": 42, "o
 CJOB="$T/job-cancel"
 mkdir -p "$CJOB"
 printf 'never finishes' > "$CJOB/prompt.txt"
-AGY_SLEEP=60 setsid bash "$ROOT/scripts/supervise.sh" "$CJOB" agy "$T/work" m '' '' </dev/null >/dev/null 2>&1 &
+AGY_SLEEP=60 AGY_LEFTOVER=1 ORQ_JOB_DIR="$CJOB" setsid bash "$ROOT/scripts/supervise.sh" "$CJOB" agy "$T/work" m '' '' </dev/null >/dev/null 2>&1 &
 CPID=$!
 disown "$CPID" 2>/dev/null || true
 for _ in $(seq 1 50); do [ -s "$CJOB/pgid" ] && break; sleep 0.2; done
@@ -180,7 +255,29 @@ expect_file "$CJOB/exit" 124 cancel-exit-124
 CPGID=$(cat "$CJOB/pgid" 2>/dev/null || true)
 for _ in $(seq 1 40); do [ -n "$CPGID" ] && pgrep -g "$CPGID" >/dev/null 2>&1 || break; sleep 0.2; done
 if [ -n "$CPGID" ] && ! pgrep -g "$CPGID" >/dev/null 2>&1; then ok cancel-group-gone; else bad "cancel-group-gone (group ${CPGID:-missing} still has processes)"; fi
+if await_dead "$(cat "$DUMP/agy.leftover")"; then ok cancel-leftover-ended; else bad cancel-leftover-ended; fi
 wait "$CPID" 2>/dev/null || true
+
+rm -f "$DUMP/opencode.int" "$DUMP/opencode.leftover"
+OJOB2="$T/job-cancel-opencode"
+mkdir -p "$OJOB2"
+printf 'hold' > "$OJOB2/prompt.txt"
+OPENCODE_HOLD=60 OPENCODE_LEFTOVER=1 ORQ_JOB_DIR="$OJOB2" setsid bash "$ROOT/scripts/supervise.sh" "$OJOB2" opencode "$T/work" m '' '' </dev/null >/dev/null 2>&1 &
+OPID=$!
+disown "$OPID" 2>/dev/null || true
+for _ in $(seq 1 50); do [ -s "$OJOB2/pgid" ] && [ -s "$DUMP/opencode.leftover" ] && break; sleep 0.2; done
+sleep 1
+CANCEL_AT=$(date +%s.%N)
+echo cancelled > "$OJOB2/cancel"
+for _ in $(seq 1 100); do [ -e "$OJOB2/exit" ] && break; sleep 0.1; done
+CANCEL_TOOK=$(python3 -c "import time; print(round(time.time() - $CANCEL_AT, 1))")
+expect_file "$OJOB2/exit" 124 cancel-opencode-exit
+if [ -e "$DUMP/opencode.int" ]; then ok cancel-opencode-gets-sigint; else bad cancel-opencode-gets-sigint; fi
+if python3 -c "import sys; sys.exit(0 if $CANCEL_TOOK < 4.5 else 1)"; then ok "cancel-opencode-prompt (${CANCEL_TOOK}s)"; else bad "cancel-opencode-prompt (${CANCEL_TOOK}s, a SIGTERM and a wait of 5 s take longer)"; fi
+if await_dead "$(cat "$DUMP/opencode.leftover")"; then ok cancel-opencode-leftover-ended; else bad cancel-opencode-leftover-ended; fi
+await_dead "$OPID" || true
+LEFT=$( (grep -lazsx "ORQ_JOB_DIR=$OJOB2" /proc/[0-9]*/environ 2>/dev/null || true) | sed 's#/proc/\([0-9]*\)/environ#\1#' | while read -r p; do cat "/proc/$p/comm" 2>/dev/null; done | tr '\n' ' ')
+if [ -z "$LEFT" ]; then ok cancel-opencode-nothing-left; else bad "cancel-opencode-nothing-left (still carrying the marker: $LEFT)"; fi
 
 BURST="$T/burst"
 mkdir -p "$BURST"

@@ -46,9 +46,16 @@ All notable changes to cc-orq are recorded here. The format follows
   about 2 GB of memory in use after one probe on OpenCode 2.0.27. Every command
   also ran with the environment the service was started with. Jobs and the
   probe now pass `--standalone`, so OpenCode runs on a private server that uses
-  the command's environment and ends with the command. One MCP server that is
-  still starting when the command ends can stay running, about 250 MB each time
-  (see Known limitations in the README).
+  the command's environment and ends with the command.
+- A process that a job's CLI left running outside its process group, such as an
+  OpenCode MCP server that was still starting when the command ended, no longer
+  outlives the job. When the CLI is gone, finished or cancelled, the supervisor
+  ends every process that still carries the job's `ORQ_JOB_DIR`, and the
+  `capabilities` probe does the same for each `opencode models` call. Under
+  load that leftover was up to 20 processes after one probe on OpenCode 2.0.27.
+- Cancelling an OpenCode job sends SIGINT first, so OpenCode aborts the session.
+  SIGTERM left the session claimed, and OpenCode's shared service continues a
+  claimed session ("continue where you left off") the next time it starts.
 
 ## [0.1.1] - 2026-10-21
 

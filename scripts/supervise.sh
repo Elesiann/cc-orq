@@ -16,11 +16,14 @@
 # session and group leader), or under setsid when no user manager is
 # reachable, so $$ is the process-group leader. The watcher kills the whole
 # group on cancel (SIGTERM, then SIGKILL after 5 s). If the launching session
-# dies, nothing is killed: the job runs to completion on its own.
+# dies, nothing is killed: the job runs to completion on its own. When the CLI
+# is gone, whether it finished or was cancelled, sweep.py ends what it left
+# running outside the group.
 dir=$1; runner=$2; cwd=$3; model=${4:-}; effort=${5:-}; sandbox=${6:-}
 
 echo $$ > "$dir/pgid"
 trap '' TERM
+sweep=$(cd "$(dirname "$0")" && pwd)/sweep.py
 
 flags=()
 if [ -f "$dir/flags" ]; then
@@ -44,6 +47,36 @@ write_exit() {
   printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$dir/exit"
 }
 
+# A CLI can leave a process running outside its process group, such as an MCP server that OpenCode was still
+# starting when it exited. The start script puts ORQ_JOB_DIR in every job's environment, which finds it.
+# sweep.py needs /proc, so on macOS the sweep does nothing.
+sweep_job() {
+  [ "${ORQ_JOB_DIR:-}" = "$dir" ] && python3 "$sweep" "ORQ_JOB_DIR=$dir" "$@"
+  return 0
+}
+
+# OpenCode takes SIGTERM for a server restart: the session keeps its claim, and the shared background service
+# resumes it on its next start. SIGINT aborts the session, as Ctrl-C does.
+interrupt_cli() {
+  [ "$runner" = opencode ] || return 0
+  local cli i
+  cli=$(pgrep -P "$child" -x opencode 2>/dev/null | head -n 1)
+  [ -n "$cli" ] || return 0
+  kill -INT "$cli" 2>/dev/null
+  for i in $(seq 1 30); do
+    kill -0 "$child" 2>/dev/null || return 0
+    sleep 0.1
+  done
+}
+
+# The watcher's sleep outlives it, and a cancel's sleep lasts 5 s.
+stop_watcher() {
+  local kids
+  kids=$(pgrep -P "$watcher" 2>/dev/null)
+  kill -KILL "$watcher" $kids 2>/dev/null
+  wait "$watcher" 2>/dev/null
+}
+
 run_codex() {
   args=(exec --json -o "$dir/last.txt")
   [ -n "$model" ] && args+=(-m "$model")
@@ -58,7 +91,7 @@ run_opencode() {
   # --standalone runs a private server that ends with the job. Without it OpenCode hands the run to
   # its shared background service, which leaves the user's MCP servers running and keeps the
   # environment it started with.
-  ( cd "$cwd" && opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
+  ( cd "$cwd" && exec opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
   if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
@@ -153,8 +186,10 @@ child=$!
 (
   while kill -0 "$child" 2>/dev/null; do
     if [ -e "$dir/cancel" ]; then
+      interrupt_cli
       kill -TERM -$$ 2>/dev/null
       sleep 5
+      sweep_job
       if [ ! -e "$dir/exit" ]; then write_exit 124; fi
       kill -KILL -$$ 2>/dev/null
       exit 0
@@ -166,6 +201,8 @@ watcher=$!
 
 wait "$child"
 code=$?
-kill "$watcher" 2>/dev/null
+# What still runs below the supervisor is its own watcher, so only an orphan counts as a leftover here.
+sweep_job --spare-tree "$$"
+stop_watcher
 if [ -e "$dir/cancel" ]; then write_exit 124; elif [ ! -e "$dir/exit" ]; then write_exit "$code"; fi
 exit 0

@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 
 EFFORT_OPTION = "reasoningEffort"
 TIMEOUT_S = 60
@@ -43,6 +44,8 @@ OPENCODE_SLUG = re.compile(r"^\s*[^\s/]+/\S+\s*$")
 # leaves them running.
 OPENCODE_MODELS = ["opencode", "models", "--standalone"]
 
+SWEEP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sweep.py")
+
 
 def run(cmd, env, timeout=TIMEOUT_S):
     """Run cmd, return (exit_code, stdout). Timeouts/exec errors -> (127, '')."""
@@ -54,6 +57,23 @@ def run(cmd, env, timeout=TIMEOUT_S):
         return p.returncode, p.stdout
     except (OSError, subprocess.TimeoutExpired):
         return 127, ""
+
+
+def run_opencode_models(env):
+    """Run OPENCODE_MODELS, then end what it left running. An MCP server that was still starting when OpenCode
+    exited is orphaned and outlives the command, and the probe runs on every capabilities call. Every process
+    of the call carries ORQ_PROBE_ID, which nothing else shares, so sweep.py finds it."""
+    probe_id = uuid.uuid4().hex
+    try:
+        return run(OPENCODE_MODELS, dict(env, ORQ_PROBE_ID=probe_id))
+    finally:
+        try:
+            subprocess.run(
+                [sys.executable, SWEEP, "ORQ_PROBE_ID=" + probe_id],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def instance_env(base, extra):
@@ -133,11 +153,11 @@ def probe_codex(env):
 def probe_opencode(env):
     if shutil.which("opencode", path=env.get("PATH")) is None:
         return False, None, [], "Executable 'opencode' was not found on PATH."
-    code, out = run(OPENCODE_MODELS, env)
+    code, out = run_opencode_models(env)
     if code not in (0, 127):
         # OpenCode commands share one SQLite database, so a concurrent run can fail it once.
         time.sleep(1)
-        code, out = run(OPENCODE_MODELS, env)
+        code, out = run_opencode_models(env)
     if code != 0:
         return True, None, [], "'%s' failed (exit %d)." % (" ".join(OPENCODE_MODELS), code)
     # The label would repeat the id after the slash, and OpenCode can list hundreds of models.
