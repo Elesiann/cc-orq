@@ -55,6 +55,8 @@ type State = {
   asideExit: number
   /** Jobs whose supervisor has not written its pgid yet. */
   noPgid: Set<string>
+  /** Paths that are symlinks, each with the real path fs.stat resolves it to. */
+  realPaths: Map<string, string>
   /** The steps of a launch in the order they ran: mkdir, lock claim, write meta.json, start. */
   events: string[]
   /** Runs when the start script does, or when a mutex is taken: another launcher acting in that window. */
@@ -87,6 +89,7 @@ function fresh(o: Partial<State> = {}): State {
     lockExit: 0,
     asideExit: 0,
     noPgid: new Set(),
+    realPaths: new Map(),
     events: [],
     onStart: null,
     onMutex: null,
@@ -128,6 +131,8 @@ function stubs(on: any, s: State) {
     return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('fs.stat', (_$: unknown, e: any) => {
+    const realPath = s.realPaths.get(e.path)
+    if (realPath !== undefined) return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: true, realPath } }
     if (s.locks.has(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: s.mtimes.get(e.path) ?? s.now, isLink: false } }
     if (!s.files.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file', size: 0, mtimeMs: s.mtimes.get(e.path) ?? s.now, isLink: false } }
@@ -785,6 +790,30 @@ test('a lock with no owner yet is a launch in progress for 10 s, and is broken a
   s.mtimes.set(WORK_LOCK, s.now - 10000)
   const id = launchedId(await orq($, LAUNCH))
   expect(s.locks.get(WORK_LOCK)).toBe(id)
+})
+
+test('a live worktree job stored under a symlink spelling of the checkout refuses a shared launch at that spelling', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.realPaths.set('/work', '/real/work')
+  s.files.set('/real/work/.git', '')
+  s.dirEntries = [{ name: 'job-linked', kind: 'dir' }]
+  seedJob(s, 'job-linked', { cwd: '/real/work-wt/job-linked', repo: '/work' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-linked')
+  expect(s.locks.size).toBe(0)
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a job in a subdirectory of the launch\'s own spelling of a symlinked checkout counts as well', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.realPaths.set('/work', '/real/work')
+  s.files.set('/real/work/.git', '')
+  s.dirEntries = [{ name: 'job-deep', kind: 'dir' }]
+  seedJob(s, 'job-deep', { cwd: '/work/pkg/deep' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-deep')
 })
 
 test('a launch that finds a live job in its directory gives its lock back before it refuses', async ($, on) => {

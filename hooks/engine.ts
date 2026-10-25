@@ -302,18 +302,26 @@ async function unwindWorktree($: CoreEngine, plan: WorktreePlan): Promise<void> 
 /**
  * The id of a live job that runs inside `checkout` or is a worktree of it, or null. A job is live while its
  * supervisor runs. The lock covers the jobs that claimed one; this covers the rest, the jobs 0.1 launched and
- * the worktree jobs, and it reads the job directory rather than memory, so it holds across sessions.
+ * the worktree jobs, and it reads the job directory rather than memory, so it holds across sessions. A job
+ * stores the path its launch was given, so `spelling`, the path of this launch, finds a job stored under a
+ * symlink that leads to the checkout, as 0.1 did.
  */
-export async function checkoutBusy($: CoreEngine, jobsDir: string, checkout: Checkout): Promise<string | null> {
+export async function checkoutBusy(
+  $: CoreEngine,
+  jobsDir: string,
+  checkout: Checkout,
+  launch: { spelling?: string } = {},
+): Promise<string | null> {
   let entries: { name: string; kind: string }[]
   try {
     entries = await $.fs.list(jobsDir)
   } catch {
     return null
   }
+  const roots = launch.spelling === undefined ? [checkout.key] : [checkout.key, launch.spelling]
   // Outside a repository the directory itself is the checkout, so only a job in that very directory counts.
-  const inside = (path: string | undefined): boolean =>
-    path !== undefined && (checkout.repository ? isWithin(path, checkout.key) : path === checkout.key)
+  const holds = (path: string, root: string): boolean => (checkout.repository ? isWithin(path, root) : path === root)
+  const inside = (path: string | undefined): boolean => path !== undefined && roots.some((root) => holds(path, root))
   for (const entry of entries) {
     if (entry.kind !== 'dir') continue
     const job = await readMeta($, jobsDir, entry.name)
@@ -470,7 +478,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       if (claim.kind === 'failed') return abandon(`orq: ${spec.kind} could not lock its checkout (${claim.detail})`)
       if (claim.kind === 'busy') return abandon(busyRefusal(spec.kind, spec.cwd, claim.owner))
       held = claim.held
-      const busy = await checkoutBusy($, config.jobsDir, claim.checkout)
+      const busy = await checkoutBusy($, config.jobsDir, claim.checkout, { spelling: spec.cwd })
       if (busy !== null) return abandon(busyRefusal(spec.kind, spec.cwd, busy))
     }
     const worktreeFields = plan

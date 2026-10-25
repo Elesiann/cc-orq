@@ -284,5 +284,14 @@ out=$(launch_one "$repo" shared)
 [ ! -d "$(lock_of "$repo")" ] && ok "the refused launch gave its lock back" || bad "its lock is still there, owned by $(owner_of "$repo")"
 rm -f "$HOLD"; unset HOLD
 
+SESSION="$T/session-link"; JOBS="$T/jobs-link"; HOLD="$T/hold-link"; export HOLD; : > "$HOLD"
+repo="$SESSION/repo"; new_repo "$repo"; ln -s "$repo" "$SESSION/link"
+out=$(launch_one "$SESSION/link" worktree raw); wt=$(id_of "$out")
+[ "$(words "$out")" = launched ] && ok "a worktree job launched at a symlink spelling of the checkout is live" || bad "worktree launch at the link: $out"
+out=$(launch_one "$SESSION/link" shared raw)
+[ "$(words "$out")" = busy ] && echo "$out" | grep -q "is in use by job $wt" && ok "a shared launch at that same spelling is refused for the worktree job" || bad "shared launch at the link: $out"
+[ ! -d "$(lock_of "$repo")" ] && ok "and it gave its lock back" || bad "its lock is still there, owned by $(owner_of "$repo")"
+rm -f "$HOLD"; unset HOLD
+
 echo "pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]
