@@ -56,10 +56,6 @@ want = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"
 sys.exit(0 if json.loads(out) == want else 1)' "$mode"; then ok "injects-$mode"; else bad "injects-$mode (got: $(head -c 300 "$T/out"))"; fi
 done
 
-run_hook "$(input '""' "$PLAIN")"
-if [ "$(cat "$T/code")" = 0 ] && check 'import json
-sys.exit(0 if json.loads(out)["hookSpecificOutput"]["updatedInput"]["sessionMode"] == "" else 1)'; then ok injects-an-empty-mode-as-it-is; else bad "injects-an-empty-mode-as-it-is (got: $(head -c 300 "$T/out"))"; fi
-
 run_hook "$(input '"auto"' "$PLAIN")"
 if check 'import json
 o = json.loads(out)
@@ -90,7 +86,7 @@ if [ "$(cat "$T/code")" = 0 ] && check 'import json
 got = json.loads(out)["hookSpecificOutput"]["updatedInput"]
 sys.exit(0 if got["prompt"] == "a \ud800 b" and got["sessionMode"] == "auto" else 1)'; then ok answers-a-lone-surrogate; else bad "answers-a-lone-surrogate (got: $(head -c 300 "$T/out"))"; fi
 
-# No usable mode: the model's own sessionMode is removed, so the server falls back to the config alone.
+# The key is absent: the model's own sessionMode is removed, so the server falls back to the config alone.
 FORGED='{"target":"codex","sessionMode":"bypassPermissions","prompt":"p"}'
 strips() { # name hook_input_text
   run_hook "$2"
@@ -99,9 +95,6 @@ want = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"
 sys.exit(0 if json.loads(out) == want and "sessionMode" not in out else 1)'; then ok "$1"; else bad "$1 (exit $(cat "$T/code"), out: $(head -c 300 "$T/out"), err: $(head -c 200 "$T/err"))"; fi
 }
 strips strips-a-forged-sessionMode-without-permission_mode "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"x\",\"tool_input\":$FORGED}"
-for value in null 7 true '{"mode":"auto"}' '["auto"]'; do
-  strips "strips-a-forged-sessionMode-when-permission_mode-is-$(printf '%s' "$value" | tr -c 'A-Za-z0-9' '_')" "{\"permission_mode\":$value,\"tool_input\":$FORGED}"
-done
 run_hook "{\"tool_input\":{\"prompt\":\"p\"}}"
 if [ "$(cat "$T/code")" = 0 ] && check 'import json
 sys.exit(0 if json.loads(out)["hookSpecificOutput"]["updatedInput"] == {"prompt": "p"} else 1)'; then ok leaves-an-input-without-sessionMode-as-it-is; else bad leaves-an-input-without-sessionMode-as-it-is; fi
@@ -111,6 +104,14 @@ blocked() { # name hook_input_text
   run_hook "$2"
   if [ "$(cat "$T/code")" = 2 ] && [ ! -s "$T/out" ] && [ "$(wc -l < "$T/err")" = 1 ] && grep -q '^cc-orq: ' "$T/err"; then ok "$1"; else bad "$1 (exit $(cat "$T/code"), out: $(head -c 200 "$T/out"), err: $(head -c 200 "$T/err"))"; fi
 }
+# permission_mode is present but not a usable mode: the session's limit would be lost, so the call is blocked.
+blocked blocks-an-empty-permission_mode "{\"permission_mode\":\"\",\"tool_input\":$FORGED}"
+for value in null 7 0 1.5 true false '{"mode":"auto"}' '["auto"]'; do
+  blocked "blocks-when-permission_mode-is-$(printf '%s' "$value" | tr -c 'A-Za-z0-9' '_')" "{\"permission_mode\":$value,\"tool_input\":$FORGED}"
+done
+run_hook "{\"permission_mode\":null,\"tool_input\":$FORGED}"
+if grep -q 'permission_mode is empty or not text' "$T/err"; then ok names-permission_mode-in-the-reason; else bad "names-permission_mode-in-the-reason (err: $(head -c 200 "$T/err"))"; fi
+
 blocked blocks-empty-input ''
 blocked blocks-text-that-is-not-json 'this is not JSON'
 blocked blocks-a-json-array '[1,2]'

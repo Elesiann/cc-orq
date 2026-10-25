@@ -9,7 +9,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session-mode-hook.sh\"",
-            "timeout": 5
+            "timeout": 30
           }
         ]
       }

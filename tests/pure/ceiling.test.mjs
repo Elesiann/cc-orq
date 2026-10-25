@@ -323,7 +323,7 @@ test('hooks.json runs the session-mode hook before delegate, answer and capabili
   assert.equal(entry.matcher, 'mcp__plugin_cc-orq_orq__(delegate|answer|capabilities)')
   assert.deepEqual(entry.hooks.map((hook) => hook.type), ['command'])
   assert.equal(entry.hooks[0].command, 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/session-mode-hook.sh"')
-  assert.ok(entry.hooks[0].timeout <= 10)
+  assert.equal(entry.hooks[0].timeout, 30, 'a hook that times out does not block the call, so the timeout is long enough for the largest input a tool takes')
   const matcher = new RegExp(`^(?:${entry.matcher})$`)
   for (const tool of ['delegate', 'answer', 'capabilities']) assert.ok(matcher.test(`mcp__plugin_cc-orq_orq__${tool}`), tool)
   for (const tool of ['status', 'list', 'cancel', 'integrate']) assert.equal(matcher.test(`mcp__plugin_cc-orq_orq__${tool}`), false, tool)
