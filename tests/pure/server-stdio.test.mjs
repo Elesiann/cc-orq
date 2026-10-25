@@ -1587,7 +1587,8 @@ test('no module the server loads writes to stdout, apart from the transport of t
 const OLD_PREFIX = ['mcp', 'cc-orq', ''].join('__')
 
 test('no text that names a tool uses the old prefix, except for the wait tool the mod still serves', (t) => {
-  const found = spawnSync('git', ['grep', '-n', OLD_PREFIX, '--', '.', ':!CHANGELOG.md'], { cwd: REPO, encoding: 'utf8' })
+  // The live harness names the prefix to assert that no mod tool appears when mods are off.
+  const found = spawnSync('git', ['grep', '-n', OLD_PREFIX, '--', '.', ':!CHANGELOG.md', ':!tests/live'], { cwd: REPO, encoding: 'utf8' })
   if (found.status !== 0 && found.status !== 1) return t.skip('not inside a git checkout, so there are no tracked files to search')
   const stale = found.stdout.split('\n').filter((line) => line !== '' && line.replaceAll(`${OLD_PREFIX}wait`, '').includes(OLD_PREFIX))
   assert.deepEqual(stale, [])
