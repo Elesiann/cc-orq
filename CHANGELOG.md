@@ -9,13 +9,31 @@ All notable changes to cc-orq are recorded here. The format follows
 ### Added
 
 - A stdio MCP server, `plugin:cc-orq:orq`, that serves the tools `capabilities`,
-  `status`, `list`, `cancel` and `integrate`. They are there whether or not the
-  mod loads. The server sends its own instructions to the session. The MCP SDK
-  it runs on is bundled in `server/vendor/mcp-sdk.mjs`, so a user has no package
-  to install, and `NOTICE` carries the licenses of the packages in the bundle.
+  `delegate`, `status`, `list`, `cancel` and `integrate`. They are there whether
+  or not the mod loads. The server sends its own instructions to the session.
+  The MCP SDK it runs on is bundled in `server/vendor/mcp-sdk.mjs`, so a user has
+  no package to install, and `NOTICE` carries the licenses of the packages in
+  the bundle.
 - The tool `list`: the newest jobs first, whatever started them, with each
   job's status, instance, model, duration, working directory, branch and
   whether it ended on a question.
+- The tool `delegate` starts a job and answers `{"taskId", "status": "running"}`
+  at once. Its fields are the header of a `cc-orq:task` prompt, read by the same
+  parser, so a mistake gets the same message. It works in a worktree by default,
+  holds the request to the permission ceiling, and refuses what is above it with
+  the escalation code and what lifts the limit. Its job has kind `mcp`, the
+  session id as its `agentId` (or `mcp`), and `questions` in `meta.json`.
+  `questions: human` is refused for now, because it needs MCP tasks and forms.
+- The `ceiling` field of `~/.config/orq/config.json`: `runtime` (default
+  `auto-accept-edits`) limits a task in its own worktree, `sharedRuntime`
+  (default `approval-required`) limits a task with `isolation: shared`, and
+  `interaction` (default `default`) limits the interaction mode. A value that is
+  not valid counts as the narrowest mode, and `capabilities` reports it.
+- A `PreToolUse` hook, `scripts/session-mode-hook.sh`, gives `delegate` and
+  `capabilities` the session's permission mode as `sessionMode`, over any value
+  the model wrote there. It returns the changed input and never a permission
+  decision. It blocks the call when it has no `python3` or cannot read its
+  input, since an unread call could carry a mode the model forged.
 
 ### Changed
 
@@ -27,9 +45,19 @@ All notable changes to cc-orq are recorded here. The format follows
 - **Breaking:** Node 22.18 or newer must be on the `PATH`. The server writes
   `the orq server needs Node 22.18 or newer` to stderr and exits when it is
   older; the `cc-orq:task` agent keeps working, without the server's tools.
-- `capabilities` answers `approval-required` and `default` as `runtimeMode` and
-  `interactionMode`, because the server does not know the permission mode of
-  the session. The mod used to read it.
+- **Breaking:** the `ceiling` of the configuration now limits `cc-orq:task`
+  too. By default a worker edits only inside its own worktree and a `shared`
+  worker only reads, so a session in `auto` or `bypassPermissions` mode no
+  longer gets workers in that mode. To give workers `auto` in an `auto`
+  session, set `"ceiling": {"runtime": "auto"}`.
+- A task refused for asking above its ceiling gets a message that names the
+  limit in the way and what lifts it: the `ceiling` field of the configuration,
+  the session's permission mode, or both.
+- `capabilities` answers the effective ceiling as `runtimeMode` and
+  `interactionMode`, the lower of the configuration's `ceiling` and the
+  session's permission mode, and adds `ceiling` (the configuration's limits, the
+  session's mode and each isolation's effective ceiling) and `client` (whether
+  the client declared MCP tasks and form input).
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
