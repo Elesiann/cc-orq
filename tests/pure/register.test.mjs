@@ -67,7 +67,7 @@ const GUIDANCE = [
   'end the turn',
   '`taskId <id>`',
   '`BLOCKED on a question`',
-  'a new `cc-orq:task` with the original brief plus the answer',
+  'answered with the `answer` tool',
   'a different model family',
 ]
 

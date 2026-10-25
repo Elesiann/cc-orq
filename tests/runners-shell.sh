@@ -79,6 +79,7 @@ cat > "$BIN/codex" <<'EOF'
 printf '%s\0' "$@" > "$ARGV_DUMP/codex.argv"
 pwd > "$ARGV_DUMP/codex.cwd"
 cat > "$ARGV_DUMP/codex.stdin"
+[ -n "$CODEX_THREAD" ] && printf '{"type":"thread.started","thread_id":"%s"}\n' "$CODEX_THREAD"
 exit 0
 EOF
 cat > "$BIN/opencode" <<'EOF'
@@ -89,6 +90,7 @@ pwd > "$ARGV_DUMP/opencode.cwd"
 [ -n "$OPENCODE_LEFTOVER" ] && leftover opencode
 [ -n "$OPENCODE_STRAGGLER" ] && straggler opencode
 [ -n "$OPENCODE_HOLD" ] && exec "$BIN/hold" opencode "$OPENCODE_HOLD" $OPENCODE_ENDS_ON
+[ -n "$OPENCODE_SESSION" ] && printf '{"type":"text","sessionID":"%s","part":{"type":"text","text":"FAKE-OPENCODE"}}\n' "$OPENCODE_SESSION"
 exit 0
 EOF
 cat > "$BIN/agy" <<'EOF'
@@ -142,6 +144,7 @@ run_job() {
   mkdir -p "$JOB"
   printf '%s' "$prompt" > "$JOB/prompt.txt"
   if [ "$#" -gt 0 ]; then printf '%s\n' "$@" > "$JOB/flags"; fi
+  if [ -n "${RESUME_ID:-}" ]; then printf '%s\n' "$RESUME_ID" > "$JOB/resume"; fi
   timeout 60 bash "$ROOT/scripts/supervise.sh" "$JOB" "$runner" "$T/work" "$model" "$effort" "$sandbox" > "$JOB/child.log" 2>&1
 }
 
@@ -236,6 +239,55 @@ run_job job-opencode opencode m2 '' '' 'do it via opencode' --agent plan
 expect_argv opencode-flags opencode run --standalone --format json -m m2 --agent plan -- 'do it via opencode'
 expect_file "$JOB/exit" 0 opencode-exit
 [ "$(cat "$DUMP/opencode.cwd")" = "$T/work" ] && ok opencode-cwd || bad opencode-cwd
+
+# The worker's session id goes in `session` before `exit`, for a later answer to resume. A stream without one leaves no file.
+run_job job-session-claude claude m '' '' 'hi'
+expect_file "$JOB/session" ses-fake claude-session-recorded
+run_job job-session-agy agy m '' '' 'hi'
+expect_file "$JOB/session" conv-fake agy-session-recorded
+CODEX_THREAD=01a17488-298f-7f61-93a2-40ca3e82ef45 run_job job-session-codex codex m '' '' 'hi'
+expect_file "$JOB/session" 01a17488-298f-7f61-93a2-40ca3e82ef45 codex-session-recorded
+OPENCODE_SESSION=ses_2f7c1d9e4b run_job job-session-opencode opencode m '' '' 'hi'
+expect_file "$JOB/session" ses_2f7c1d9e4b opencode-session-recorded
+run_job job-session-none codex m '' '' 'hi'
+[ ! -e "$JOB/session" ] && ok no-session-without-an-id || bad no-session-without-an-id
+expect_file "$JOB/child.log" '' resume-free-job-leaves-child-log-empty
+
+# A job with a `resume` file continues that session instead of starting a new one. Each runner's argv follows the
+# CLI's own resume form, the policy flags a launch writes stay as they are for every runner but Codex, whose
+# `exec resume` takes no -s, -C or --approve-for-me, and the supervisor says which argv it ran in child.log.
+SES=01a17488-298f-7f61-93a2-40ca3e82ef45
+RESUME_ID=$SES run_job job-resume-codex codex m1 '' '' 'the answer' -s workspace-write
+expect_argv codex-resume codex exec resume --json -o "$JOB/last.txt" -m m1 --skip-git-repo-check -c 'sandbox_mode="workspace-write"' "$SES" -
+expect_file "$DUMP/codex.stdin" 'the answer' codex-resume-stdin-prompt
+expect_file "$DUMP/codex.cwd" "$T/work" codex-resume-cwd
+expect_file "$JOB/exit" 0 codex-resume-exit
+expect_file "$JOB/session" "$SES" resume-keeps-the-session-when-the-stream-names-none
+grep -qF "orq: resume: codex exec resume --json -o $JOB/last.txt -m m1 --skip-git-repo-check -c sandbox_mode=\\\"workspace-write\\\" $SES -" "$JOB/child.log" && ok codex-resume-logged || bad "codex-resume-logged ($(cat "$JOB/child.log"))"
+RESUME_ID=$SES run_job job-resume-codex-read codex m1 '' '' 'x' -s read-only -c 'model_reasoning_effort=high'
+expect_argv codex-resume-read-only codex exec resume --json -o "$JOB/last.txt" -m m1 --skip-git-repo-check -c 'sandbox_mode="read-only"' -c 'model_reasoning_effort=high' "$SES" -
+RESUME_ID=$SES run_job job-resume-codex-auto codex m1 '' '' 'x' --approve-for-me
+expect_argv codex-resume-approve-for-me codex exec resume --json -o "$JOB/last.txt" -m m1 --skip-git-repo-check -c 'approval_policy="on-request"' -c 'approvals_reviewer="auto_review"' -c 'sandbox_mode="workspace-write"' "$SES" -
+RESUME_ID=$SES run_job job-resume-codex-full codex m1 '' '' 'x' -s danger-full-access --dangerously-bypass-approvals-and-sandbox
+expect_argv codex-resume-full-access codex exec resume --json -o "$JOB/last.txt" -m m1 --skip-git-repo-check -c 'sandbox_mode="danger-full-access"' --dangerously-bypass-approvals-and-sandbox "$SES" -
+RESUME_ID=ses_2f7c1d9e4b run_job job-resume-opencode opencode m2 '' '' 'the answer' --agent plan
+expect_argv opencode-resume opencode run --standalone --format json --session ses_2f7c1d9e4b -m m2 --agent plan -- 'the answer'
+expect_file "$DUMP/opencode.cwd" "$T/work" opencode-resume-cwd
+grep -qF 'orq: resume: opencode run --standalone --format json --session ses_2f7c1d9e4b -m m2 --agent plan -- <prompt.txt>' "$JOB/child.log" && ok opencode-resume-logged-without-the-prompt || bad "opencode-resume-logged-without-the-prompt ($(cat "$JOB/child.log"))"
+RESUME_ID=ses-9 run_job job-resume-claude claude m-claude '' '' 'the answer' --permission-mode acceptEdits
+expect_argv claude-resume claude -p --resume ses-9 --output-format stream-json --verbose --model m-claude --permission-mode acceptEdits -- 'the answer'
+expect_file "$DUMP/claude.cwd" "$T/work" claude-resume-cwd
+expect_file "$JOB/last.txt" FAKE-CLAUDE claude-resume-last
+grep -qF 'orq: resume: claude -p --resume ses-9 --output-format stream-json --verbose --model m-claude --permission-mode acceptEdits -- <prompt.txt>' "$JOB/child.log" && ok claude-resume-logged-without-the-prompt || bad "claude-resume-logged-without-the-prompt ($(cat "$JOB/child.log"))"
+RESUME_ID=conv-3 run_job job-resume-agy agy m '' '' 'the answer' --mode accept-edits
+expect_argv agy-resume agy --conversation conv-3 --output-format stream-json --model m --mode accept-edits --print 'the answer'
+expect_file "$JOB/last.txt" FAKE-AGY agy-resume-last
+RESUME_ID=ses-9 run_job job-resume-claude-bare claude '' '' '' 'x'
+expect_argv claude-resume-without-model-or-flags claude -p --resume ses-9 --output-format stream-json --verbose -- x
+rm -f "$DUMP/claude.argv"
+RESUME_ID='--dangerous' run_job job-resume-bad-id claude m '' '' 'x'
+expect_file "$JOB/exit" 4 resume-refuses-an-id-that-reads-as-an-option
+[ ! -e "$DUMP/claude.argv" ] && ok resume-bad-id-starts-no-cli || bad resume-bad-id-starts-no-cli
 
 # The job's marker is its ORQ_JOB_DIR. The timeout wrapper carries it too and is an ancestor of the supervisor.
 setsid sleep 300 </dev/null >/dev/null 2>&1 &
@@ -428,7 +480,7 @@ import json, re, sys, time
 root, jobs, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 pending = set(range(1, jobs + 1))
 good = {}
-reads = empty = malformed = 0
+reads = empty = malformed = nosession = 0
 deadline = time.monotonic() + 60
 while pending and time.monotonic() < deadline:
     for n in sorted(pending):
@@ -443,11 +495,16 @@ while pending and time.monotonic() < deadline:
         elif re.fullmatch(rb"\d+\n", data):
             good[n] = data
             pending.discard(n)
+            try:
+                if open(f"{root}/job-{n}/session", "rb").read() != b"conv-fake\n":
+                    nosession += 1
+            except OSError:
+                nosession += 1
         else:
             malformed += 1
 result = {"jobs": jobs, "reads": reads, "empty": empty, "malformed": malformed,
           "nonzero": sum(1 for d in good.values() if d != b"0\n"),
-          "missing": len(pending)}
+          "missing": len(pending), "nosession": nosession}
 with open(out, "w") as f:
     json.dump(result, f)
 PY
@@ -465,8 +522,8 @@ if burst=$(python3 - "$T/burst.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 line = f"exit-reads {d['jobs']} jobs, {d['reads']} reads, {d['empty']} empty"
-if d["empty"] or d["malformed"] or d["nonzero"] or d["missing"]:
-    print(f"{line}, {d['malformed']} malformed, {d['nonzero']} not 0, {d['missing']} missing")
+if d["empty"] or d["malformed"] or d["nonzero"] or d["missing"] or d["nosession"]:
+    print(f"{line}, {d['malformed']} malformed, {d['nonzero']} not 0, {d['missing']} missing, {d['nosession']} without a session when exit was read")
     raise SystemExit(1)
 print(line)
 PY
