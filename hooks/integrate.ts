@@ -1,13 +1,6 @@
-import type { EngineInterface, On } from 'claude-code'
-
-import { loadConfig } from './config.ts'
 import { readMeta, type CoreEngine } from './engine.ts'
 import {
-  INTEGRATE_DESCRIPTION,
-  INTEGRATE_INPUT_SCHEMA,
   INTEGRATE_STRATEGIES,
-  INTEGRATE_TOOL,
-  INTEGRATE_TOOL_NAME,
   type GitFailure,
   type IntegrateInput,
   type IntegrateStrategy,
@@ -103,30 +96,9 @@ export async function integrate($: CoreEngine, jobsDir: string, input: Integrate
   }
 }
 
-/**
- * The answer the model reads: the payload as one JSON string. A plugin tool answers with a string
- * result; an MCP-shaped object is read as invalid input by the model.
- */
-function answer(outcome: IntegrateOutcome) {
-  const payload = 'failure' in outcome ? { ok: false, error: outcome.failure } : { ok: true, ...outcome.integrated }
-  return { result: JSON.stringify(payload) }
-}
+/** What the model reads for one outcome: `{ ok: true, ... }` for a merge, `{ ok: false, error }` for a refusal. */
+export type IntegratePayload = ({ ok: true } & Integrated) | { ok: false; error: GitFailure }
 
-/** Declare the integrate tool; called from session.start, since a tool registers before the first prompt. */
-export async function declareIntegrateTool($: Pick<EngineInterface, 'tool'>): Promise<void> {
-  await $.tool.register({ name: INTEGRATE_TOOL, description: INTEGRATE_DESCRIPTION, inputSchema: INTEGRATE_INPUT_SCHEMA })
-}
-
-/** Serve mcp__cc-orq__integrate. */
-export function registerIntegrate(on: On): void {
-  on('tool.call', { tool: INTEGRATE_TOOL_NAME }, async ($, e) => {
-    try {
-      const parsed = parseIntegrateInput(e)
-      if ('failure' in parsed) return answer({ failure: parsed.failure })
-      const { config } = await loadConfig($)
-      return answer(await integrate($, config.jobsDir, parsed.input))
-    } catch (err) {
-      return { deny: `orq: ${INTEGRATE_TOOL_NAME} failed: ${String(err)}` }
-    }
-  })
+export function integratePayload(outcome: IntegrateOutcome): IntegratePayload {
+  return 'failure' in outcome ? { ok: false, error: outcome.failure } : { ok: true, ...outcome.integrated }
 }

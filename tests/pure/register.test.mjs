@@ -5,19 +5,19 @@ import { register } from '../../hooks/register.ts'
 function harness({ home = '/home/u', text = null, failEnv = false } = {}) {
   const handlers = {}
   const logs = []
+  const registered = []
   const on = (event, handler) => { handlers[event] = handler }
   register(on, {})
   const $ = {
     command: { register: async () => ({ command: 'orq' }) },
-    tool: { register: async () => ({ tool: 'mcp__cc-orq__wait' }) },
+    tool: { register: async (spec) => { registered.push(spec.name); return { tool: 'mcp__cc-orq__wait' } } },
     agent: { register: async () => ({ agent: 'cc-orq:task' }) },
     env: { get: async () => { if (failEnv) throw new Error('env down'); return home } },
     clock: { every: () => ({ cancel() {} }), now: async () => 0 },
     fs: { exists: async () => text !== null, read: async () => text, list: async () => [] },
-    tool: { register: async (spec) => ({ tool: `mcp__cc-orq__${spec.name}` }) },
     ui: { log: async (line, opts) => { logs.push([line, opts]) } },
   }
-  return { handlers, logs, $ }
+  return { handlers, logs, registered, $ }
 }
 
 test('session.start logs the loaded config and returns next(e)', async () => {
@@ -42,4 +42,10 @@ test('session.start still returns next(e) when loading throws', async () => {
   const result = await handlers['session.start']($, {}, async () => ({ cwd: '/w' }))
   assert.deepEqual(result, { cwd: '/w' })
   assert.match(logs[0][0], /^orq: session.start failed: Error: env down/)
+})
+
+test('session.start registers the wait tool and none of the tools the MCP server serves', async () => {
+  const { handlers, registered, $ } = harness()
+  await handlers['session.start']($, {}, async () => ({ cwd: '/w' }))
+  assert.deepEqual(registered, ['wait'])
 })

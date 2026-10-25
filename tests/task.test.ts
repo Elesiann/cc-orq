@@ -120,7 +120,7 @@ function stubs(on: any, s: State) {
   })
   on('tool.register', (_$: unknown, e: any) => {
     s.tools.push(e)
-    return { value: { tool: `mcp__cc-orq__${e.name}` } }
+    return { value: { tool: 'mcp__cc-orq__wait' } }
   })
   on('agent.register', (_$: unknown, e: any) => {
     s.agents.push(e)
@@ -238,7 +238,7 @@ test('session start registers the wait tool and the cc-orq:task agent, which run
   const s = fresh()
   stubs(on, s)
   await start($)
-  expect(s.tools.map((t) => t.name)).toEqual(['wait', 'integrate', 'capabilities', 'status', 'cancel'])
+  expect(s.tools.map((t) => t.name)).toEqual(['wait'])
   expect(s.agents.map((a) => a.name)).toEqual(['task'])
   expect(s.agents[0].tools).toEqual(['mcp__cc-orq__wait'])
   expect(s.agents[0].background).toBe(true)

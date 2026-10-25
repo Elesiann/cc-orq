@@ -7,21 +7,32 @@ import { ORCHESTRATION_INSTRUCTIONS } from '../../hooks/instructions.ts'
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const SCRIPT = `${ROOT}/scripts/session-start.sh`
-const runHook = (pluginRoot) =>
-  execFileSync('bash', [SCRIPT], { env: { ...process.env, CLAUDE_PLUGIN_ROOT: pluginRoot }, encoding: 'utf8' })
+// The variable is set or removed on purpose: the shell that runs the tests may carry it.
+const runHook = (pluginRoot, hooks) => {
+  const env = { ...process.env, CLAUDE_PLUGIN_ROOT: pluginRoot }
+  if (hooks === undefined) delete env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS
+  else env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS = hooks
+  return execFileSync('bash', [SCRIPT], { env, encoding: 'utf8' })
+}
 
 test('instructions.md is the orchestration instructions constant, byte for byte', () => {
   assert.equal(readFileSync(`${ROOT}/instructions.md`, 'utf8'), ORCHESTRATION_INSTRUCTIONS)
 })
 
-test('the session-start script prints valid JSON whose additionalContext is the instructions', () => {
-  const parsed = JSON.parse(runHook(ROOT))
+test('with function hooks on, the session-start script prints valid JSON whose additionalContext is the instructions', () => {
+  const parsed = JSON.parse(runHook(ROOT, '1'))
   assert.equal(parsed.hookSpecificOutput.hookEventName, 'SessionStart')
   assert.equal(parsed.hookSpecificOutput.additionalContext, ORCHESTRATION_INSTRUCTIONS)
 })
 
+test('without function hooks, the session-start script prints nothing: the snippet teaches an agent that does not exist then', () => {
+  for (const hooks of [undefined, '', '0', 'false']) {
+    assert.equal(runHook(ROOT, hooks), '', `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=${JSON.stringify(hooks)}`)
+  }
+})
+
 test('the session-start script prints nothing when instructions.md is missing', () => {
-  assert.equal(runHook(`${ROOT}/no-such-plugin-root`), '')
+  assert.equal(runHook(`${ROOT}/no-such-plugin-root`, '1'), '')
 })
 
 test('hooks/hooks.json runs the session-start script on SessionStart', () => {
