@@ -98,3 +98,15 @@ test('an empty sessionDir leaves only the allowed roots, and none when there are
     refusal: `${REFUSED}: cwd_out_of_scope: cwd ${join(root, 'session')} is outside the session directory and the allowed roots (none).`,
   })
 }))
+
+test('an allowedRoots entry that does not exist is left out of the roots and admits nothing', inRealTree(async (root) => {
+  makeDirs(root, 'session', 'elsewhere')
+  const config = { ...defaultConfig(root), allowedRoots: [join(root, 'not-there')] }
+  const engine = nodeEngine()
+  const inSession = await scopedCwd(engine, config, join(root, 'session'), join(root, 'session'))
+  assert.deepEqual(inSession, { cwd: join(root, 'session'), roots: [join(root, 'session')] })
+  const refused = await scopedCwd(engine, config, join(root, 'session'), join(root, 'elsewhere'))
+  assert.deepEqual(refused, {
+    refusal: `${REFUSED}: cwd_out_of_scope: cwd ${join(root, 'elsewhere')} is outside the session directory and the allowed roots (${join(root, 'session')}).`,
+  })
+}))

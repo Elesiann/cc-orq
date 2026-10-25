@@ -255,8 +255,15 @@ function mkdirScript(jobsDir: string, dir: string): string {
 }
 
 /**
+ * Stands in for `setsid` where the binary is missing, as on macOS. Python starts with SIGPIPE and SIGXFSZ
+ * ignored, and an exec keeps an ignored signal ignored, so both go back to their defaults before the exec.
+ */
+const PYTHON_SETSID =
+  'import os, signal, sys; signal.signal(signal.SIGPIPE, signal.SIG_DFL); signal.signal(signal.SIGXFSZ, signal.SIG_DFL); os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])'
+
+/**
  * Start script for one job. The instance env is passed as --setenv for the
- * systemd unit and as `env K=V` for the setsid fallback, so both reach the CLI.
+ * systemd unit and as `env K=V` for the setsid launchers, so both reach the CLI.
  */
 export function startScript(args: {
   id: string
@@ -273,14 +280,17 @@ export function startScript(args: {
   const pairs = Object.entries(env).map(([k, v]) => shellWord(`${k}=${v}`))
   const setenv = pairs.map((pair) => `--setenv=${pair}`).join(' ')
   const envAssign = pairs.join(' ')
+  const scope = shellWord(`${args.dir}/scope`)
   // A job in the caller's cgroup dies with the terminal or session that launched it; a transient user
   // unit gets its own, and stopping it also reaps children that escaped the process group. setsid is
   // the fallback when no user manager is reachable.
   return (
     `# orq:start\n` +
     `if systemd-run --user --quiet --collect --unit=${shellWord(`orq-${args.id}`)} --setenv=PATH="$PATH" --setenv=HOME="$HOME" ${setenv} ` +
-    `bash -c ${shellWord(`exec ${supervisorCmd}`)} 2>/dev/null; then echo systemd > ${shellWord(`${args.dir}/scope`)}; ` +
-    `else echo setsid > ${shellWord(`${args.dir}/scope`)}; setsid env ${envAssign} ${supervisorCmd} & fi\n` +
+    `bash -c ${shellWord(`exec ${supervisorCmd}`)} 2>/dev/null; then echo systemd > ${scope}\n` +
+    `elif command -v setsid >/dev/null 2>&1; then echo setsid > ${scope}; setsid env ${envAssign} ${supervisorCmd} &\n` +
+    `else echo python-setsid > ${scope}; python3 -I -c ${shellWord(PYTHON_SETSID)} env ${envAssign} ${supervisorCmd} &\n` +
+    `fi\n` +
     `for i in $(seq 1 10); do [ -s ${shellWord(`${args.dir}/pgid`)} ] && exit 0; sleep 0.5; done\n` +
     `exit 11`
   )

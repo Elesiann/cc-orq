@@ -35,6 +35,7 @@ import {
   type TaskLaunchSpec,
 } from '../hooks/engine.ts'
 import { renderTail } from '../hooks/event-line.ts'
+import { LAUNCH_GRACE_MS } from '../hooks/lock.ts'
 import { interactionModeRank, runtimeModeRank } from '../hooks/target.ts'
 import { TASK_REFUSAL, formatDuration, isRecord, isSafeJobId, type JobRecord } from '../hooks/types.ts'
 import {
@@ -190,6 +191,24 @@ async function newest($: CoreEngine, paths: string[], floor: string): Promise<st
   return iso(Math.max(Date.parse(floor), ...times))
 }
 
+type Starting = { status: 'starting'; endedAt: null }
+
+/**
+ * A launch writes meta.json and the supervisor writes its pid a moment later. The age of the meta file is the clock,
+ * and not startedAt, which a slow worktree copy puts long before.
+ */
+async function isStarting($: CoreEngine, job: JobRecord): Promise<boolean> {
+  const pgid = await $.fs.read(`${job.dir}/pgid`).then((text) => text.trim(), () => '')
+  if (/^\d+$/.test(pgid)) return false
+  const written = await $.fs.stat(`${job.dir}/meta.json`).then((info) => info.mtimeMs, () => null)
+  return written !== null && (await $.clock.now()) - written < LAUNCH_GRACE_MS
+}
+
+async function viewOf($: CoreEngine, job: JobRecord): Promise<JobView | Starting> {
+  const view = await jobView($, job)
+  return view.status === 'interrupted' && (await isStarting($, job)) ? { status: 'starting', endedAt: null } : view
+}
+
 async function lastAction($: CoreEngine, dir: string): Promise<string> {
   try {
     const tail = await $.process.run(['tail', '-c', String(EVENTS_TAIL_BYTES), `${dir}/events.jsonl`], { timeoutMs: 15000 })
@@ -273,7 +292,10 @@ function approvalRequest(approval: Approval): InputRequest {
   }
 }
 
-async function finishedTask($: CoreEngine, config: OrqConfig, job: JobRecord, view: JobView, base: { createdAt: string; lastUpdatedAt: string }): Promise<DetailedTask> {
+async function finishedTask($: CoreEngine, config: OrqConfig, job: JobRecord, view: JobView | Starting, base: { createdAt: string; lastUpdatedAt: string }): Promise<DetailedTask> {
+  if (view.status === 'starting') {
+    return { ...base, status: 'working', statusMessage: `${whoIs(job)} · starting · ${formatDuration((await $.clock.now()) - job.startedAt)}` }
+  }
   if (view.status === 'running' || view.status === 'cancelling' || view.status === 'waiting') {
     return { ...base, status: 'working', statusMessage: `${whoIs(job)} · ${await lastAction($, job.dir)} · ${formatDuration((await $.clock.now()) - job.startedAt)}` }
   }
@@ -291,18 +313,18 @@ async function finishedTask($: CoreEngine, config: OrqConfig, job: JobRecord, vi
 }
 
 /** The job that a human task stands at: the first job, or the last one that an answer from the form started. */
-async function walkForms($: CoreEngine, config: OrqConfig, first: JobRecord): Promise<{ job: JobRecord; view: JobView } | { starting: true }> {
+async function walkForms($: CoreEngine, config: OrqConfig, first: JobRecord): Promise<{ job: JobRecord; view: JobView | Starting } | { resuming: true }> {
   let job = first
   for (let hops = 0; hops < 64; hops += 1) {
-    const view = await jobView($, job)
+    const view = await viewOf($, job)
     if (view.status !== 'done' || view.question === null) return { job, view }
     const next = await readNext($, job)
     if (next === null || next.via !== 'form') return { job, view }
     const following = await readMeta($, config.jobsDir, next.jobId)
-    if (following === null) return { starting: true }
+    if (following === null) return { resuming: true }
     job = following
   }
-  return { job, view: await jobView($, job) }
+  return { job, view: await viewOf($, job) }
 }
 
 /** The worker's question stays a form until it is declined, the task is cancelled, 24 hours pass, or it has no session to resume. */
@@ -375,7 +397,7 @@ async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise
   if (loaded.kind === 'job') {
     const { job } = loaded
     const base = { createdAt: job.startedAtIso, lastUpdatedAt: await newest($, jobPaths(job), job.startedAtIso) }
-    return finishedTask($, config, job, await jobView($, job), base)
+    return finishedTask($, config, job, await viewOf($, job), base)
   }
   const { record, dir, names } = loaded
   const stage = await stageOf($, config, loaded)
@@ -398,9 +420,9 @@ async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise
         inputRequests: { [APPROVE]: approvalRequest(stage.approval) },
       }
     case 'job': {
-      if (record.questions !== 'human') return finishedTask($, config, stage.job, await jobView($, stage.job), base)
+      if (record.questions !== 'human') return finishedTask($, config, stage.job, await viewOf($, stage.job), base)
       const walked = await walkForms($, config, stage.job)
-      if ('starting' in walked) return { ...base, status: 'working', statusMessage: 'resuming with your answer' }
+      if ('resuming' in walked) return { ...base, status: 'working', statusMessage: 'resuming with your answer' }
       const { job: tip, view } = walked
       const here = { ...base, lastUpdatedAt: await newest($, [...touched, ...jobPaths(tip)], record.createdAt) }
       if (view.status === 'done' && view.question !== null && (await formIsOpen($, tip, view))) {
@@ -736,7 +758,7 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     const stage = await stageOf($, config, loaded)
     if (stage.kind !== 'job') return
     const walked = await walkForms($, config, stage.job)
-    if ('starting' in walked || walked.job.id !== jobId || walked.view.status !== 'done' || walked.view.question === null) return
+    if ('resuming' in walked || walked.job.id !== jobId || walked.view.status !== 'done' || walked.view.question === null) return
     const tip = walked.job
     if (!(await formIsOpen($, tip, walked.view))) return
     const close = async (why: string): Promise<void> => $.fs.write(`${tip.dir}/declined`, `${iso(await $.clock.now())} ${why}\n`)
@@ -804,11 +826,14 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
       const first = loaded.kind === 'job' ? loaded.job : await readMeta($, config.jobsDir, taskId)
       if (first !== null) {
         const human = loaded.kind === 'task' && loaded.record.questions === 'human'
-        const walked = human ? await walkForms($, config, first) : { job: first, view: await jobView($, first) }
-        if ('starting' in walked) return
-        const status = taskStatusOf(walked.view)
-        if (status === 'running' || status === 'waiting') await writeCancel($, walked.job)
-        else if (human && walked.view.status === 'done' && walked.view.question !== null && (await formIsOpen($, walked.job, walked.view))) {
+        const walked = human ? await walkForms($, config, first) : { job: first, view: await viewOf($, first) }
+        if ('resuming' in walked) {
+          if (loaded.kind === 'task') await $.fs.write(`${loaded.dir}/cancelled`, `${iso(await $.clock.now())}\n`)
+          return
+        }
+        const { job: tip, view } = walked
+        if (view.status === 'starting' || ['running', 'waiting'].includes(taskStatusOf(view))) await writeCancel($, tip)
+        else if (human && view.status === 'done' && view.question !== null && (await formIsOpen($, tip, view))) {
           await $.fs.write(`${loaded.dir}/cancelled`, `${iso(await $.clock.now())}\n`)
         }
         return

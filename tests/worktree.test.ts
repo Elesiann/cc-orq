@@ -399,6 +399,6 @@ test('list reads a job whose worktree fields are malformed and shows it under it
   await start($)
   const rows = (await orq($, 'list')).split('\n')
   expect(rows.map((row) => row.split(/\s+/)[0])).toEqual(['id', 'job-tree', 'job-odd'])
-  expect(rows[2]?.split(/\s+/)[4]).toBe(SESSION)
-  expect(rows[1]?.split(/\s+/)[4]).toBe(`${CHECKOUT}-wt/job-tree`)
+  expect(rows[2]?.split(/\s+/)[5]).toBe(SESSION)
+  expect(rows[1]?.split(/\s+/)[5]).toBe(`${CHECKOUT}-wt/job-tree`)
 })

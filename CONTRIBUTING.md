@@ -36,11 +36,43 @@ bash tests/question-shell.sh   # the child question protocol
 bash tests/worktree-include-shell.sh  # .worktreeinclude copies into task worktrees
 bash tests/allowlist-shell.sh  # only allowed paths are tracked
 bash tests/lock-shell.sh       # the checkout lock with real processes
+node tests/conformance/run.mjs # the tasks scenarios of the MCP conformance suite
 ```
 
 CI runs `npm ci`, the vendor check, `npm test`, the six shell suites, and
-`shellcheck` on the live harness scripts. The other checks need a logged-in
-Claude Code CLI, so run them locally.
+`shellcheck` on the live harness scripts, and in a job of its own the conformance
+suite. The other checks need a logged-in Claude Code CLI, so run them locally.
+
+## Conformance suite
+
+`tests/conformance/` holds a test-only HTTP entry: the SDK's `createMcpHandler`
+on `node:http`, over the seven fixtures that the tasks scenarios of the
+[MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
+call (`greet`, `slow_compute`, `failing_job`, `protocol_error_job`,
+`confirm_delete`, `multi_input` and `test_tool_with_task`). The tools that create
+tasks answer through `server/protocol.ts`, the layer that `delegate` uses, so the
+suite tests what that layer puts on the wire. The product serves stdio only.
+
+```bash
+node tests/conformance/run.mjs                          # the ten tasks scenarios
+node tests/conformance/run.mjs tasks-lifecycle          # one, by name
+node tests/conformance/run.mjs --out /tmp/conformance   # keep every checks.json
+```
+
+The runner starts the entry in its own process, runs `server --url URL --scenario
+NAME` once per scenario, and gates on each exit code. It does not use
+`--requirements 2026-07-28`: that run includes the ten tasks scenarios, but lists
+them under "Not scored" with the note "These do not affect conformance". A
+scenario also fails when it passes no check or skips one, except
+`tasks-status-notifications`, which the suite skips itself: its harness still
+reads the SSE of `tools/call` where the spec has `subscriptions/listen`. The run
+needs the network and no login.
+
+By default the runner fetches the published suite with `npx`. CI runs the commit
+that the scenarios were read at instead: set `CONFORMANCE_CMD` to the command that
+starts the suite, as words split on spaces, such as a checkout run with `tsx`.
+Each scenario's `checks.json` lands under `--out`, and CI uploads that folder as
+the `conformance-results` artifact.
 
 ## Live harness
 

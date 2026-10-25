@@ -85,7 +85,7 @@ The answer of a `cc-orq:task` comes back to the conversation when the task ends.
 | --- | --- | --- |
 | [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
 | [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `delegate`, `answer`, `status`, `list`, `cancel` and `integrate` are gone |
-| Linux | | Jobs run under `systemd-run` or `setsid` |
+| Linux or macOS | | Linux is the supported platform. macOS is experimental; see [macOS](#macos-experimental). Jobs run under `systemd-run` or `setsid`, or under `python3` where there is neither |
 | `bash`, `python3`, `git`, `pgrep` | | The supervisor, the event extractor, worktrees, and the hook that reads the session's permission mode. `pgrep` comes from procps; the supervisor uses it to find its watcher's `sleep`. Without it the sweep ends that `sleep` and `child.log` gets a line saying so |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
 | [OpenCode](https://github.com/sst/opencode) | 2.0.27 (tested) | orq passes `--standalone` to `opencode run` and `opencode models`, so the flag is required. Earlier versions were not tried. See [OpenCode notes](#opencode-notes) |
@@ -104,8 +104,22 @@ with `CLAUDE_AUTO_BACKGROUND_TASKS=1`, and says the VS Code extension and the
 desktop app have no MCP tasks; those are not tested here. Any other call gets the
 job's id and no task: see [`delegate`](#mcp__plugin_cc-orq_orq__delegate).
 
-macOS is not supported yet: the job start script needs `systemd-run` or
-`setsid` to give each job its own session, and macOS has neither by default.
+### macOS (experimental)
+
+macOS is experimental and tested only in CI. The test suites run on
+`macos-latest` with fake workers, and nobody has run a job there with a real
+provider CLI.
+
+macOS has neither `systemd-run` nor `setsid`, so the start script runs the
+supervisor through `python3`, which calls `os.setsid()` and then `exec`. The
+job's `scope` file says `python-setsid`. The supervisor runs under the `bash`
+3.2 that macOS ships.
+
+What does not work on macOS:
+
+- The sweep. It reads `/proc`, which macOS does not have, so it ends nothing.
+  A cancel still ends the job's process group, but a process that a CLI left
+  outside the group keeps running.
 
 ## Install
 
@@ -160,8 +174,8 @@ answer, and `cancel` and `launch` print one line.
 
 ### `/orq list`
 
-Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed` and `cwd`.
-Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
+Shows the 50 newest jobs with their `id`, `kind`, `status`, `elapsed`, `origin` and
+`cwd`. Status is `running`, `cancelling`, `waiting`, `interrupted`, `done`, `failed` or
 `cancelled`. A `waiting` job has a non-blank `question.txt`, its supervisor is still
 running, and it waits for an answer (see [Child questions](#child-questions)). An `interrupted` job has no `exit` file and no
 live supervisor. A finished job keeps the elapsed time it had when its `exit` file
@@ -169,6 +183,22 @@ was written.
 
 ```
 /orq list
+```
+
+The `origin` column says where a job came from. A job that continues another one
+records that job's id as `parent` in its `meta.json`, and its origin is `↳`
+followed by that id. Any other job shows `delegate` when the `delegate` tool started
+it (kind `mcp`), `agent` when the `cc-orq:task` agent did (kind `task`), and
+`manual` otherwise, which includes `/orq launch`. A `parent` that is not a safe job
+id is ignored, and the job shows the origin of its kind. Here is a list with a
+continuation, the delegate job it continues, an agent job and a manual job:
+
+```
+id                                  kind    status   elapsed  origin                               cwd
+mcp-1760000300000-3f9a2c1d-r7s1b4   mcp     running  40s      ↳ mcp-1760000100000-3f9a2c1d-k3j9x2  /home/me/repo
+mcp-1760000100000-3f9a2c1d-k3j9x2   mcp     done     2m       delegate                             /home/me/repo
+task-1760000000000-a1b2c3d4-q9w8e7  task    done     6m       agent                                /home/me/repo
+manual-1759999000000-manual-z5x4c3  manual  failed   12m05s   manual                               /home/me/repo
 ```
 
 ### `/orq result JOB_ID`
@@ -1202,7 +1232,8 @@ the end of the session as the card's does.
 - A running or waiting job has a `cancel` button. It asks the supervisor to stop
   the job, as `/orq cancel` does.
 - Pressing a job's row selects it. The pane then shows the last 30 rendered lines
-  of that job's `events.jsonl`, read from its last 32 KB.
+  of that job's `events.jsonl`, read from its last 32 KB. For a continuation, a line
+  under the job's id names the job it continues: `↳ continues PARENT_ID`.
 - `show <id>` selects a job and opens the pane. `cancel <id>` cancels a running
   or waiting job without opening the pane.
 
@@ -1293,7 +1324,7 @@ for both the kind and the agent suffix, for example
 | --- | --- | --- |
 | `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` or `answer` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`; a continuation adds `parent`, the job whose question it answers. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
-| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
+| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable, `python-setsid` when there is no `setsid` either, as on macOS. |
 | `child.log` | start script | The supervisor's own stdout and stderr. It is empty for a job that ended without leftovers. A line says that the sweep ended processes the CLI left behind, or that OpenCode did not end on SIGINT. |
 | `pgid` | `supervise.sh` | The supervisor's pid. The supervisor leads its process group, so this is also the group id. |
 | `cli.pid` | `supervise.sh` | An OpenCode job only: the pid of the OpenCode client, which a cancel sends SIGINT to. |
@@ -1412,7 +1443,8 @@ flowchart LR
    subagent: the mod answers each of its steps itself.
 3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
    task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
-   detached under `systemd-run` or `setsid`. The supervisor runs the provider
+   detached under `systemd-run`, `setsid`, or `python3` where there is no
+   `setsid`. The supervisor runs the provider
    CLI, writes its events and final message, and ends the process group when
    a `cancel` file appears, in the order that `/orq cancel` describes. An
    OpenCode job passes `--standalone`, so it runs on a private OpenCode server
@@ -1442,6 +1474,16 @@ in `scripts/session-mode-hook.sh`, which `hooks/hooks.json` runs before
 `hooks/card.ts` and `hooks/panel.ts` draw the card and the pane from the job
 directories.
 
+`server/protocol.ts` is also tested without any job. `tests/conformance/` serves
+the fixtures of the MCP conformance suite over HTTP through it, and CI runs the
+suite's ten tasks scenarios by name: nine pass (`tasks-lifecycle`,
+`tasks-capability-negotiation`, `tasks-wire-fields`,
+`tasks-request-state-removal`, `tasks-mrtr-input`, `tasks-request-headers`,
+`tasks-dispatch-and-envelope`, `tasks-required-task-error` and
+`tasks-mrtr-composition`), and the suite skips `tasks-status-notifications`
+itself. The product serves stdio only; see [CONTRIBUTING.md](CONTRIBUTING.md) to
+run it.
+
 ## Troubleshooting
 
 | You see | Do this |
@@ -1466,7 +1508,7 @@ directories.
 
 ## Known limitations
 
-- Linux only. macOS has neither `systemd-run` nor `setsid` by default.
+- macOS is experimental and tested only in CI. See [macOS](#macos-experimental).
 - Only a question can resume a worker: `answer` continues the session of a job
   that stopped on one. A review round, or any other follow-up, is a new task that
   carries the earlier brief. A worker below `auto` cannot write its question to

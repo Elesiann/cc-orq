@@ -143,6 +143,22 @@ All notable changes to cc-orq are recorded here. The format follows
 - `status` names the job that a continuation answers (`parent`) and the job that
   took a question over (`next`). `list` fills `parent`, and its `question` is
   true only while nobody has answered.
+- A conformance job for the task layer. `tests/conformance/` serves the seven
+  fixtures of the MCP conformance suite (`greet`, `slow_compute`, `failing_job`,
+  `protocol_error_job`, `confirm_delete`, `multi_input` and `test_tool_with_task`)
+  over a test-only HTTP entry, through `server/protocol.ts`, and CI runs each of
+  the suite's ten tasks scenarios by name, at commit c37eec8. Nine pass, with
+  44 checks, and `tasks-status-notifications` is skipped by the suite itself,
+  because its harness reads the SSE of `tools/call` where the spec has
+  `subscriptions/listen`. `--requirements 2026-07-28` is not the gate, since it
+  lists these scenarios as `not_scored`. The product still serves stdio only.
+
+- macOS, experimental. CI runs the test suites on `macos-latest` as well as
+  `ubuntu-latest`. Where `setsid` is missing, as on macOS, the start script runs
+  the supervisor through `python3` with `os.setsid()`, and the job's `scope`
+  file says `python-setsid`. The supervisor runs under bash 3.2. The sweep
+  needs `/proc`, so it ends nothing on macOS, and a cancel still ends the
+  process group. Nobody has run a job with a real CLI there.
 
 ### Changed
 
@@ -180,6 +196,10 @@ All notable changes to cc-orq are recorded here. The format follows
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
+- The working-directory check resolves a path with `fs.stat` instead of the
+  GNU-only `realpath -e` and `-m`. An `allowedRoots` entry that does not exist
+  is no longer listed among the roots of a refusal. It admitted nothing before
+  either.
 - A cancel no longer waits out the 5 seconds when the CLI ends sooner. Once the
   CLI has ended and its leftovers are swept, the supervisor writes `exit` 124
   and sends SIGKILL to the process group. A process in the group that needs
@@ -190,6 +210,12 @@ All notable changes to cc-orq are recorded here. The format follows
   run programs in any later git command there, `integrate` and your own `git`
   commands included, so untrusted workers belong in modes that cannot write
   outside their worktree.
+- `/orq list` has an `origin` column between `elapsed` and `cwd`, so `cwd` is now
+  the sixth column. A job that continues another one, and records that job's id
+  as `parent` in its `meta.json`, shows `↳` and that id. Any other job shows
+  `delegate` (kind `mcp`), `agent` (kind `task`) or `manual`. A `parent` that is
+  not a safe job id is ignored. In `/orq-panel`, the detail of a selected
+  continuation names its parent on a line under the job's id.
 
 ### Fixed
 
