@@ -44,18 +44,22 @@ Claude Code CLI, so run them locally.
 ## Live harness
 
 `tests/live` runs the plugin in real, nested Claude Code sessions: the MCP
-server and two of its tools, the mod's extra tool and agent type, and one
-interactive tmux round. It needs a logged-in `claude` CLI, `tmux`, `jq` and
-`git`, and it never runs in CI.
+server and the `capabilities` and `list` tools, the mod's extra tool and agent
+type, and one interactive tmux round. It needs a logged-in `claude` CLI,
+`tmux`, `jq`, `git`, and `timeout` and `find`, and it never runs in CI.
 
 ```bash
 bash tests/live/run.sh smoke
 bash tests/live/run.sh smoke-mods
+bash tests/live/check.sh       # the harness's own checks, no login needed
 ```
 
-Receipts land in `.live-evidence/SCENARIO/` by default, or under
-`ORQ_EVIDENCE_DIR`. See `tests/live/README.md` for the details and for how to
-add a scenario.
+The nested session runs without your hooks, your global `CLAUDE.md` and your
+claude.ai connectors, and in a mode that asks before a tool call, never in auto
+mode. Receipts land in `.live-evidence/SCENARIO/` by default, or under
+`ORQ_EVIDENCE_DIR`, and hold the raw output of your machine, so read them
+before you attach them anywhere. See `tests/live/README.md` for the details and
+for how to add a scenario.
 
 ## Rules
 
