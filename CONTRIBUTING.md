@@ -37,8 +37,25 @@ bash tests/worktree-include-shell.sh  # .worktreeinclude copies into task worktr
 bash tests/allowlist-shell.sh  # only allowed paths are tracked
 ```
 
-CI runs `npm ci`, the vendor check, `npm test` and the five shell suites. The
-other checks need a logged-in Claude Code CLI, so run them locally.
+CI runs `npm ci`, the vendor check, `npm test`, the five shell suites, and
+`shellcheck` on the live harness scripts. The other checks need a logged-in
+Claude Code CLI, so run them locally.
+
+## Live harness
+
+`tests/live` runs the plugin in real, nested Claude Code sessions: the MCP
+server and two of its tools, the mod's extra tool and agent type, and one
+interactive tmux round. It needs a logged-in `claude` CLI, `tmux`, `jq` and
+`git`, and it never runs in CI.
+
+```bash
+bash tests/live/run.sh smoke
+bash tests/live/run.sh smoke-mods
+```
+
+Receipts land in `.live-evidence/SCENARIO/` by default, or under
+`ORQ_EVIDENCE_DIR`. See `tests/live/README.md` for the details and for how to
+add a scenario.
 
 ## Rules
 
