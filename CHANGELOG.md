@@ -6,6 +6,34 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A stdio MCP server, `plugin:cc-orq:orq`, that serves the tools `capabilities`,
+  `status`, `list`, `cancel` and `integrate`. They are there in a session
+  without function hooks too. The server sends its own instructions to the
+  session. The MCP SDK it runs on is bundled in `server/vendor/mcp-sdk.mjs`, so
+  a user has no package to install, and `NOTICE` carries the licenses of the
+  packages in the bundle.
+- The tool `list`: the newest jobs first, whatever started them, with each
+  job's status, instance, model, duration, working directory, branch and
+  whether it ended on a question.
+
+### Changed
+
+- **Breaking:** `capabilities`, `status`, `cancel` and `integrate` are now the
+  tools `mcp__plugin_cc-orq_orq__capabilities`, `mcp__plugin_cc-orq_orq__status`,
+  `mcp__plugin_cc-orq_orq__cancel` and `mcp__plugin_cc-orq_orq__integrate`. Allow
+  rules for the old `mcp__cc-orq__*` names stop applying. `mcp__cc-orq__wait`
+  keeps its name.
+- **Breaking:** Node 22.18 or newer must be on the `PATH`. The server writes
+  `the orq server needs Node 22.18 or newer` to stderr and exits when it is
+  older, and `/mcp` shows the failure.
+- `capabilities` answers `approval-required` and `default` as `runtimeMode` and
+  `interactionMode`, because the server does not know the permission mode of
+  the session. The mod used to read it.
+- The `SessionStart` hook prints the orchestration instructions for the
+  `cc-orq:task` agent only when `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is `1`.
+
 ### Fixed
 
 - A finished job could show as failed in the task card or the `/orq-panel`
