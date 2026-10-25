@@ -466,6 +466,24 @@ test('a form answer is held to the ceiling again: a session mode that was lowere
   assert.deepEqual(jobDirs(s), [id])
 })
 
+test('a continuation whose supervisor has not written its pid yet keeps the human task working, and a cancel then writes its own cancel file', async (t) => {
+  const s = scene({ bin: { claude: QUESTION_WORKER } })
+  t.after(() => s.cleanup())
+  const { session, repo } = checkout(s)
+  const server = s.startIn(session)
+  const { task } = await server.call('delegate', REQUEST(repo, { questions: 'human', sessionMode: 'acceptEdits' }), WITH_FORMS)
+  const id = task.taskId
+  await until(server, id, ['working'])
+  writeFileSync(join(s.jobsDir, id, 'next'), JSON.stringify({ jobId: 'job-cont', via: 'form' }))
+  job(s.jobsDir, 'job-cont', { meta: { kind: 'mcp', parent: id, questions: 'human' } })
+
+  const starting = await server.get(id)
+  assert.equal(starting.status, 'working', 'a job between its meta.json and its pid is starting, not lost')
+  assert.match(starting.statusMessage, /starting/)
+  await server.cancel(id)
+  assert.equal(existsSync(join(s.jobsDir, 'job-cont', 'cancel')), true, 'the cancel reaches the job the task stands at')
+})
+
 test('a client without tasks gets the id of the continuation at once and reads it with status', async (t) => {
   const s = scene({ bin: { claude: QUESTION_WORKER } })
   t.after(() => s.cleanup())
