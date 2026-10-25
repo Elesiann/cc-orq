@@ -448,18 +448,24 @@ its last 20 lines:
 ```
 
 `git merge --abort` puts back what the merge changed, but not a file that a hook
-made. After an abort, `integrate` reads `git status --porcelain`, and when the
-checkout keeps changes the answer says so and lists up to 10 paths, for example
-`; CHECKOUT keeps changes the hook made: generated.txt`. `integrate` refuses a
-checkout with changes, so remove those files before you integrate again.
+made. After every failed merge, `integrate` reads `git status --porcelain`. When
+a refused merge leaves changes in the checkout, the answer says so and lists up
+to 10 paths, for example `; CHECKOUT keeps changes the hook made: generated.txt`.
+That includes a hook that refuses before any merge is pending, such as a
+`reference-transaction` hook. `integrate` refuses a checkout with changes, so
+remove those files before you integrate again.
 
 A merge that outlives git's 60 second limit is killed, and `integrate` answers
-`git_failed` with the reason. It then restores the checkout the same way: it
-runs `git merge --abort` when a merge is pending, and `git reset --merge` when
-the killed merge left its half-made index behind with no merge pending, which a
-`pre-merge-commit` hook that runs long does. When a `post-merge` hook is what
-ran long, the merge had already landed, and the answer says the branch is
-already part of HEAD.
+`git_failed` with the reason. If a merge was pending, `integrate` aborts it, as
+it does for a refused merge. If none was pending, it resets nothing, because it
+cannot tell what the killed merge staged from a change you made in the
+meantime. A `pre-merge-commit` hook that runs long ends this way, since git
+writes `MERGE_HEAD` after that hook. The answer says nothing was reset, lists up
+to 10 changed paths, and names the command that drops what the merge staged:
+check the paths with `git status`, then run `git reset --merge` in the checkout.
+That command drops every staged change, yours included, and untracked files stay
+for you to remove by hand. When a `post-merge` hook is what ran long, the merge
+had already landed, and the answer says the branch is already part of HEAD.
 
 A refusal names one of these codes:
 
@@ -475,7 +481,7 @@ A refusal names one of these codes:
 | `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort`, and the answer lists the conflicted files. |
 | `hook_failed` | Only with the opt-in. A git hook of the checkout refused the merge, or the merge stopped before its commit with no conflict, for example when signing the commit fails. orq ran `git merge --abort` if a merge was pending. The answer carries what git printed on stdout and stderr, which includes the hook's output, with secrets redacted and cut to its last 20 lines, and it lists up to 10 files that the hook left in the checkout. Fix what the hook checks, then integrate again. |
 | `invalid_request` | The input does not match the schema. |
-| `git_failed` | git failed in a way no other code names, or a merge outlived git's 60 second limit and was killed. The answer carries its message, and says whether the merge was aborted or reset and what the checkout keeps. |
+| `git_failed` | git failed in a way no other code names, or a merge outlived git's 60 second limit and was killed. The answer carries its message. After a kill with no merge pending, it says nothing was reset and lists up to 10 changed paths. |
 
 When a merge conflicts, redelegate a rebase of the task branch to the same
 worker, then integrate again. orq never forces a merge, and it never resolves a

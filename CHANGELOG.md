@@ -20,10 +20,12 @@ All notable changes to cc-orq are recorded here. The format follows
   running on the task branch or inside its worktree, a shared job included. A
   job that has not written its process group yet counts as running for its
   first 10 seconds. It runs no git command before that answer.
-- `integrate` puts the checkout back after any merge that fails, one that git's
-  60 second limit kills included, and its answer says what stays in the
-  checkout, such as a file a hook made. A killed merge answers `git_failed`
-  and names the timeout.
+- After a merge that fails, `integrate` aborts a pending merge and reads the
+  checkout, so its answer says what stays in it, such as a file a hook made, a
+  `reference-transaction` refusal included. A merge that git's 60 second limit
+  kills answers `git_failed` and names the timeout. When no merge was pending,
+  it resets nothing, lists up to 10 changed paths, and names `git reset --merge`
+  for you to run after you check them.
 - The config key `integrate.gitHooks`. With `"run"`, `integrate` runs the git
   hooks of the checkout as they are, and a hook that refuses the merge, such as
   a failing `pre-merge-commit`, makes it abort the merge and answer `hook_failed`
