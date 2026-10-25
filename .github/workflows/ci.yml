@@ -12,38 +12,21 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: npm ci
-      - name: diag
-        if: ${{ !cancelled() }}
-        run: |
-          uname -a; echo "bash: $BASH_VERSION"; python3 --version; /usr/bin/python3 --version || true; node --version; git --version
-          for t in setsid timeout gtimeout realpath pgrep ps flock shellcheck jq perl tmux python3 bash sh; do printf "%s: " "$t"; command -v "$t" || echo missing; done
-          if [ -d /proc/self ]; then echo "proc: yes"; else echo "proc: no"; fi
-          echo "mktemp: $(mktemp)"; echo "mktemp -d: $(mktemp -d)"; echo "date: $(date +%s%N)"; printf "a\nb\n" | wc -l | od -c | head -2
-          echo "TMPDIR=$TMPDIR"; echo "pwd=$(pwd -P)"; ls -ld /tmp /var
-      - if: ${{ !cancelled() }}
-        run: node scripts/build-vendor.mjs --check
-      - if: ${{ !cancelled() }}
-        run: npm test
-      - if: ${{ !cancelled() }}
-        run: bash tests/runners-shell.sh
-      - if: ${{ !cancelled() }}
-        run: bash tests/integrate-shell.sh
-      - if: ${{ !cancelled() }}
-        run: bash tests/question-shell.sh
-      - if: ${{ !cancelled() }}
-        run: bash tests/worktree-include-shell.sh
-      - if: ${{ !cancelled() }}
-        run: bash tests/lock-shell.sh
-      - if: ${{ !cancelled() }}
-        run: bash tests/hook-shell.sh
-      - if: ${{ !cancelled() }}
-        run: bash tests/allowlist-shell.sh
-      - if: ${{ !cancelled() && runner.os == 'Linux' }}
+      - run: node scripts/build-vendor.mjs --check
+      - run: npm test
+      - run: bash tests/runners-shell.sh
+      - run: bash tests/integrate-shell.sh
+      - run: bash tests/question-shell.sh
+      - run: bash tests/worktree-include-shell.sh
+      - run: bash tests/lock-shell.sh
+      - run: bash tests/hook-shell.sh
+      - run: bash tests/allowlist-shell.sh
+      - if: runner.os == 'Linux'
         run: shellcheck tests/live/*.sh tests/live/scenarios/*.sh

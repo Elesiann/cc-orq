@@ -77,7 +77,7 @@ when the task ends, and a `delegate` job is read with `status`.
 | --- | --- | --- |
 | [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
 | [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `delegate`, `status`, `list`, `cancel` and `integrate` are gone |
-| Linux | | Jobs run under `systemd-run` or `setsid` |
+| Linux or macOS | | Linux is the supported platform. macOS is experimental; see [macOS](#macos-experimental). Jobs run under `systemd-run` or `setsid`, or under `python3` where there is neither |
 | `bash`, `python3`, `git`, `pgrep` | | The supervisor, the event extractor, worktrees, and the hook that reads the session's permission mode. `pgrep` comes from procps; the supervisor uses it to find its watcher's `sleep`. Without it the sweep ends that `sleep` and `child.log` gets a line saying so |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
 | [OpenCode](https://github.com/sst/opencode) | 2.0.27 (tested) | orq passes `--standalone` to `opencode run` and `opencode models`, so the flag is required. Earlier versions were not tried. See [OpenCode notes](#opencode-notes) |
@@ -87,8 +87,22 @@ agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
 default from 2.1.287 on, and an organization can turn them off, which leaves
 only the server's tools.
 
-macOS is not supported yet: the job start script needs `systemd-run` or
-`setsid` to give each job its own session, and macOS has neither by default.
+### macOS (experimental)
+
+macOS is experimental and tested only in CI. The test suites run on
+`macos-latest` with fake workers, and nobody has run a job there with a real
+provider CLI.
+
+macOS has neither `systemd-run` nor `setsid`, so the start script runs the
+supervisor through `python3`, which calls `os.setsid()` and then `exec`. The
+job's `scope` file says `python-setsid`. The supervisor runs under the `bash`
+3.2 that macOS ships.
+
+What does not work on macOS:
+
+- The sweep. It reads `/proc`, which macOS does not have, so it ends nothing.
+  A cancel still ends the job's process group, but a process that a CLI left
+  outside the group keeps running.
 
 ## Install
 
@@ -1090,7 +1104,7 @@ for both the kind and the agent suffix, for example
 | --- | --- | --- |
 | `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
-| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
+| `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable, `python-setsid` when there is no `setsid` either, as on macOS. |
 | `child.log` | start script | The supervisor's own stdout and stderr. It is empty for a job that ended without leftovers. A line says that the sweep ended processes the CLI left behind, or that OpenCode did not end on SIGINT. |
 | `pgid` | `supervise.sh` | The supervisor's pid. The supervisor leads its process group, so this is also the group id. |
 | `cli.pid` | `supervise.sh` | An OpenCode job only: the pid of the OpenCode client, which a cancel sends SIGINT to. |
@@ -1193,7 +1207,8 @@ flowchart LR
    subagent: the mod answers each of its steps itself.
 3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
    task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
-   detached under `systemd-run` or `setsid`. The supervisor runs the provider
+   detached under `systemd-run`, `setsid`, or `python3` where there is no
+   `setsid`. The supervisor runs the provider
    CLI, writes its events and final message, and ends the process group when
    a `cancel` file appears, in the order that `/orq cancel` describes. An
    OpenCode job passes `--standalone`, so it runs on a private OpenCode server
@@ -1240,7 +1255,7 @@ directories.
 
 ## Known limitations
 
-- Linux only. macOS has neither `systemd-run` nor `setsid` by default.
+- macOS is experimental and tested only in CI. See [macOS](#macos-experimental).
 - A task cannot be resumed or sent a follow-up message. A review round or an
   answer to a child's question is a new task that carries the earlier brief.
 - `delegate` returns the job's id and no MCP task, so the session gets no
