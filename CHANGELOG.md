@@ -97,6 +97,13 @@ All notable changes to cc-orq are recorded here. The format follows
   checkout's shared git directory, or a hooks path in the work tree, decides what
   runs. Any other value, and the default, run no hook.
 
+- macOS, experimental. CI runs the test suites on `macos-latest` as well as
+  `ubuntu-latest`. Where `setsid` is missing, as on macOS, the start script runs
+  the supervisor through `python3` with `os.setsid()`, and the job's `scope`
+  file says `python-setsid`. The supervisor runs under bash 3.2. The sweep
+  needs `/proc`, so it ends nothing on macOS, and a cancel still ends the
+  process group. Nobody has run a job with a real CLI there.
+
 ### Changed
 
 - **Breaking:** `capabilities`, `status`, `cancel` and `integrate` are now the
@@ -128,6 +135,10 @@ All notable changes to cc-orq are recorded here. The format follows
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
+- The working-directory check resolves a path with `fs.stat` instead of the
+  GNU-only `realpath -e` and `-m`. An `allowedRoots` entry that does not exist
+  is no longer listed among the roots of a refusal. It admitted nothing before
+  either.
 - A cancel no longer waits out the 5 seconds when the CLI ends sooner. Once the
   CLI has ended and its leftovers are swept, the supervisor writes `exit` 124
   and sends SIGKILL to the process group. A process in the group that needs
