@@ -52,3 +52,8 @@ Claude Code CLI, so run them locally.
   is needed.
 - Update the README in the same pull request when behavior changes, and add an
   entry under `Unreleased` in `CHANGELOG.md`.
+- `server/node-engine.ts` implements, in Node, the `CoreEngine` part of `$` that
+  the job core uses, for the MCP server and the tests. It keeps the host semantics
+  the generated declarations in `.claude-plugin/types/` document. It imports only
+  `node:` builtins and `hooks/`, because users never run `npm install`, and it uses
+  only erasable TypeScript, which Node 22.18 runs without a build.
