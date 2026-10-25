@@ -394,22 +394,24 @@ effective ceiling of a `worktree` task.
 A client that declared MCP tasks and form input, as the interactive Claude Code
 CLI does, is not refused when it asks `delegate` for more than the ceiling. The
 call returns a task, and the first status check of the task answers
-`input_required`: Claude Code opens a form. The form tells you:
+`input_required`: Claude Code opens a form. Its message has three lines, because
+Claude Code collapses a longer one:
 
-- who asks: the instance and the model;
-- the directory, as the real path that the scope check found, so that a link
-  cannot hide where the task runs;
-- where it runs: `in its own worktree`, or `in your checkout itself (shared, no
-  worktree)`;
-- each level that is above the ceiling, and the limit it is above:
-  `ceiling.runtime`, `ceiling.sharedRuntime` or `ceiling.interaction`, and the
-  session's permission mode when it is the lower one.
+1. the levels that are above the ceiling, such as `runtime auto-accept-edits`;
+2. where the task runs: `in its own worktree`, or `in your checkout itself
+   (shared, no worktree)`;
+3. the worker, the model and the directory, as the real path that the scope check
+   found, so that a link cannot hide where the task runs.
 
-The instance, the model and the directory come from the model's request. The form
+The field you answer says where the task runs in its title, and its description
+names the limit that each level is above: `ceiling.runtime`,
+`ceiling.sharedRuntime` or `ceiling.interaction`, and the session's permission
+mode when it is the lower one.
+
+The worker, the model and the directory come from the model's request. The form
 quotes each one, cuts it at 120 characters and writes out any control or format
 character, so a value cannot add a line to the question. The levels, the place
-and the limits come from fixed lists, and the field you answer repeats the levels
-and the place in its title.
+and the limits come from fixed lists.
 
 Accepting launches the job at the level that was asked, for that task only; the
 configuration does not change. Declining, or pressing Esc, ends the task as
