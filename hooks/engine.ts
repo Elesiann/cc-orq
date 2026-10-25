@@ -53,6 +53,9 @@ export type CoreEngine = {
 export const LIST_LIMIT = 50
 const PROCESS_TIMEOUT_MS = 30000
 
+/** Who answers a question the worker asks: the parent session, or the human through a form. */
+export type QuestionMode = 'parent' | 'human'
+
 export type LaunchSpec = {
   kind: string
   agentId: string
@@ -69,6 +72,8 @@ export type LaunchSpec = {
   interactionMode?: InteractionMode
   /** The reasoning effort `flags` give the CLI, recorded for the answer's footer. */
   effort?: string
+  /** Recorded in meta.json for a job the server launches. */
+  questions?: QuestionMode
   /** `worktree` runs the task in its own git worktree on a new branch; absent runs in `cwd` as it is. */
   isolation?: 'worktree'
   /** When set, the checkout that holds `cwd` must lie inside one of these resolved roots to get a worktree. */
@@ -76,6 +81,9 @@ export type LaunchSpec = {
 }
 
 export type TaskLaunchSpec = {
+  /** The job kind: `task` for the cc-orq:task agent, which is the default, and `mcp` for the server's delegate. */
+  kind?: string
+  questions?: QuestionMode
   agentId: string
   instance: InstanceConfig
   model: string
@@ -474,6 +482,7 @@ export async function launchJob($: CoreEngine, config: OrqConfig, spec: LaunchSp
       ...(spec.runtimeMode !== undefined ? { runtimeMode: spec.runtimeMode } : {}),
       ...(spec.interactionMode !== undefined ? { interactionMode: spec.interactionMode } : {}),
       ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+      ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
       ...worktreeFields,
     }
     try {
@@ -549,8 +558,9 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
   if (spec.flags.some((flag) => flag === '' || hasControlCharacters(flag))) {
     return { refusal: `${TASK_REFUSAL}: a runner flag is empty or contains a control character.` }
   }
+  const kind = spec.kind ?? 'task'
   const launched = await launchJob($, config, {
-    kind: 'task',
+    kind,
     agentId: spec.agentId,
     runner: DRIVER_RUNNER[spec.instance.driver],
     model: spec.model,
@@ -563,11 +573,15 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
     ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+    ...(spec.questions !== undefined ? { questions: spec.questions } : {}),
     ...(spec.isolation === 'worktree' ? { isolation: 'worktree' as const, worktreeScope: spec.scopeRoots } : {}),
   })
   if (!('refusal' in launched)) return launched
   // launchJob words its refusals for any kind; a task's are answered as task refusals.
-  const refusal = launched.refusal.replace(/^orq: task (refused: )?/, `${TASK_REFUSAL}: `)
+  const own = `orq: ${kind} `
+  const refusal = launched.refusal.startsWith(own)
+    ? `${TASK_REFUSAL}: ${launched.refusal.slice(own.length).replace(/^refused: /, '')}`
+    : launched.refusal
   const hint = spec.isolation === 'worktree' && refusal.includes('not_a_repository')
     ? '. Pass `isolation: shared` to run the task in this directory as it is.'
     : ''
@@ -583,9 +597,11 @@ export async function launchTaskFromHeader(
     header: TaskHeader
     ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
     sessionDir: string
+    kind?: string
+    questions?: QuestionMode
   },
 ): Promise<LaunchResult> {
-  const { agentId, header, ceiling, sessionDir } = args
+  const { agentId, header, ceiling, sessionDir, kind, questions } = args
   const resolved = resolveTarget({
     target: header.target,
     instances: config.instances,
@@ -601,6 +617,8 @@ export async function launchTaskFromHeader(
   if ('refusal' in scoped) return scoped
   const effort = appliedEffort(resolved.instance.driver, resolved.options)
   return launchTaskJob($, config, {
+    ...(kind !== undefined ? { kind } : {}),
+    ...(questions !== undefined ? { questions } : {}),
     agentId,
     instance: resolved.instance,
     model: resolved.model,

@@ -15,6 +15,7 @@ const configText = (s: State) =>
     ],
     waitSeconds: s.waitSeconds,
     allowedRoots: s.allowedRoots,
+    ...(s.ceiling === undefined ? {} : { ceiling: s.ceiling }),
   })
 
 type State = {
@@ -33,6 +34,8 @@ type State = {
   /** realpath results for paths that are not their own resolution (symlinks). */
   realpaths: Record<string, string>
   allowedRoots: string[]
+  /** The `ceiling` of the config file; the file has none when unset. */
+  ceiling?: unknown
   jobsDir: string
   waitSeconds: number
   /** The scripts and timeouts of each wait call, in order. */
@@ -269,11 +272,11 @@ test('a header launches one task job on the named instance and the step waits th
     instanceId: 'codex',
     driver: 'codex',
     model: 'fixture-model',
-    runtimeMode: 'auto',
+    runtimeMode: 'approval-required',
     interactionMode: 'default',
     effort: 'high',
   })
-  expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('--approve-for-me\n-c\nmodel_reasoning_effort=high\n')
+  expect(s.writes.find((w) => w.path.endsWith('/flags'))?.text).toBe('-s\nread-only\n-c\nmodel_reasoning_effort=high\n')
   expect(s.writes.find((w) => w.path.endsWith('/prompt.txt'))?.text).toBe(`Say OK.\n\n${QUESTION_PROTOCOL}`)
 })
 
@@ -762,4 +765,111 @@ test('a refusal longer than 2,000 characters is stored and answered at 2,000 cha
   expect(answer.length).toBe(2000)
   expect(answer.startsWith('orq: task refused (taskId none): directory does not exist: ')).toBe(true)
   expect(s.store.get(`agent:${agentId}`)).toEqual({ refusal: answer })
+})
+
+// The ceiling of the config (spec D8, breaking change 2): the parent's mode no longer sets a task's ceiling alone.
+
+const metaOf = (s: State) => JSON.parse(s.writes.find((w) => w.path.endsWith('/meta.json'))?.text ?? '{}')
+const flagsOf = (s: State) => s.writes.find((w) => w.path.endsWith('/flags'))?.text
+
+test('under the default ceiling, a worktree task of a parent in auto mode runs at auto-accept-edits', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nEdit it.`, 'auto'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'auto-accept-edits', interactionMode: 'default' })
+  expect(flagsOf(s)).toBe('-s\nworkspace-write\n')
+})
+
+test('a config ceiling of auto-accept-edits keeps a parent in auto mode at auto-accept-edits', async ($, on) => {
+  const s = fresh({ ceiling: { runtime: 'auto-accept-edits' } })
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nEdit it.`, 'auto'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'auto-accept-edits', interactionMode: 'default' })
+  expect(flagsOf(s)).toBe('-s\nworkspace-write\n')
+})
+
+test('under the default ceiling, a shared task of a parent in auto mode runs at approval-required', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nisolation: shared\nRead it.`, 'auto'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'approval-required', interactionMode: 'default' })
+  expect(flagsOf(s)).toBe('-s\nread-only\n')
+})
+
+test('a shared task takes its limit from ceiling.sharedRuntime', async ($, on) => {
+  const s = fresh({ ceiling: { sharedRuntime: 'auto-accept-edits' } })
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nisolation: shared\nEdit it.`, 'auto'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'auto-accept-edits' })
+  expect(flagsOf(s)).toBe('-s\nworkspace-write\n')
+})
+
+test('a header that asks for auto under the default ceiling is refused with the ceiling hint, and nothing launches', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  await start($)
+  const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, 'auto')))
+  expect(answer).toBe(
+    "orq: task refused (taskId none): runtime_mode_escalation_denied: Runtime mode auto is above the ceiling auto-accept-edits for this task: the config allows auto-accept-edits (ceiling.runtime) and the session's permission mode allows auto. To allow auto, raise ceiling.runtime in ~/.config/orq/config.json; otherwise ask for auto-accept-edits at most.",
+  )
+  expect(s.startScripts.length).toBe(0)
+  expect(s.writes).toEqual([])
+})
+
+test('"ceiling": {"runtime": "auto"} lets a parent in auto mode run its worktree task at auto', async ($, on) => {
+  const s = fresh({ ceiling: { runtime: 'auto' } })
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, 'auto'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'auto', interactionMode: 'default' })
+  expect(flagsOf(s)).toBe('--approve-for-me\n')
+})
+
+test('the parent mode still lowers a ceiling that allows more', async ($, on) => {
+  const s = fresh({ ceiling: { runtime: 'auto' } })
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nEdit it.`, 'acceptEdits'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'auto-accept-edits' })
+})
+
+test('a request above what the parent mode allows is refused, and the refusal says the session is what stands in the way', async ($, on) => {
+  const s = fresh({ ceiling: { runtime: 'auto' } })
+  stubs(on, s)
+  await start($)
+  const answer = answerOf(await step($, await spawnTask($, s, `target: codex fixture-model runtime=auto\ncwd: ${REPO}\nEdit it.`, 'acceptEdits')))
+  expect(answer).toContain('runtime_mode_escalation_denied: Runtime mode auto is above the ceiling auto-accept-edits for this task: the config allows auto (ceiling.runtime) and')
+  expect(answer).toContain('To allow auto, use a session permission mode that allows it; otherwise ask for auto-accept-edits at most.')
+  expect(answer).not.toContain('raise ceiling.runtime')
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a config ceiling that is not valid fails closed, so a parent in auto mode gets an approval-required task', async ($, on) => {
+  const s = fresh({ ceiling: { runtime: 'turbo' } })
+  stubs(on, s)
+  await start($)
+  await step($, await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nEdit it.`, 'auto'))
+  expect(metaOf(s)).toMatchObject({ runtimeMode: 'approval-required' })
+  expect(flagsOf(s)).toBe('-s\nread-only\n')
+})
+
+test('a job of kind mcp that carries the agent id is not that agent\'s task job, so the step launches its own', async ($, on) => {
+  const s = fresh()
+  stubs(on, s)
+  s.files.set(
+    `${JOBS}/mcp-1000000-a-1-abc/meta.json`,
+    JSON.stringify({ id: 'mcp-1000000-a-1-abc', kind: 'mcp', agentId: 'a-1', cwd: REPO, startedAt: 1000000, startedAtIso: new Date(1000000).toISOString(), runner: 'codex', model: 'fixture-model', instanceId: 'codex', driver: 'codex', questions: 'parent' }),
+  )
+  await start($)
+  const agentId = await spawnTask($, s, `target: codex fixture-model\ncwd: ${REPO}\nGo.`, 'auto')
+  expect(agentId).toBe('a-1')
+  const chunks = await step($, agentId)
+  expect(s.startScripts.length).toBe(1)
+  const job = JSON.parse(chunks[1].json).job as string
+  expect(job.startsWith('task-')).toBe(true)
+  expect(metaOf(s)).toMatchObject({ id: job, kind: 'task', agentId: 'a-1' })
 })
