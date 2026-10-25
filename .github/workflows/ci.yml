@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,4 +21,5 @@ jobs:
       - run: bash tests/integrate-shell.sh
       - run: bash tests/question-shell.sh
       - run: bash tests/worktree-include-shell.sh
+      - run: bash tests/lock-shell.sh
       - run: bash tests/allowlist-shell.sh

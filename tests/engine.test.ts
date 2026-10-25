@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { parseLaunch } from '../hooks/engine.ts'
+import { LAUNCH_GRACE_MS, sha256Hex } from '../hooks/lock.ts'
 import { QUESTION_PROTOCOL } from '../hooks/question.ts'
 import {
   buildFooter,
@@ -44,6 +45,25 @@ type State = {
   goneJobs: Set<string>
   livenessScripts: string[]
   failWritesTo: string
+  /** False: every lock script succeeds and holds nothing, as in the other kit files. True: the stub keeps the lock directories. */
+  locking: boolean
+  /** The lock directories that exist, each with the owner id inside it; null while the claim has not written one. */
+  locks: Map<string, string | null>
+  /** The exit code the claim script answers with when it is not 0: 1 means the lock directory is there already. */
+  lockExit: number
+  /** The exit code the aside script answers with; when it is not 0 the lock stays where it is. */
+  asideExit: number
+  /** Jobs whose supervisor has not written its pgid yet. */
+  noPgid: Set<string>
+  /** Paths that are symlinks, each with the real path fs.stat resolves it to. */
+  realPaths: Map<string, string>
+  /** The steps of a launch in the order they ran: mkdir, lock claim, write meta.json, start. */
+  events: string[]
+  /** Runs when the start script does, or when a mutex is taken: another launcher acting in that window. */
+  onStart: (() => void) | null
+  onMutex: (() => void) | null
+  /** Runs when a file is read, with its path: a slow disk, or another launcher acting during the scan. */
+  onRead: ((path: string) => void) | null
 }
 
 function fresh(o: Partial<State> = {}): State {
@@ -66,6 +86,16 @@ function fresh(o: Partial<State> = {}): State {
     goneJobs: new Set(),
     livenessScripts: [],
     failWritesTo: '',
+    locking: false,
+    locks: new Map(),
+    lockExit: 0,
+    asideExit: 0,
+    noPgid: new Set(),
+    realPaths: new Map(),
+    events: [],
+    onStart: null,
+    onMutex: null,
+    onRead: null,
     ...o,
   }
 }
@@ -84,14 +114,18 @@ function stubs(on: any, s: State) {
   on('env.get', () => ({ value: '/home/test' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('clock.now', () => ({ value: s.now }))
-  on('fs.exists', (_$: unknown, e: any) => ({ value: s.files.has(e.path) }))
+  on('fs.exists', (_$: unknown, e: any) => ({ value: s.files.has(e.path) || s.locks.has(e.path) }))
   on('fs.read', (_$: unknown, e: any) => {
+    s.onRead?.(String(e.path))
     if (s.files.has(e.path)) return { value: s.files.get(e.path) }
-    if (String(e.path).endsWith('/pgid')) return { value: '4242\n' }
+    if (String(e.path).endsWith('/pgid') && !s.noPgid.has(String(e.path).slice(JOBS.length + 1, -'/pgid'.length))) {
+      return { value: '4242\n' }
+    }
     throw new Error(`ENOENT: ${e.path}`)
   })
   on('fs.write', (_$: unknown, e: any) => {
     if (s.failWritesTo && String(e.path).endsWith(s.failWritesTo)) throw new Error(`EIO: ${e.path}`)
+    s.events.push(`write ${String(e.path).split('/').pop()}`)
     s.writes.push({ path: e.path, text: e.text })
     s.files.set(e.path, e.text)
     return { value: undefined }
@@ -101,6 +135,9 @@ function stubs(on: any, s: State) {
     return { value: s.dirEntries.map((d) => ({ name: d.name, kind: d.kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('fs.stat', (_$: unknown, e: any) => {
+    const realPath = s.realPaths.get(e.path)
+    if (realPath !== undefined) return { value: { kind: 'dir', size: 0, mtimeMs: s.now, isLink: true, realPath } }
+    if (s.locks.has(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: s.mtimes.get(e.path) ?? s.now, isLink: false } }
     if (!s.files.has(e.path)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file', size: 0, mtimeMs: s.mtimes.get(e.path) ?? s.now, isLink: false } }
   })
@@ -112,11 +149,15 @@ function stubs(on: any, s: State) {
     }
     const script = argv[2] ?? ''
     if (script.includes('# orq:mkdir')) {
+      s.events.push('mkdir')
       s.mkdirScripts.push(script)
       return result(s.mkdirExit)
     }
+    if (script.includes('# orq:lock')) return result(runLockScript(s, script))
     if (script.includes('# orq:start')) {
+      s.events.push('start')
       s.startScripts.push(script)
+      s.onStart?.()
       return result(s.startExit)
     }
     if (script.includes('# orq:rollout')) {
@@ -131,6 +172,37 @@ function stubs(on: any, s: State) {
     }
     throw new Error(`unexpected process.run: ${script.slice(0, 80)}`)
   })
+}
+
+// What the lock scripts do to a real directory, applied to the state the stub keeps: the claim fails when the
+// lock directory exists, a mutex is always granted, and the aside moves a lock away.
+function runLockScript(s: State, script: string): number {
+  const action = /^# orq:lock (\w+)/.exec(script)?.[1] ?? ''
+  s.events.push(`lock ${action}`)
+  if (!s.locking) return 0
+  if (action === 'claim') {
+    if (s.lockExit !== 0) return s.lockExit
+    const dir = /mkdir (\S+\/\.locks\/[0-9a-f]{64}) /.exec(script)?.[1] ?? ''
+    if (s.locks.has(dir)) return 1
+    const owner = /printf '%s\\n' (\S+) > \S+\/owner/.exec(script)?.[1] ?? ''
+    s.locks.set(dir, owner)
+    s.files.set(`${dir}/owner`, `${owner}\n`)
+    s.mtimes.set(dir, s.now)
+  }
+  if (action === 'mutex') s.onMutex?.()
+  if (action === 'touch') {
+    const dir = /touch -c (\S+) /.exec(script)?.[1] ?? ''
+    const owner = /= (\S+) \] \|\| exit/.exec(script)?.[1] ?? ''
+    if (s.locks.get(dir) !== owner) return 3
+    s.mtimes.set(dir, s.now)
+  }
+  if (action === 'aside') {
+    if (s.asideExit !== 0) return s.asideExit
+    const dir = /^mv (\S+) /m.exec(script)?.[1] ?? ''
+    s.locks.delete(dir)
+    s.files.delete(`${dir}/owner`)
+  }
+  return 0
 }
 
 // The kit's command.run also takes the origin and presentation the engine sets; a test sends the name and args only.
@@ -634,4 +706,246 @@ test('shell words, footer, duration, job ids and redaction keep their contracts'
   const prose = 'exit 1: command not found: codex\nno credentials here, just words'
   expect(redactSecrets(prose)).toBe(prose)
   expect(failureSnippet(Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n')).split('\n').length).toBe(20)
+})
+
+// The checkout lock. A shared launch into /work claims JOBS/.locks/<sha256 of the checkout> for its job id before
+// it writes meta.json. The stub keeps the lock directories it was asked to make, so a test can see who holds one.
+const WORK_LOCK = `${JOBS}/.locks/${sha256Hex('/work')}`
+const LAUNCH = 'launch codex fixture-model -- go'
+
+function seedLock(s: State, owner: string | null, ageMs: number) {
+  s.locks.set(WORK_LOCK, owner)
+  if (owner !== null) s.files.set(`${WORK_LOCK}/owner`, `${owner}\n`)
+  s.mtimes.set(WORK_LOCK, s.now - ageMs)
+}
+
+function takeLock(s: State, owner: string) {
+  s.locks.set(WORK_LOCK, owner)
+  s.files.set(`${WORK_LOCK}/owner`, `${owner}\n`)
+  s.mtimes.set(WORK_LOCK, s.now)
+}
+
+test('a shared launch claims the checkout lock for its job id after its directory exists and before meta.json', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  stubs(on, s)
+  await start($)
+  const id = launchedId(await orq($, LAUNCH))
+  expect(s.locks.get(WORK_LOCK)).toBe(id)
+  expect(s.events.filter((step) => ['mkdir', 'lock claim', 'write meta.json', 'start'].includes(step))).toEqual([
+    'mkdir',
+    'lock claim',
+    'write meta.json',
+    'start',
+  ])
+})
+
+test('a second shared launch into a held checkout is refused worktree_busy naming the owner, and the lock stays', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  stubs(on, s)
+  await start($)
+  const first = launchedId(await orq($, LAUNCH))
+  expect(await orq($, LAUNCH)).toBe(`orq: manual refused: worktree_busy: /work is in use by job ${first}`)
+  expect(s.startScripts.length).toBe(1)
+  expect(s.locks.get(WORK_LOCK)).toBe(first)
+})
+
+test('a lock whose owner has exited, or lost its supervisor, is broken and the launch takes it', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  seedLock(s, 'job-done', 0)
+  s.files.set(`${JOBS}/job-done/exit`, '0')
+  stubs(on, s)
+  await start($)
+  const second = launchedId(await orq($, LAUNCH))
+  expect(s.locks.get(WORK_LOCK)).toBe(second)
+  expect(s.events.filter((step) => step === 'lock aside').length).toBe(1)
+  s.goneJobs.add(second)
+  const third = launchedId(await orq($, LAUNCH))
+  expect(s.locks.get(WORK_LOCK)).toBe(third)
+})
+
+test('an owner with no pgid and no exit keeps a lock younger than 10 s, and loses one that is 10 s old', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  seedLock(s, 'job-slow', 9999)
+  s.noPgid.add('job-slow')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-slow')
+  expect(s.locks.get(WORK_LOCK)).toBe('job-slow')
+  expect(s.events.includes('lock aside')).toBe(false)
+  s.mtimes.set(WORK_LOCK, s.now - 10000)
+  expect(s.locks.get(WORK_LOCK)).toBe('job-slow')
+  expect(launchedId(await orq($, LAUNCH)).startsWith('manual-')).toBe(true)
+  expect(s.locks.get(WORK_LOCK)).not.toBe('job-slow')
+})
+
+test('an owner that starts between the first look and the break keeps its lock', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  seedLock(s, 'job-slow', 10000)
+  s.noPgid.add('job-slow')
+  s.onMutex = () => s.noPgid.delete('job-slow')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-slow')
+  expect(s.locks.get(WORK_LOCK)).toBe('job-slow')
+  expect(s.events.includes('lock aside')).toBe(false)
+})
+
+test('a lock with no owner yet is a launch in progress for 10 s, and is broken after that', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  seedLock(s, null, 2000)
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.startScripts.length).toBe(0)
+  s.mtimes.set(WORK_LOCK, s.now - 10000)
+  const id = launchedId(await orq($, LAUNCH))
+  expect(s.locks.get(WORK_LOCK)).toBe(id)
+})
+
+test('a live worktree job stored under a symlink spelling of the checkout refuses a shared launch at that spelling', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.realPaths.set('/work', '/real/work')
+  s.files.set('/real/work/.git', '')
+  s.dirEntries = [{ name: 'job-linked', kind: 'dir' }]
+  seedJob(s, 'job-linked', { cwd: '/real/work-wt/job-linked', repo: '/work' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-linked')
+  expect(s.locks.size).toBe(0)
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a job in a subdirectory of the launch\'s own spelling of a symlinked checkout counts as well', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.realPaths.set('/work', '/real/work')
+  s.files.set('/real/work/.git', '')
+  s.dirEntries = [{ name: 'job-deep', kind: 'dir' }]
+  seedJob(s, 'job-deep', { cwd: '/work/pkg/deep' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-deep')
+})
+
+test('a launch that scans for a long time keeps its lock younger than the grace, and touches it once more before meta.json', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.dirEntries = Array.from({ length: 12 }, (_, i) => ({ name: `job-${i}`, kind: 'dir' }))
+  for (const entry of s.dirEntries) seedJob(s, entry.name, { cwd: '/elsewhere' })
+  const lockAges: number[] = []
+  s.onRead = (path) => {
+    if (!path.endsWith('/meta.json')) return
+    lockAges.push(s.now - (s.mtimes.get(WORK_LOCK) ?? s.now))
+    s.now += 2000
+  }
+  stubs(on, s)
+  await start($)
+  launchedId(await orq($, LAUNCH))
+  expect(lockAges.length).toBe(12)
+  expect(Math.max(...lockAges)).toBeLessThan(LAUNCH_GRACE_MS)
+  const lastSteps = s.events.filter((step) => step === 'lock touch' || step === 'write meta.json')
+  expect(lastSteps.slice(-2)).toEqual(['lock touch', 'write meta.json'])
+})
+
+test('a launch whose lock was broken and taken during its scan refuses before it writes a job, and leaves the new lock', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.dirEntries = [{ name: 'job-0', kind: 'dir' }]
+  seedJob(s, 'job-0', { cwd: '/elsewhere' })
+  s.onRead = (path) => {
+    if (path.endsWith('/job-0/meta.json')) takeLock(s, 'job-taker')
+  }
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by a launch in progress')
+  expect(s.events.includes('write meta.json')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
+  expect(s.locks.get(WORK_LOCK)).toBe('job-taker')
+  expect(s.events.includes('lock aside')).toBe(false)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('a launch that finds a live job in its directory gives its lock back before it refuses', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  s.dirEntries = [{ name: 'job-live', kind: 'dir' }]
+  seedJob(s, 'job-live', { cwd: '/work' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-live')
+  expect(s.events.includes('lock claim')).toBe(true)
+  expect(s.locks.size).toBe(0)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('a launch whose job directory cannot be written gives its lock back', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, failWritesTo: '/prompt.txt' })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toContain('could not write its job directory')
+  expect(s.events.includes('lock claim')).toBe(true)
+  expect(s.locks.size).toBe(0)
+})
+
+test('a launch whose supervisor never reports gives its lock back', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, startExit: 11 })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toContain('did not report within 5 s')
+  expect(s.events.includes('lock claim')).toBe(true)
+  expect(s.locks.size).toBe(0)
+})
+
+test('a launch that fails never gives back a lock another launcher took after breaking its own', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, startExit: 11 })
+  s.onStart = () => takeLock(s, 'job-taker')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toContain('did not report within 5 s')
+  expect(s.events.includes('lock claim')).toBe(true)
+  expect(s.locks.get(WORK_LOCK)).toBe('job-taker')
+  expect(s.events.includes('lock aside')).toBe(false)
+})
+
+test('two launchers breaking one dead lock never remove the live lock the first of them made', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true })
+  seedLock(s, 'job-dead', 0)
+  s.files.set(`${JOBS}/job-dead/exit`, '1')
+  s.onMutex = () => takeLock(s, 'job-winner')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual refused: worktree_busy: /work is in use by job job-winner')
+  expect(s.locks.get(WORK_LOCK)).toBe('job-winner')
+  expect(s.events.includes('lock aside')).toBe(false)
+  expect(s.startScripts.length).toBe(0)
+})
+
+test('a lock script that fails refuses the launch, starts nothing and records exit 125', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, lockExit: 9 })
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual could not lock its checkout (exit 9)')
+  expect(s.startScripts.length).toBe(0)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('a dead lock that cannot be moved aside refuses the launch as a failure to lock, not as a launch in progress', async ($, on) => {
+  const s = fresh({ now: 2000000, locking: true, asideExit: 1 })
+  seedLock(s, 'job-dead', 0)
+  s.files.set(`${JOBS}/job-dead/exit`, '1')
+  stubs(on, s)
+  await start($)
+  expect(await orq($, LAUNCH)).toBe('orq: manual could not lock its checkout (the old lock could not be moved aside)')
+  expect(s.locks.get(WORK_LOCK)).toBe('job-dead')
+  expect(s.startScripts.length).toBe(0)
+  expect(s.writes.find((w) => w.path.endsWith('/exit'))?.text).toBe('125')
+})
+
+test('the .locks directory in the jobs directory is not a job', async ($, on) => {
+  const s = fresh({ now: 4600000 })
+  s.dirEntries = [
+    { name: '.locks', kind: 'dir' },
+    { name: 'job-a', kind: 'dir' },
+  ]
+  seedJob(s, 'job-a', {}, 4000000)
+  stubs(on, s)
+  await start($)
+  const lines = (await orq($, 'list')).split('\n')
+  expect(lines.map((line) => line.split(/\s+/)[0])).toEqual(['id', 'job-a'])
 })
