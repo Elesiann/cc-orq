@@ -7,10 +7,11 @@ import { isSafeJobId, shellWord } from './types.ts'
  * atomically, and the launch's job id goes into `owner` inside it. A job never gives its lock back when it
  * ends: the next launch finds the owner gone and breaks the lock.
  *
- * Breaking a lock and giving one back are the only ways a lock directory goes away, and both run under a
- * second directory, NAME.mutex, which `mkdir` makes the same way. Under it the owner is read again, so a lock
- * that someone else broke and took in the meantime is never removed, and the lock moves aside to a name of its
- * own in one rename. A claim needs no mutex: `mkdir` fails while a lock exists.
+ * Breaking a lock and giving one back are the only ways a lock directory with an owner goes away, and both run
+ * under a second directory, NAME.mutex, which `mkdir` makes the same way. Under it the owner is read again, so a
+ * lock that someone else broke and took in the meantime is never removed, and the lock moves aside to a name of
+ * its own in one rename. A claim needs no mutex: `mkdir` fails while a lock exists. A claim that cannot write its
+ * owner removes the empty directory it has just made.
  */
 type LockEngine = Pick<CoreEngine, 'clock' | 'fs' | 'process'>
 

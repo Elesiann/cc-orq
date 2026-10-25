@@ -533,6 +533,25 @@ test('a mutex of two minutes is stepped over and left in place, and one of 45 s 
   }
 })
 
+test('a jobs directory with shell syntax is claimed, touched, broken and released as written, and runs nothing', async () => {
+  const { root, engine } = scratch()
+  try {
+    const jobsDir = join(root, `my jobs 'x' "y" $(touch ${join(root, 'INJECTED')}) \`touch ${join(root, 'INJECTED2')}\` ;touch ${join(root, 'INJECTED3')}`)
+    const repo = checkoutWithSubdirectory(root)
+    const first = await claimCheckout(engine, jobsDir, 'job-a', repo, probeOf({}))
+    assert.equal(first.kind, 'held')
+    assert.equal(await rearmLock(engine, first.held, { force: true }), true)
+    const second = await claimCheckout(engine, jobsDir, 'job-b', repo, probeOf({ 'job-a': 'finished' }))
+    assert.equal(second.kind, 'held')
+    assert.equal(await rearmLock(engine, second.held, { force: true }), true)
+    await releaseLock(engine, second.held, probeOf({}))
+    assert.deepEqual(readdirSync(join(jobsDir, '.locks')), [])
+    assert.deepEqual(readdirSync(root).filter((name) => name.startsWith('INJECTED')), [])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a checkout path with spaces, quotes and shell syntax is locked as written and runs nothing', async () => {
   const { root, engine, jobsDir } = scratch()
   const stray = join(process.cwd(), 'orq-lock-injected')
