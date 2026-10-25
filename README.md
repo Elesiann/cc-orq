@@ -94,9 +94,12 @@ default from 2.1.287 on, and an organization can turn them off, which leaves
 only the server's tools.
 
 `delegate` answers with an MCP task only when the request declares the tasks
-extension. Claude Code's documentation says that 2.1.304 or newer does so for a
-call from the main conversation of the interactive CLI, and from an Agent SDK or
-stream-json session with `CLAUDE_AUTO_BACKGROUND_TASKS=1`. Any other call gets the
+extension. Claude Code 2.1.310 declares it for a call from the main conversation
+of the interactive CLI, and does not for a call from a subagent (both measured:
+the subagent's call got `{"taskId", "status": "running"}` and left no task
+record). Claude Code's documentation adds an Agent SDK or stream-json session
+with `CLAUDE_AUTO_BACKGROUND_TASKS=1`, and says the VS Code extension and the
+desktop app have no MCP tasks; those are not tested here. Any other call gets the
 job's id and no task: see [`delegate`](#mcp__plugin_cc-orq_orq__delegate).
 
 macOS is not supported yet: the job start script needs `systemd-run` or
@@ -417,7 +420,10 @@ Accepting launches the job at the level that was asked, for that task only; the
 configuration does not change. Declining, or pressing Esc, ends the task as
 `completed` with `runtime_mode_escalation_denied` or
 `interaction_mode_escalation_denied`, and the message says what would lift the
-limit. `x` in `/tasks` cancels a task whose form is open.
+limit. `x` in `/tasks` cancels a task whose form is open. If Claude Code ends with
+the form open, `claude --resume` opens the same form again: the new server answers
+the old task as `input_required` (measured on 2.1.310, with the session killed
+while the form was open).
 
 Before the form opens, `delegate` checks the instance, the modes the driver can
 enforce and the directory, so a request that could not start is refused at once
@@ -1313,10 +1319,11 @@ directories.
 - Linux only. macOS has neither `systemd-run` nor `setsid` by default.
 - A task cannot be resumed or sent a follow-up message. A review round or an
   answer to a child's question is a new task that carries the earlier brief.
-- A client without MCP tasks, such as a subagent, the VS Code extension, the
-  desktop app or a one-shot `claude -p`, gets the job's id and no wake-up, and
-  reads the job with `status`. Such a client cannot be asked for approval, so a
-  request above the ceiling is refused there. `questions: human` is refused.
+- A client without MCP tasks gets the job's id and no wake-up, and reads the job
+  with `status`. A subagent is one (measured on 2.1.310). Claude Code's
+  documentation names the VS Code extension, the desktop app and a one-shot
+  `claude -p` as others. Such a client cannot be asked for approval, so a request
+  above the ceiling is refused there. `questions: human` is refused.
 - Closing Claude Code stops the server and leaves the workers running. The exit
   dialog lists an MCP task as one that stops on exit, but no exit option cancels
   it on the server, and the option that moves the session to the background left

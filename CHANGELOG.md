@@ -37,7 +37,8 @@ All notable changes to cc-orq are recorded here. The format follows
   before. `tasks/cancel` is idempotent, as Claude Code sends it twice;
   `tasks/update` ignores a key that is not outstanding; `tasks/result` and
   `tasks/list` answer -32601. A client without the extension gets the same
-  bytes as before.
+  bytes as before, and a subagent's call declares none (measured on Claude Code
+  2.1.310).
 - A request above the ceiling opens a form in the CLI instead of being refused,
   when the client declares tasks and form input. The form says who asks, the
   real directory, whether the task runs in its own worktree or in your checkout
