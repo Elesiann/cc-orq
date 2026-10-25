@@ -419,6 +419,36 @@ rmSync(`${repo}/.git/hooks/pre-merge-commit`, { force: true })
 check('the same task merges once the hook lets go', (await integrate(K, 'merge', 'run')).ok === true)
 scrub()
 
+// diff.ignoreSubmodules=all hides a gitlink from git diff, so the merge's own change to a submodule would read as the user's.
+// Both reads pass --ignore-submodules=none, so the refused merge of a task that adds a gitlink is still aborted.
+const GL = 'task-gl'
+const planGL = await startTask(GL)
+must(planGL.worktree, 'update-index', '--add', '--cacheinfo', `160000,${must(repo, 'rev-parse', 'HEAD')},sub`)
+must(planGL.worktree, 'commit', '-q', '-m', 'task g adds a gitlink')
+finish(GL)
+must(repo, 'config', 'diff.ignoreSubmodules', 'all')
+installHook('pre-merge-commit', 'echo "lint: refused" >&2; exit 1')
+const gitlink = await integrate(GL, 'merge', 'run')
+must(repo, 'config', '--unset', 'diff.ignoreSubmodules')
+check('with diff.ignoreSubmodules=all, a refused merge of a task that adds a gitlink is hook_failed and is aborted by itself', gitlink.ok === false && gitlink.error?.code === 'hook_failed' && gitlink.error.message.includes('the merge was aborted'))
+check('the aborted merge leaves no MERGE_HEAD and a clean tree', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '')
+scrub()
+
+// git follows a rename that HEAD made, so the merge writes a path that the list of the task does not hold. That path reads as the
+// user's, the cleanup stops, and the merge stays pending: the documented limit.
+const RN = 'task-rn'
+commit(repo, 'old name.txt', 'line one\nline two\nline three\nline four\nline five\n', 'add the file that main renames later')
+const planRN = await startTask(RN)
+writeFileSync(`${planRN.worktree}/old name.txt`, 'line one\nline two CHANGED\nline three\nline four\nline five\n')
+must(planRN.worktree, 'commit', '-q', '-a', '-m', 'task rn edits the file')
+finish(RN)
+must(repo, 'mv', 'old name.txt', 'new name.txt')
+must(repo, 'commit', '-q', '-m', 'main renames the file')
+installHook('pre-merge-commit', 'echo "lint: refused" >&2; exit 1')
+const renamed = await integrate(RN, 'merge', 'run')
+check('when git follows a rename of HEAD, the merge writes a path outside the list of the task: the cleanup stops, and the merge stays pending', renamed.error?.code === 'hook_failed' && renamed.error.message.includes('the merge was not aborted') && renamed.error.message.includes('new name.txt is probably a change of your own') && existsSync(`${repo}/.git/MERGE_HEAD`))
+scrub()
+
 // A reference-transaction hook refuses the ref update, so no merge is pending, and it leaves a file all the same.
 const Y = 'task-y'
 const planY = await startTask(Y)

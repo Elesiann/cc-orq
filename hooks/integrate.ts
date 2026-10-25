@@ -103,21 +103,38 @@ async function must(run: Git, argv: string[], what: string): Promise<ProcessResu
   return r
 }
 
-function nulSeparated(text: string): string[] {
-  return text.split('\0').filter((entry) => entry !== '')
+/** The NUL-terminated records of an output. When the engine cut it at its size limit, the text after the last NUL is an unfinished record, and it is dropped. */
+function recordsOf(output: ProcessResult): string[] {
+  const records = output.stdout.split('\0')
+  if (output.isStdoutTruncated) records.pop()
+  return records.filter((record) => record !== '')
 }
+
+/** What the engine puts in a string for a byte that is not UTF-8: two different paths can read as one. */
+const UNDECODED = '\uFFFD'
+
+const CHECKOUT_CUT = 'the checkout has more changes than integrate can read'
+const PATHS_CUT = "the task branch changes more files than integrate can read, so it cannot tell which changes are the merge's"
+const NOT_UTF8 = "a path that git printed is not valid UTF-8, so integrate cannot tell the merge's paths from the user's"
 
 /** The paths the task branch changes since it left HEAD: a merge touches no tracked path outside them. NUL-separated, so a name is never quoted. */
 function mergePathsArgv(repo: string, branch: string): string[] {
-  return gitArgv(repo, 'diff', '-z', '--name-only', '--no-renames', `HEAD...${branch}`)
+  return gitArgv(repo, 'diff', '-z', '--name-only', '--no-renames', '--ignore-submodules=none', `HEAD...${branch}`)
+}
+
+type MergePaths = { paths: ReadonlySet<string>; cut: boolean; undecodable: boolean }
+
+function readMergePaths(output: ProcessResult): MergePaths {
+  const paths = recordsOf(output)
+  return { paths: new Set(paths), cut: output.isStdoutTruncated, undecodable: paths.some((path) => path.includes(UNDECODED)) }
 }
 
 /** One entry of `git status --porcelain -z --no-renames`: two status letters, a space, and the path as it is on disk. */
 type Change = { status: string; path: string }
 
-async function changesIn(run: Git, repo: string): Promise<Change[]> {
-  const status = await must(run, gitArgv(repo, 'status', '--porcelain', '-z', '--no-renames'), 'git status')
-  return nulSeparated(status.stdout).map((entry) => ({ status: entry.slice(0, 2), path: entry.slice(3) }))
+async function changesIn(run: Git, repo: string): Promise<{ changes: Change[]; cut: boolean }> {
+  const status = await must(run, gitArgv(repo, 'status', '--porcelain', '-z', '--no-renames', '--ignore-submodules=none'), 'git status')
+  return { changes: recordsOf(status).map((entry) => ({ status: entry.slice(0, 2), path: entry.slice(3) })), cut: status.isStdoutTruncated }
 }
 
 const isTracked = (change: Change): boolean => change.status !== '??'
@@ -134,6 +151,7 @@ type Aftermath = {
   done: 'nothing' | 'aborted' | 'reset'
   yours: string[]
   mergeLeft: boolean
+  unreadable: string | null
   headHasBranch: boolean
   changes: Change[]
 }
@@ -144,21 +162,25 @@ type Aftermath = {
  * so a git killed there leaves the merge in the index with no merge pending. A tracked path outside the merge is
  * probably the user's own change, and both commands drop it, so then nothing runs. The unmerged files are read before
  * any abort, since merge --abort clears them from the index. `mergeLeft` says that a merge is pending or has changed a
- * tracked path, so that there is a merge to drop.
+ * tracked path, so that there is a merge to drop. `unreadable` says why nothing was compared and nothing runs: an output
+ * that the engine cut at its size limit may have lost a path of the user's, and a path that is not UTF-8 may read as another.
  */
-async function cleanUp(run: Git, repo: string, branch: string, killed: boolean, mergePaths: ReadonlySet<string>): Promise<Aftermath> {
+async function cleanUp(run: Git, repo: string, branch: string, killed: boolean, merge: MergePaths): Promise<Aftermath> {
   const conflicted = outputLines((await run(unmergedFilesArgv(repo))).stdout)
   const pending = (await run(mergeHeadArgv(repo))).exitCode === 0
   const headHasBranch = killed && !pending && (await branchIsInHead(run, repo, branch))
-  const changes = await changesIn(run, repo)
+  const { changes, cut } = await changesIn(run, repo)
   const tracked = changes.filter(isTracked)
-  const yours = tracked.filter((change) => !mergePaths.has(change.path)).map((change) => change.path)
-  const mergeLeft = pending || tracked.some((change) => mergePaths.has(change.path))
-  const left: Aftermath = { conflicted, pending, done: 'nothing', yours, mergeLeft, headHasBranch, changes }
-  if (headHasBranch || yours.length > 0 || !mergeLeft) return left
+  const yours = tracked.filter((change) => !merge.paths.has(change.path)).map((change) => change.path)
+  const mergeLeft = pending || tracked.some((change) => merge.paths.has(change.path))
+  const needsCleanup = pending || tracked.length > 0
+  const undecodable = merge.undecodable || tracked.some((change) => change.path.includes(UNDECODED))
+  const unreadable = cut ? CHECKOUT_CUT : needsCleanup && merge.cut ? PATHS_CUT : needsCleanup && undecodable ? NOT_UTF8 : null
+  const left: Aftermath = { conflicted, pending, done: 'nothing', yours, mergeLeft, unreadable, headHasBranch, changes }
+  if (headHasBranch || unreadable !== null || yours.length > 0 || !mergeLeft) return left
   if (pending) await must(run, mergeAbortArgv(repo), 'git merge --abort')
   else await must(run, gitArgv(repo, 'reset', '--merge'), 'git reset --merge')
-  return { ...left, done: pending ? 'aborted' : 'reset', changes: await changesIn(run, repo) }
+  return { ...left, done: pending ? 'aborted' : 'reset', changes: (await changesIn(run, repo)).changes }
 }
 
 function pathList(paths: string[]): string {
@@ -174,12 +196,23 @@ const keptBy = (repo: string, madeBy: string): Listing => (changes) =>
 const hasChanges = (repo: string): Listing => (changes) =>
   changes.length === 0 ? '' : `; ${repo} has changes: ${pathList(changes.map((change) => change.path))}`
 
+/** The sentence that leaves the cleanup to the user: the command that drops the merge, and what it drops. */
+function byHandClause(repo: string, pending: boolean): string {
+  const command = pending ? 'git merge --abort' : 'git reset --merge'
+  return `. After you check the paths with git status, run ${command} in ${repo} to drop the merge (staged changes of your own go with it, and untracked files stay)`
+}
+
 /** What the cleanup did, or why it did nothing, as the clause that follows the failure in the answer. */
 function cleanupClause(repo: string, branch: string, after: Aftermath, listing: Listing): string {
-  const { pending, done, yours, mergeLeft, headHasBranch, changes } = after
+  const { pending, done, yours, mergeLeft, unreadable, headHasBranch, changes } = after
   if (headHasBranch) {
     const finished = `; ${branch} is already part of HEAD of ${repo}, so the merge itself finished`
-    return changes.length === 0 ? finished : `${finished}; nothing was reset${hasChanges(repo)(changes)}`
+    const cut = unreadable === CHECKOUT_CUT ? `; ${CHECKOUT_CUT}` : ''
+    return changes.length === 0 ? `${finished}${cut}` : `${finished}; nothing was reset${hasChanges(repo)(changes)}${cut}`
+  }
+  if (unreadable !== null) {
+    const read = changes.length > 0 ? `; what it read: ${pathList(changes.map((change) => change.path))}` : ''
+    return `; ${pending ? 'the merge was not aborted' : 'nothing was reset'}, because ${unreadable}${read}${byHandClause(repo, pending)}`
   }
   if (yours.length > 0) {
     const one = yours.length === 1
@@ -187,23 +220,19 @@ function cleanupClause(repo: string, branch: string, after: Aftermath, listing: 
     const rest = changes.map((change) => change.path).filter((path) => !yours.includes(path))
     const others = rest.length > 0 ? `; the rest of what changed: ${pathList(rest)}` : ''
     if (!mergeLeft) return `; ${own}, so nothing was reset${others}`
-    const command = pending ? 'git merge --abort' : 'git reset --merge'
-    return (
-      `; ${pending ? 'the merge was not aborted' : 'nothing was reset'}, because ${own}${others}. After you check the paths with git status, run ${command} in ${repo}` +
-      ' to drop the merge (staged changes of your own go with it, and untracked files stay)'
-    )
+    return `; ${pending ? 'the merge was not aborted' : 'nothing was reset'}, because ${own}${others}${byHandClause(repo, pending)}`
   }
   if (done === 'aborted') return `; the merge was aborted${listing(changes)}`
   if (done === 'reset') return `; the half-made merge was undone with git reset --merge${listing(changes)}`
   return listing(changes)
 }
 
-type Merging = { repo: string; branch: string; strategy: IntegrateStrategy; gitHooks: IntegrateGitHooks; mergePaths: ReadonlySet<string> }
+type Merging = { repo: string; branch: string; strategy: IntegrateStrategy; gitHooks: IntegrateGitHooks; merge: MergePaths }
 
-async function failedMerge(run: Git, { repo, branch, strategy, gitHooks, mergePaths }: Merging, merged: Attempt): Promise<IntegrateOutcome> {
+async function failedMerge(run: Git, { repo, branch, strategy, gitHooks, merge }: Merging, merged: Attempt): Promise<IntegrateOutcome> {
   let after: Aftermath
   try {
-    after = await cleanUp(run, repo, branch, 'unfinished' in merged, mergePaths)
+    after = await cleanUp(run, repo, branch, 'unfinished' in merged, merge)
   } catch (err) {
     const ended = 'unfinished' in merged ? 'did not finish' : 'failed'
     return fail('git_failed', `git merge of ${branch} into ${repo} ${ended}, and ${reasonOf(err)}; ${repo} may still be mid-merge`)
@@ -266,11 +295,11 @@ export async function integrate($: CoreEngine, jobsDir: string, input: Integrate
 
     const listed = await run(mergePathsArgv(repo, branch))
     if (listed.exitCode !== 0) return fail('git_failed', `git could not list the files that ${branch} changes in ${repo}${gitDetail(listed.stderr)}`)
-    const mergePaths = new Set(nulSeparated(listed.stdout))
+    const merge = readMergePaths(listed)
 
     const merged = await attempt(run, mergeArgv(repo, branch, input.strategy))
     if (!('result' in merged) || merged.result.exitCode !== 0) {
-      return await failedMerge(run, { repo, branch, strategy: input.strategy, gitHooks, mergePaths }, merged)
+      return await failedMerge(run, { repo, branch, strategy: input.strategy, gitHooks, merge }, merged)
     }
 
     const head = await run(revParseHeadArgv(repo))

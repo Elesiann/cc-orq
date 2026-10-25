@@ -20,7 +20,7 @@ const STARTED = 2000000
 const MINUTE = 60_000
 
 // `throws` makes the call reject, as the engine does for a git call that outlives its timeout.
-type Reply = { exitCode: number; stdout?: string; stderr?: string; throws?: string }
+type Reply = { exitCode: number; stdout?: string; stderr?: string; throws?: string; truncated?: boolean }
 type State = {
   files: Map<string, string>
   // A list answers its replies in order, and the last one answers every later call.
@@ -53,6 +53,10 @@ function clean(s: State, merge: Reply = { exitCode: 0 }) {
   // No merge is in progress unless a test says so: MERGE_HEAD is absent.
   s.replies.set('rev-parse -q', { exitCode: 1 })
 }
+
+// The two reads that decide the cleanup. Neither lets a submodule setting hide a gitlink, and both are NUL separated without renames.
+const STATUS_Z = 'status --porcelain -z --no-renames --ignore-submodules=none'
+const DIFF_PATHS = `diff -z --name-only --no-renames --ignore-submodules=none HEAD...${BRANCH}`
 
 // `git diff -z` and `git status --porcelain -z` end each entry with NUL.
 const z = (...entries: string[]): string => entries.map((entry) => `${entry}\0`).join('')
@@ -134,7 +138,7 @@ function engineOf(s: State): any {
           exitCode: reply.exitCode,
           stdout: reply.stdout ?? '',
           stderr: reply.stderr ?? '',
-          isStdoutTruncated: false,
+          isStdoutTruncated: reply.truncated === true,
           isStderrTruncated: false,
         }
       },
@@ -166,7 +170,7 @@ test('ff-only is the default: the branch moves HEAD with --ff-only and the answe
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
-    `diff -z --name-only --no-renames HEAD...${BRANCH}`,
+    DIFF_PATHS,
     `merge --ff-only ${BRANCH}`,
     'rev-parse HEAD',
   ])
@@ -183,7 +187,7 @@ test('strategy merge makes a merge commit with --no-ff --no-edit', async () => {
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
-    `diff -z --name-only --no-renames HEAD...${BRANCH}`,
+    DIFF_PATHS,
     `merge --no-ff --no-edit ${BRANCH}`,
     'rev-parse HEAD',
   ])
@@ -227,13 +231,13 @@ test('a conflicting merge lists the unmerged files, aborts, and says so', async 
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
-    `diff -z --name-only --no-renames HEAD...${BRANCH}`,
+    DIFF_PATHS,
     `merge --no-ff --no-edit ${BRANCH}`,
     'diff --name-only --diff-filter=U',
     'rev-parse -q --verify MERGE_HEAD',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
     'merge --abort',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -255,9 +259,9 @@ test('a failed merge that left MERGE_HEAD with no unmerged file is aborted and i
   expect(r.error.message).not.toContain('Not committing merge')
   expect(subcommands(s).slice(-4)).toEqual([
     'rev-parse -q --verify MERGE_HEAD',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
     'merge --abort',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -353,9 +357,9 @@ test('without the opt-in, a merge that left MERGE_HEAD with no unmerged file is 
   expect(r.error.message).toContain('the merge was aborted')
   expect(subcommands(s).slice(-4)).toEqual([
     'rev-parse -q --verify MERGE_HEAD',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
     'merge --abort',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -392,11 +396,11 @@ test('an ff-only merge that cannot fast-forward is not_fast_forward, with no abo
   expect(subcommands(s)).toEqual([
     'status --porcelain',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
-    `diff -z --name-only --no-renames HEAD...${BRANCH}`,
+    DIFF_PATHS,
     `merge --ff-only ${BRANCH}`,
     'diff --name-only --diff-filter=U',
     'rev-parse -q --verify MERGE_HEAD',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -516,9 +520,9 @@ test('a merge that git did not finish, with MERGE_HEAD pending, is aborted: git_
   expect(r.error.message).toContain('the merge was aborted')
   expect(subcommands(s).slice(-4)).toEqual([
     'rev-parse -q --verify MERGE_HEAD',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
     'merge --abort',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -540,9 +544,9 @@ test('a killed merge with no MERGE_HEAD whose changed paths are all the merge\'s
     'diff --name-only --diff-filter=U',
     'rev-parse -q --verify MERGE_HEAD',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
     'reset --merge',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -566,7 +570,7 @@ test('a killed merge with no MERGE_HEAD and a tracked change outside the merge r
     'diff --name-only --diff-filter=U',
     'rev-parse -q --verify MERGE_HEAD',
     `merge-base --is-ancestor ${BRANCH} HEAD`,
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -587,7 +591,7 @@ test('a killed merge with MERGE_HEAD pending and a tracked change outside the me
   expect(subcommands(s).slice(-3)).toEqual([
     'diff --name-only --diff-filter=U',
     'rev-parse -q --verify MERGE_HEAD',
-    'status --porcelain -z --no-renames',
+    STATUS_Z,
   ])
 })
 
@@ -620,6 +624,131 @@ test('a killed merge that left only a tracked change outside the merge, with no 
   expect(r.error.message).toContain('the rest of what changed: hook-made.txt')
   expect(r.error.message).not.toContain('run git')
   expect(subcommands(s).some((sub) => sub.startsWith('reset'))).toBe(false)
+})
+
+const NOTHING_RUNS = (s: State): boolean => !subcommands(s).some((sub) => sub === 'merge --abort' || sub.startsWith('reset'))
+
+test('a status cut at the size limit stops the abort even when every record it holds is on a merge path, and the answer names the command', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  mergePaths(s, 'f.txt', 'g.txt')
+  s.replies.set('status --porcelain', [
+    { exitCode: 0, stdout: '' },
+    { exitCode: 0, stdout: z('A  f.txt', 'A  g.txt'), truncated: true },
+  ])
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('the merge was not aborted, because the checkout has more changes than integrate can read')
+  expect(r.error.message).toContain('what it read: f.txt, g.txt')
+  expect(r.error.message).toContain('run git merge --abort in')
+  expect(r.error.message).toContain('staged changes of your own go with it')
+  expect(NOTHING_RUNS(s)).toBe(true)
+})
+
+test('a status cut at the size limit stops the reset of a half-made merge, and the answer names git reset --merge', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  mergePaths(s, 'f.txt')
+  s.replies.set('status --porcelain', [
+    { exitCode: 0, stdout: '' },
+    { exitCode: 0, stdout: z('A  f.txt'), truncated: true },
+  ])
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('nothing was reset, because the checkout has more changes than integrate can read')
+  expect(r.error.message).toContain('run git reset --merge in')
+  expect(NOTHING_RUNS(s)).toBe(true)
+})
+
+test('a status cut inside a record lists only the complete records', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  mergePaths(s, 'f.txt')
+  s.replies.set('status --porcelain', [
+    { exitCode: 0, stdout: '' },
+    { exitCode: 0, stdout: `${z('A  f.txt')}A  long/path/that/was/cu`, truncated: true },
+  ])
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r.error.message).toContain('what it read: f.txt.')
+  expect(r.error.message).not.toContain('long/path')
+})
+
+test('a merge-path list cut at the size limit stops the abort, and the answer says the task changes more files than integrate can read', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('diff -z --name-only', { exitCode: 0, stdout: z('f.txt'), truncated: true })
+  statuses(s, '', z('A  f.txt'))
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('the merge was not aborted, because the task branch changes more files than integrate can read')
+  expect(r.error.message).toContain('run git merge --abort in')
+  expect(r.error.message).not.toContain('probably a change of your own')
+  expect(NOTHING_RUNS(s)).toBe(true)
+})
+
+test('a cut merge-path list says nothing when there is nothing to undo', async () => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, { exitCode: 128, stderr: 'fatal: Not possible to fast-forward, aborting.\n' })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('diff -z --name-only', { exitCode: 0, stdout: z('f.txt'), truncated: true })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK })
+  expect(r).toMatchObject({ ok: false, error: { code: 'not_fast_forward' } })
+  expect(r.error.message).not.toContain('integrate can read')
+})
+
+test('a merge path and a path of the user that decode to the same string stop the cleanup', async () => {
+  const same = 'f�'
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  mergePaths(s, same)
+  statuses(s, '', z(`M  ${same}`))
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('the merge was not aborted, because a path that git printed is not valid UTF-8')
+  expect(r.error.message).toContain('run git merge --abort in')
+  expect(NOTHING_RUNS(s)).toBe(true)
+})
+
+test('a path in the status that is not valid UTF-8 stops the cleanup and is not called the user\'s', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  mergePaths(s, 'f.txt')
+  statuses(s, '', z('A  f.txt', 'M  g�'))
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r.error.message).toContain('nothing was reset, because a path that git printed is not valid UTF-8')
+  expect(r.error.message).not.toContain('probably a change of your own')
+  expect(NOTHING_RUNS(s)).toBe(true)
+})
+
+test('an untracked path that is not valid UTF-8 does not stop the cleanup', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  mergePaths(s, 'f.txt')
+  statuses(s, '', z('A  f.txt', '?? made�'), z('?? made�'))
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r.error.message).toContain('the merge was aborted')
+  expect(subcommands(s).some((sub) => sub === 'merge --abort')).toBe(true)
 })
 
 test('a change of the user to a path that the merge also touches counts as the merge\'s, so the merge is aborted', async () => {
@@ -778,7 +907,7 @@ test('a hook that refuses with no MERGE_HEAD, as a reference-transaction hook do
   expect(r.error.message).toContain('hook-made.txt')
   expect(r.error.message).toContain('ref guard: no')
   expect(r.error.message).not.toContain('the merge was aborted')
-  expect(subcommands(s).slice(-3)).toEqual(['diff --name-only --diff-filter=U', 'rev-parse -q --verify MERGE_HEAD', 'status --porcelain -z --no-renames'])
+  expect(subcommands(s).slice(-3)).toEqual(['diff --name-only --diff-filter=U', 'rev-parse -q --verify MERGE_HEAD', STATUS_Z])
 })
 
 test('a half-made merge left by a failed merge that was not killed, with no MERGE_HEAD, is reset when every changed path is the merge\'s', async () => {
@@ -793,7 +922,7 @@ test('a half-made merge left by a failed merge that was not killed, with no MERG
   const r = await integrate($, { taskId: TASK }, 'run')
   expect(r).toMatchObject({ ok: false, error: { code: 'hook_failed' } })
   expect(r.error.message).toContain('the half-made merge was undone with git reset --merge')
-  expect(subcommands(s).slice(-3)).toEqual(['status --porcelain -z --no-renames', 'reset --merge', 'status --porcelain -z --no-renames'])
+  expect(subcommands(s).slice(-3)).toEqual([STATUS_Z, 'reset --merge', STATUS_Z])
 })
 
 test('a hook refusal with MERGE_HEAD pending and a tracked change outside the merge is hook_failed, and the merge is not aborted', async () => {
@@ -845,7 +974,7 @@ test('a hook that left files behind: hook_failed says the checkout keeps changes
   expect(r.error.message).toContain('keeps changes the hook made')
   expect(r.error.message).toContain('generated.txt, other-made.txt')
   expect(r.error.message).toContain('lint: no')
-  expect(subcommands(s).slice(-2)).toEqual(['merge --abort', 'status --porcelain -z --no-renames'])
+  expect(subcommands(s).slice(-2)).toEqual(['merge --abort', STATUS_Z])
 })
 
 test('hook_failed lists at most 10 of the paths a hook left, and counts the rest', async () => {
