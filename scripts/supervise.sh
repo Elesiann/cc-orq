@@ -9,18 +9,32 @@
 #   appended in order to the runner's argv before the prompt. Callers pass
 #   effort and sandbox empty and put everything in flags.
 #
-# Files in <dir>: prompt.txt (input), pgid, events.jsonl (CLI stdout),
-# stderr.txt, last.txt (final message), exit (numeric exit code).
+# Files in <dir>: prompt.txt (input), pgid, cli.pid (OpenCode only: the pid of
+# the client), events.jsonl (CLI stdout), stderr.txt, last.txt (final
+# message), exit (numeric exit code).
 #
 # Started as the main process of a transient user unit (systemd makes it a
 # session and group leader), or under setsid when no user manager is
-# reachable, so $$ is the process-group leader. The watcher kills the whole
-# group on cancel (SIGTERM, then SIGKILL after 5 s). If the launching session
-# dies, nothing is killed: the job runs to completion on its own.
+# reachable, so $$ is the process-group leader. If the launching session
+# dies, nothing is killed: the job runs to completion on its own. When the CLI
+# is gone, however it ended, sweep.py ends what it left running outside the
+# group: every process that still carries ORQ_JOB_DIR=<dir>.
+#
+# A <dir>/cancel file ends the job. The watcher looks for it every 2 s, then:
+#   1. OpenCode only: SIGINT to the client, and up to 3 s for it to end. A
+#      client still running after that gets one line in child.log.
+#   2. If the CLI is still running, SIGTERM to the process group.
+#   3. When the CLI has ended, the main flow stops the watcher, sweeps, writes
+#      exit 124 and sends SIGKILL to the group, itself included. When the CLI
+#      is still running 5 s after the SIGTERM, the watcher takes the same
+#      steps, except that it leaves an existing exit alone; its sweep may end
+#      run_cli, which wakes the main flow to repeat them.
+# So exit appears after the sweep and just before the group's SIGKILL.
 dir=$1; runner=$2; cwd=$3; model=${4:-}; effort=${5:-}; sandbox=${6:-}
 
 echo $$ > "$dir/pgid"
 trap '' TERM
+sweep=$(cd "$(dirname "$0")" && pwd)/sweep.py
 
 flags=()
 if [ -f "$dir/flags" ]; then
@@ -44,6 +58,46 @@ write_exit() {
   printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$dir/exit"
 }
 
+# A CLI can leave a process running outside its process group, such as an MCP server that OpenCode was still
+# starting when it exited. The start script puts ORQ_JOB_DIR in every job's environment, which finds it.
+# sweep.py needs /proc, so on macOS the sweep does nothing.
+sweep_job() {
+  [ "${ORQ_JOB_DIR:-}" = "$dir" ] && python3 "$sweep" "ORQ_JOB_DIR=$dir"
+  return 0
+}
+
+# OpenCode takes SIGTERM for a server restart: the session keeps its claim, and the shared background service
+# resumes it on its next start. SIGINT aborts the session, as Ctrl-C does. run_opencode records the client's pid
+# where it execs it, so the signal needs neither pgrep nor the process name.
+interrupt_cli() {
+  [ "$runner" = opencode ] || return 0
+  local cli i
+  { read -r cli < "$dir/cli.pid"; } 2>/dev/null
+  [[ "$cli" =~ ^[0-9]+$ ]] || return 0
+  kill -INT "$cli" 2>/dev/null || return 0
+  for i in $(seq 1 30); do
+    kill -0 "$child" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  echo "orq: OpenCode did not end on SIGINT within 3 s, so the cancel falls back to SIGTERM" >&2
+}
+
+# The watcher's sleep outlives it, and a cancel's sleep lasts 5 s. Stopping the watcher first keeps it from
+# starting another before its children are collected, and from sweeping while the main flow does. pgrep finds
+# the children; without it the sweep ends the watcher's sleep and says so in child.log.
+stop_watcher() {
+  local kids stat i
+  kill -STOP "$watcher" 2>/dev/null
+  for i in $(seq 1 50); do
+    { read -r stat < "/proc/$watcher/stat"; } 2>/dev/null || break
+    [[ "${stat##*) }" == T* ]] && break
+    sleep 0.002
+  done
+  kids=$(pgrep -P "$watcher" 2>/dev/null)
+  kill -KILL "$watcher" $kids 2>/dev/null
+  wait "$watcher" 2>/dev/null
+}
+
 run_codex() {
   args=(exec --json -o "$dir/last.txt")
   [ -n "$model" ] && args+=(-m "$model")
@@ -55,9 +109,12 @@ run_codex() {
 
 run_opencode() {
   read_prompt
-  ( cd "$cwd" && opencode run --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
+  # --standalone runs a private server that ends with the job. Without it OpenCode hands the run to
+  # its shared background service, which leaves the user's MCP servers running and keeps the
+  # environment it started with.
+  ( echo "$BASHPID" > "$dir/cli.pid"; cd "$cwd" && exec opencode run --standalone --format json -m "$model" "${flags[@]}" -- "$prompt" ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
-  if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
+  if [ -e "$dir/cancel" ]; then return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
 import json, sys
 last = None
@@ -86,7 +143,7 @@ run_agy() {
   args+=("${flags[@]}" --print "$prompt")
   ( cd "$cwd" && agy "${args[@]}" </dev/null ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
-  if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
+  if [ -e "$dir/cancel" ]; then return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
 import json, sys
 last = None
@@ -116,7 +173,7 @@ run_claude() {
   args+=("${flags[@]}" -- "$prompt")
   ( cd "$cwd" && claude "${args[@]}" </dev/null ) > "$dir/events.jsonl" 2> "$dir/stderr.txt"
   code=$?
-  if [ -e "$dir/cancel" ]; then write_exit 124; return $code; fi
+  if [ -e "$dir/cancel" ]; then return $code; fi
   python3 - "$dir/events.jsonl" "$dir/last.txt" <<'PY' 2>/dev/null
 import json, sys
 last = None
@@ -150,8 +207,11 @@ child=$!
 (
   while kill -0 "$child" 2>/dev/null; do
     if [ -e "$dir/cancel" ]; then
+      interrupt_cli
+      kill -0 "$child" 2>/dev/null || exit 0
       kill -TERM -$$ 2>/dev/null
       sleep 5
+      sweep_job
       if [ ! -e "$dir/exit" ]; then write_exit 124; fi
       kill -KILL -$$ 2>/dev/null
       exit 0
@@ -161,8 +221,18 @@ child=$!
 ) &
 watcher=$!
 
-wait "$child"
+# The watcher's sweep can kill run_cli, and bash would print that into child.log.
+wait "$child" 2>/dev/null
 code=$?
-kill "$watcher" 2>/dev/null
-if [ -e "$dir/cancel" ]; then write_exit 124; elif [ ! -e "$dir/exit" ]; then write_exit "$code"; fi
+# The watcher goes before the sweep: its sleep and its own sweep carry the marker, so each sweep would end the
+# other's helpers.
+stop_watcher
+sweep_job
+if [ -e "$dir/cancel" ]; then
+  # The KILL takes the supervisor too, so exit comes first.
+  write_exit 124
+  kill -KILL -$$ 2>/dev/null
+elif [ ! -e "$dir/exit" ]; then
+  write_exit "$code"
+fi
 exit 0

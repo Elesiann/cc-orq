@@ -85,8 +85,9 @@ The answer of a `cc-orq:task` comes back to the conversation when the task ends.
 | [Claude Code](https://code.claude.com) | 2.1.287 or newer (2.1.310 tested) | The MCP server's tools work in any session. The `cc-orq:task` agent, the card, `/orq-panel` and `/orq` are a mod, which Claude Code loads by default from 2.1.287 on and an organization can turn off |
 | [Node.js](https://nodejs.org) | 22.18 or newer | The MCP server runs its TypeScript files without a build step. When `node` is missing or older, the server exits with the reason on stderr: the `cc-orq:task` agent still works, but `capabilities`, `delegate`, `status`, `list`, `cancel` and `integrate` are gone |
 | Linux | | Jobs run under `systemd-run` or `setsid` |
-| `bash`, `python3`, `git` | | The supervisor, the event extractor, worktrees, and the hook that reads the session's permission mode |
+| `bash`, `python3`, `git`, `pgrep` | | The supervisor, the event extractor, worktrees, and the hook that reads the session's permission mode. `pgrep` comes from procps; the supervisor uses it to find its watcher's `sleep`. Without it the sweep ends that `sleep` and `child.log` gets a line saying so |
 | A provider CLI | Any of `codex`, `opencode`, `claude`, `agy` | The workers. Each one must be installed and logged in |
+| [OpenCode](https://github.com/sst/opencode) | 2.0.27 (tested) | orq passes `--standalone` to `opencode run` and `opencode models`, so the flag is required. Earlier versions were not tried. See [OpenCode notes](#opencode-notes) |
 
 The six tools of the MCP server work in every session. The `cc-orq:task`
 agent, the card, `/orq-panel` and `/orq` are a mod. Claude Code loads mods by
@@ -186,12 +187,23 @@ interrupted.
 
 ### `/orq cancel JOB_ID`
 
-Asks the job's supervisor to stop it. The supervisor sends SIGTERM to the job's
-process group, sends SIGKILL after 5 seconds, and records exit code 124. The
-command only writes the request, so the job may show `cancelling` for a few
-seconds. A job that has already ended is not touched: the command answers that it
-finished and writes nothing. An `interrupted` job has no supervisor to stop, so the
-command says so and writes nothing.
+Asks the job's supervisor to stop it. The supervisor looks for the request every
+2 seconds, and then:
+
+1. For an OpenCode job, sends SIGINT to the OpenCode client and waits up to 3
+   seconds for it to end. SIGINT aborts the OpenCode session, which SIGTERM
+   leaves claimed. A client that is still running after that gets one line in
+   `child.log`, and the cancel goes on.
+2. If the CLI is still running, sends SIGTERM to the job's process group.
+3. When the CLI has ended, or when it is still running 5 seconds after the
+   SIGTERM, ends every process that still carries the job's `ORQ_JOB_DIR`,
+   records exit code 124, and sends SIGKILL to the process group.
+
+The command only writes the request, so the job may show `cancelling` for a few
+seconds, and for up to about 11 when the CLI ends on neither SIGINT nor SIGTERM.
+A job that has already ended is not touched: the command answers that it finished
+and writes nothing. An `interrupted` job has no supervisor to stop, so the command
+says so and writes nothing.
 
 ```
 /orq cancel manual-1760000000000-manual-k3j9x2
@@ -811,8 +823,9 @@ has its
 `providerInstanceId`, its `driverKind`, its `models` (each with the `options`
 the CLI reports, such as `reasoningEffort` and its allowed values),
 `canRunChildTask` and `constraints`, the reasons it cannot run now. An
-OpenCode instance lists every model of `opencode models`, which names only the
-providers OpenCode can use, logged in or configured through the environment.
+OpenCode instance lists every model of `opencode models --standalone`, which
+names only the providers OpenCode can use, logged in or configured through the
+environment.
 
 <details>
 <summary>Example answer</summary>
@@ -1145,6 +1158,24 @@ invalid field keeps the default for that field and drops invalid instances one
 by one. Both cases log a warning naming the field in the debug log
 (`claude --debug-file`).
 
+### OpenCode notes
+
+- orq passes `--standalone` to `opencode run` and to `opencode models`. The
+  command then runs on a private server that takes the command's own
+  environment and ends with the command, instead of OpenCode's shared
+  background service. The flag is required, and 2.0.27 is the version tested.
+- A cancel signals the process that the job's shell started with `exec`, whose
+  pid is in `cli.pid`, not a process found by name. The OpenCode 2.0.27 that orq
+  was tested with is a native binary, so SIGINT reaches the client. The npm
+  package `opencode-ai` has no wrapper that starts the client either: its
+  `postinstall.mjs` links or copies the native binary over `bin/opencode.exe`
+  (read on 1.19.4, the newest version that npm lists; npm has no 2.0.27). An
+  `opencode` that is a script starting the client as a child receives the signal
+  instead. If it does not pass SIGINT on, the client keeps running, `child.log`
+  gets a line that OpenCode did not end on SIGINT, and the cancel goes on with
+  SIGTERM, which leaves the session claimed.
+- Only a native install was run live.
+
 ## Job directory layout
 
 <details>
@@ -1160,8 +1191,9 @@ for both the kind and the agent suffix, for example
 | `meta.json` | the launch | The job's id, kind, agent id, working directory, start time, runner, model, instance id, driver, the effort the CLI was given and, for a Codex instance with a `CODEX_HOME`, that path. A job that `delegate` starts has kind `mcp`, the session id as its agent id (or `mcp`), and `questions`. A worktree job adds the checkout it came from (`repo`), the base commit (`baseSha`), its branch and its worktree path. Other `env` values are never written to disk. |
 | `prompt.txt` | `/orq launch` | The prompt, as given. |
 | `scope` | start script | `systemd` when the job runs in a transient user unit, `setsid` when no user manager is reachable. |
-| `child.log` | start script | The supervisor's own stdout and stderr. |
+| `child.log` | start script | The supervisor's own stdout and stderr. It is empty for a job that ended without leftovers. A line says that the sweep ended processes the CLI left behind, or that OpenCode did not end on SIGINT. |
 | `pgid` | `supervise.sh` | The supervisor's pid. The supervisor leads its process group, so this is also the group id. |
+| `cli.pid` | `supervise.sh` | An OpenCode job only: the pid of the OpenCode client, which a cancel sends SIGINT to. |
 | `events.jsonl` | `supervise.sh` | The CLI's stdout. For the supported runners it is a JSON event stream. |
 | `stderr.txt` | `supervise.sh` | The CLI's stderr. |
 | `last.txt` | the CLI or `supervise.sh` | The final message. Codex writes it with `-o`. The other runners extract it from the event stream after the run. |
@@ -1272,8 +1304,13 @@ flowchart LR
 3. The engine (`hooks/engine.ts`) creates the job directory, a worktree when the
    task asks for one (with the git commands `hooks/worktree.ts` plans), and runs `scripts/supervise.sh`
    detached under `systemd-run` or `setsid`. The supervisor runs the provider
-   CLI, writes its events and final message, and stops the process group when
-   a `cancel` file appears.
+   CLI, writes its events and final message, and ends the process group when
+   a `cancel` file appears, in the order that `/orq cancel` describes. An
+   OpenCode job passes `--standalone`, so it runs on a private OpenCode server
+   with the job's environment, not on OpenCode's shared background service.
+   When the CLI is gone, finished or cancelled, `scripts/sweep.py` ends any
+   process that still carries the job's `ORQ_JOB_DIR`, such as an MCP server
+   that was still starting. A cancel writes `exit` after that sweep.
 4. Each following step calls `mcp__cc-orq__wait`, which blocks for up to
    `waitSeconds` and answers whether the job has finished.
 5. When the job ends, the engine reads its final message from `last.txt` and
@@ -1336,9 +1373,11 @@ directories.
   the job of whoever took the lock. The supervisor has to close this by not
   running a job that already has an `exit` file. See
   [Worktrees and integrate](#worktrees-and-integrate).
-- Cancelling a job stops its process group. A process that leaves the group
-  keeps running, and so do the tools of an `opencode run` job, which execute
-  in the shared OpenCode server.
+- A cancel ends the job's process group and every process that still carries the
+  job's `ORQ_JOB_DIR`. A process that left the group and cleared its environment
+  keeps running, and so does one whose environment the sweep cannot read, such as
+  a process that cleared its own dumpable flag. The sweep reads `/proc`, so
+  where `/proc` is missing only the group ends.
 - OpenCode tasks do not get the task's effort, and their footer says
   `effort n/a`.
 - A task's worktree gets ignored files only through `.worktreeinclude`, and a

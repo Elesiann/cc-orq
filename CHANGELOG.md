@@ -128,6 +128,11 @@ All notable changes to cc-orq are recorded here. The format follows
 - The `SessionStart` hook and the orchestration snippet it printed are gone. The
   guidance for starting a task is now the description of the `cc-orq:task`
   agent, and the guidance for the tools is the server's instructions.
+- A cancel no longer waits out the 5 seconds when the CLI ends sooner. Once the
+  CLI has ended and its leftovers are swept, the supervisor writes `exit` 124
+  and sends SIGKILL to the process group. A process in the group that needs
+  longer than the CLI to stop on SIGTERM gets less than the 5 seconds a cancel
+  gave it before.
 - The README says what a worktree task shares with your checkout: the `.git`
   directory. A worker that can write it can change git config or hooks that
   run programs in any later git command there, `integrate` and your own `git`
@@ -159,6 +164,27 @@ All notable changes to cc-orq are recorded here. The format follows
   launch took over, or whose check fails, is refused with `worktree_busy`. A
   supervisor that writes its pid after its launch gave up still runs its
   worker, which the supervisor has to close itself.
+- OpenCode jobs and the `capabilities` probe no longer go through OpenCode's
+  shared background service. That service started your OpenCode MCP servers
+  again for each command and kept them running, which left 41 processes and
+  about 2 GB of memory in use after one probe on OpenCode 2.0.27. Every command
+  also ran with the environment the service was started with. Jobs and the
+  probe now pass `--standalone`, so OpenCode runs on a private server that uses
+  the command's environment and ends with the command.
+- A process that a job's CLI left running outside its process group, such as an
+  OpenCode MCP server that was still starting when the command ended, no longer
+  outlives the job. When the CLI is gone, finished or cancelled, the supervisor
+  ends every process that still carries the job's `ORQ_JOB_DIR` before it
+  writes `exit`, so a cancelled job reads `cancelled` only once they are gone,
+  and the `capabilities` probe does the same for each `opencode models` call.
+  Under load that leftover was up to 20 processes after one probe on OpenCode
+  2.0.27.
+- Cancelling an OpenCode job sends SIGINT first, so OpenCode aborts the session.
+  SIGTERM left the session claimed, and OpenCode's shared service continues a
+  claimed session ("continue where you left off") the next time it starts. The
+  supervisor sends the SIGINT to the pid it recorded in `cli.pid`. A client that
+  is still running 3 seconds later gets one line in `child.log`, and the cancel
+  goes on with SIGTERM.
 
 ## [0.1.1] - 2026-10-21
 
