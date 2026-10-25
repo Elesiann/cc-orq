@@ -21,9 +21,10 @@ All notable changes to cc-orq are recorded here. The format follows
   at once. Its fields are the header of a `cc-orq:task` prompt, read by the same
   parser, so a mistake gets the same message. It works in a worktree by default,
   holds the request to the permission ceiling, and refuses what is above it with
-  the escalation code and what lifts the limit. Its job has kind `mcp`, the
-  session id as its `agentId` (or `mcp`), and `questions` in `meta.json`.
-  `questions: human` is refused for now, because it needs MCP tasks and forms.
+  the escalation code and what lifts the limit. It takes a prompt of at most
+  200,000 characters. Its job has kind `mcp`, the session id as its `agentId`
+  (or `mcp`), and `questions` in `meta.json`. `questions: human` is refused for
+  now, because it needs MCP tasks and forms.
 - The `ceiling` field of `~/.config/orq/config.json`: `runtime` (default
   `auto-accept-edits`) limits a task in its own worktree, `sharedRuntime`
   (default `approval-required`) limits a task with `isolation: shared`, and
@@ -32,8 +33,11 @@ All notable changes to cc-orq are recorded here. The format follows
 - A `PreToolUse` hook, `scripts/session-mode-hook.sh`, gives `delegate` and
   `capabilities` the session's permission mode as `sessionMode`, over any value
   the model wrote there. It returns the changed input and never a permission
-  decision. It blocks the call when it has no `python3` or cannot read its
-  input, since an unread call could carry a mode the model forged.
+  decision. It blocks the call when it has no `python3`, cannot read its input,
+  or finds a `permission_mode` that is empty or not text, since a call let
+  through could carry a mode the model forged. A session's own limit holds only
+  while the hook runs: without it, the configuration's limit is the most a task
+  can get.
 
 ### Changed
 

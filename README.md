@@ -324,22 +324,37 @@ replaces whatever the model wrote there. Claude Code drops input keys that a
 tool's schema does not name, so `sessionMode` is in the schema of `delegate` and
 `capabilities`, described as filled by the hook. The hook returns the changed
 input and never a permission decision, so every call still goes through the
-session's own permission check. When a call carries no `sessionMode`, as when you
-turn hooks off with `disableAllHooks`, only the configuration limits the task.
+session's own permission check.
 
-The hook blocks a cc-orq tool call when it cannot read the session's mode: when
-`python3` is missing, or when its input is not what Claude Code sends. It stops
-the call and writes the reason to stderr, because a call that went through
-unread could carry a `sessionMode` that the model wrote itself, and a forged
-mode lifts the limit above the session's real one.
+The session's limit holds only while the hook runs. Without the hook, as when you
+turn hooks off with `disableAllHooks` or use a client other than Claude Code, the
+server cannot tell the session's mode. It takes the `sessionMode` that the call
+carries, if any, as given. The configuration's limit is then the most a task can
+get, and a value the model writes can lower the ceiling but never raise it above
+that limit.
+
+The hook blocks a cc-orq tool call when it cannot give the server the session's
+mode: when `python3` is missing, when its input is not what Claude Code sends, or
+when `permission_mode` is present but empty or not text. It stops the call and
+writes the reason to stderr, because a call let through that way would reach the
+server with a `sessionMode` that the model wrote itself, and a forged mode lifts
+the limit above the session's real one. A hook input with no `permission_mode`
+key at all is not blocked: the hook removes the model's `sessionMode`, and the
+configuration alone limits the task.
+
+A hook that outlives its timeout does not block the call (measured on 2.1.310),
+and the call then reaches the server as the model wrote it. The hook takes about
+30 ms and its timeout is 30 s. `delegate` also takes a prompt of at most 200,000
+characters, so that no call outgrows the hook.
 
 ### The effective ceiling
 
 The effective ceiling is the lower of the two limits on each axis. Runtime modes
 rise in this order: `approval-required`, `auto-accept-edits`, `auto`,
 `full-access`. Interaction modes rise as `plan`, then `default`. A `sessionMode`
-that a model forges can only lower the ceiling, since the hook replaces it and
-the configuration caps it where the hook does not run.
+that the model writes never raises the ceiling above the configuration's limit.
+Whether the session's own limit holds depends on the hook, as the previous
+section says.
 
 A request that leaves out `runtime` or `interaction` gets the effective ceiling.
 A request above it is refused before anything starts, with
@@ -619,7 +634,7 @@ them with the same parser, so a mistake gets the same message as in a header.
 | `target` | yes | The `id` of an instance, as `capabilities` lists it |
 | `model` | yes | A model id of that instance, one word that does not start with `-` |
 | `cwd` | yes | An absolute path inside the session directory or an `allowedRoots` entry |
-| `prompt` | yes | The whole brief. The worker has no history |
+| `prompt` | yes | The whole brief, at most 200,000 characters (more is refused with `invalid_request`). The worker has no history |
 | `effort` | no | The reasoning effort, one word |
 | `isolation` | no | `worktree` (the default) or `shared` |
 | `role` | no | `implementation`, `research`, `review`, `design`, `test` or `general` |
@@ -995,7 +1010,7 @@ directories.
 | `capabilities` lists no providers, or misses one | Run the provider CLI once in a shell and log in. The debug log (`claude --debug-file`) gives the probe's reason |
 | `orq: task refused (taskId none): ...` | The refusal names its code. See [Permission ceiling](#permission-ceiling) and [Working directory](#working-directory) |
 | `delegate` answers `runtime_mode_escalation_denied` or `interaction_mode_escalation_denied` | The request is above the ceiling. The message names the limit in the way: raise that `ceiling` field in `~/.config/orq/config.json`, or run the session in a mode that allows it. See [Permission ceiling](#permission-ceiling) |
-| A call to `delegate` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, or with `the session-mode hook could not read its input` | Put `python3` on the `PATH` that Claude Code runs with. The hook blocks the call when it cannot read the session's mode, because an unread call could carry a mode the model forged |
+| A call to `delegate` or `capabilities` is blocked with `cc-orq: python3 is required to read the session's permission mode`, `the session-mode hook could not read its input` or `the session-mode hook cannot use its input` | Put `python3` on the `PATH` that Claude Code runs with. With `python3` in place, the hook input was not what the hook expects, such as a `permission_mode` that is empty or not text: update Claude Code and the plugin. The hook blocks the call because one let through could carry a mode the model forged |
 | A job reads `interrupted` | Its supervisor died without writing an exit code, for example on a reboot. Its files stay in the job directory |
 | `integrate` answers `not_fast_forward` | Integrate again with `"strategy": "merge"` |
 | `integrate` answers `merge_conflict` | Delegate a rebase of the task branch to the same worker, then integrate again |
