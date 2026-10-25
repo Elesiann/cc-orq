@@ -5,7 +5,7 @@
 import type { EngineInterface, On, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { loadConfig, MAX_WAIT_SECONDS, type OrqConfig } from './config.ts'
-import { fail, isFailure, type Failure } from './contract.ts'
+import { isFailure } from './contract.ts'
 import { composeAnswer, jobLiveness, launchTaskJob, listJobs, readMeta, writeCancel, type Engine } from './engine.ts'
 import { parseTaskHeader } from './task-header.ts'
 import {
@@ -16,7 +16,8 @@ import {
   runnerPolicy,
   taskPrompt,
 } from './target.ts'
-import { formatDuration, isRecord, isWithin, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
+import { scopedCwd } from './scope.ts'
+import { formatDuration, isRecord, refusalText, shellWord, TASK_REFUSAL, type JobRecord } from './types.ts'
 
 type TaskEngine = Engine & Pick<EngineInterface, 'agent' | 'settings' | 'store' | 'tool' | 'ui'>
 
@@ -105,54 +106,12 @@ async function handbackPermissionMode($: TaskEngine, agentId: string): Promise<s
   }
 }
 
-/** A path with its symlinks resolved through realpath: -e needs the path to exist, -m does not. Null when refused. */
-async function resolvePath($: TaskEngine, path: string, mode: '-e' | '-m'): Promise<string | null> {
+async function sessionCwd($: TaskEngine): Promise<string> {
   try {
-    const r = await $.process.run(['realpath', mode, '--', path], { timeoutMs: 10000 })
-    const resolved = r.stdout.trim()
-    return r.exitCode === 0 && resolved.startsWith('/') ? resolved : null
+    return await $.session.cwd()
   } catch {
-    return null
+    return ''
   }
-}
-
-/** The session's directory and each allowedRoots entry, resolved through symlinks. An entry that cannot be resolved is left out. */
-async function scopeRoots($: TaskEngine, config: OrqConfig): Promise<string[]> {
-  let session = ''
-  try {
-    session = await $.session.cwd()
-  } catch {
-    session = ''
-  }
-  const roots: string[] = []
-  for (const candidate of [session, ...config.allowedRoots]) {
-    if (candidate === '') continue
-    const resolved = await resolvePath($, candidate, '-m')
-    if (resolved !== null) roots.push(resolved)
-  }
-  return roots
-}
-
-/**
- * The directory a task runs in, resolved through symlinks. It must lie inside the session's directory or an
- * allowedRoots entry; a path that does not exist, or is not a directory, is refused too.
- */
-async function scopedCwd($: TaskEngine, config: OrqConfig, requested: string): Promise<{ cwd: string; roots: string[] } | { refusal: string }> {
-  const cwd = await resolvePath($, requested, '-e')
-  if (cwd === null) return { refusal: `${TASK_REFUSAL}: directory does not exist: ${requested}` }
-  const roots = await scopeRoots($, config)
-  if (!roots.some((root) => isWithin(cwd, root))) {
-    const named = roots.length > 0 ? roots.join(', ') : 'none'
-    return {
-      refusal: refusalText(fail('cwd_out_of_scope', `cwd ${cwd} is outside the session directory and the allowed roots (${named}).`)),
-    }
-  }
-  try {
-    if ((await $.fs.stat(cwd)).kind === 'dir') return { cwd, roots }
-  } catch {
-    /* reported below as not a directory */
-  }
-  return { refusal: `${TASK_REFUSAL}: not a directory: ${cwd}` }
 }
 
 function firstUserText(messages: { role: string; text: string }[]): string | undefined {
@@ -162,10 +121,6 @@ function firstUserText(messages: { role: string; text: string }[]): string | und
 /** A task agent is one whose spawn the mod saw as cc-orq:task. Every other agent passes through untouched. */
 async function isTaskAgent($: TaskEngine, agentId: string): Promise<boolean> {
   return (await storeRead($, `task:${agentId}`)) === TASK_SUBAGENT
-}
-
-function refusalText(failure: Failure): string {
-  return `${TASK_REFUSAL}: ${failure.error.code}: ${failure.error.message}`
 }
 
 async function readMessages($: TaskEngine, agentId: string): Promise<{ role: string; text: string }[]> {
@@ -199,7 +154,7 @@ async function launchForAgent($: TaskEngine, config: OrqConfig, agentId: string)
   if (isFailure(resolved)) return { refusal: refusalText(resolved) }
   const policy = runnerPolicy(resolved.instance.driver, resolved.runtimeMode, resolved.interactionMode)
   if (isFailure(policy)) return { refusal: refusalText(policy) }
-  const scoped = await scopedCwd($, config, header.cwd)
+  const scoped = await scopedCwd($, config, await sessionCwd($), header.cwd)
   if ('refusal' in scoped) return scoped
   const effort = appliedEffort(resolved.instance.driver, resolved.options)
   const launched = await launchTaskJob($, config, {
