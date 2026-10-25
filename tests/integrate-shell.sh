@@ -3,7 +3,8 @@
 # prepareWorktree, and the real integrate function, the one the MCP server serves. The engines are the ones the
 # server builds: the node engine with git hooks off, which integrate uses by default, and the one that keeps the
 # checkout's hooks on, which it uses once the config says `integrate.gitHooks: run`. Git reads no global or system
-# config here, so the host's merge settings cannot change the result.
+# config here, so the host's merge settings cannot change the result. A merge that has to outlive git's timeout gets a
+# short one through the engine the driver hands to integrate, which clamps the timeout of the merge call alone.
 # Usage: bash tests/integrate-shell.sh
 set -e -o pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,12 +37,14 @@ const jobsDir = `${home}/.cache/orq/jobs`
 const launching = nodeEngine({ pluginRoot: ROOT })
 const keepingHooks = nodeEngine({ pluginRoot: ROOT, gitHooks: 'repository' })
 const gitCalls = []
+let mergeTimeoutMs = null
 const spy = (engine) => ({
   ...engine,
   process: {
     run: (argv, init) => {
       if (argv[0] === 'git') gitCalls.push(argv)
-      return engine.process.run(argv, init)
+      const merging = mergeTimeoutMs !== null && argv[0] === 'git' && argv[3] === 'merge' && argv[4] !== '--abort'
+      return engine.process.run(argv, merging ? { ...init, timeoutMs: mergeTimeoutMs } : init)
     },
   },
 })
@@ -106,6 +109,14 @@ function commit(cwd, file, text, message) {
 
 const finish = (taskId) => writeFileSync(`${jobsDir}/${taskId}/exit`, '0')
 
+// Puts the checkout and its hooks back after a case that may have failed, so the next case starts from a clean one.
+function scrub() {
+  git(repo, 'merge', '--abort')
+  git(repo, 'reset', '--hard', '-q')
+  git(repo, 'clean', '-fdq')
+  for (const name of ['pre-merge-commit', 'commit-msg', 'post-merge']) rmSync(`${repo}/.git/hooks/${name}`, { force: true })
+}
+
 // A detached child leads its own process group, so its pid is the pgid that the job records.
 const groups = []
 const alive = (pid) => {
@@ -130,6 +141,20 @@ async function stopLive(pid) {
     // The group is already gone.
   }
   for (let wait = 0; wait < 250 && alive(pid); wait += 1) await new Promise((done) => setTimeout(done, 20))
+}
+// A hook that outlives the timeout writes its own pid first, so the case can see that the kill reached it.
+const hookGone = async (pidFile) => {
+  const pid = Number(readFileSync(pidFile, 'utf8'))
+  const exists = () => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  for (let wait = 0; wait < 100 && exists(); wait += 1) await new Promise((done) => setTimeout(done, 20))
+  return !exists()
 }
 process.on('exit', () => {
   for (const pid of groups) {
@@ -274,6 +299,73 @@ check('a job that began a moment ago and has no pgid yet is task_running', fresh
 check('those refusals ran no git call, left HEAD unmoved and the tree clean', gitCalls.length === callsBeforeV && must(repo, 'rev-parse', 'HEAD') === headBeforeV && must(repo, 'status', '--porcelain') === '')
 writeMeta('fresh-job', { cwd: planV.worktree, startedAt: Date.now() - 60000 })
 check('the same job a minute later, still with no pgid, counts as gone, and the task integrates', (await integrate(V, 'merge')).ok === true)
+
+// git writes MERGE_HEAD after the pre-merge-commit hook and before commit-msg, so a merge killed in the first leaves its
+// half-made index with no merge pending, and one killed in the second leaves a merge pending.
+const pidFile = `${home}/hook-pid`
+const hookMade = `${repo}/hook-made.txt`
+const T = 'task-t'
+const planT = await startTask(T)
+commit(planT.worktree, 't.txt', 'task t\n', 'task t work')
+finish(T)
+installHook('pre-merge-commit', `echo $$ > "${pidFile}"; echo made > "${hookMade}"; sleep 30`)
+const headBeforeT = must(repo, 'rev-parse', 'HEAD')
+mergeTimeoutMs = 1500
+const hung = await integrate(T, 'merge', 'run')
+mergeTimeoutMs = null
+check('with the opt-in, a pre-merge-commit hook that outlives the timeout answers git_failed and names the timeout', hung.ok === false && hung.error?.code === 'git_failed' && /did not finish within 1500 ms/.test(hung.error.message))
+check('the killed merge is undone: no merge pending, HEAD unmoved, only the file the hook made is left', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'rev-parse', 'HEAD') === headBeforeT && must(repo, 'status', '--porcelain') === '?? hook-made.txt')
+check('the answer lists the file the hook left, and says the half-made merge was undone', hung.error?.message.includes('hook-made.txt') === true && hung.error.message.includes('git reset --merge'))
+check('the hook that outlived the timeout is gone', await hookGone(pidFile))
+rmSync(hookMade, { force: true })
+rmSync(`${repo}/.git/hooks/pre-merge-commit`, { force: true })
+check('the same task merges once the hook is gone, so the killed merge left nothing in the way', (await integrate(T, 'merge', 'run')).ok === true)
+scrub()
+
+const U = 'task-u'
+const planU = await startTask(U)
+commit(planU.worktree, 'u.txt', 'task u\n', 'task u work')
+finish(U)
+installHook('commit-msg', `echo $$ > "${pidFile}"; sleep 30`)
+const headBeforeU = must(repo, 'rev-parse', 'HEAD')
+mergeTimeoutMs = 1500
+const hungLate = await integrate(U, 'merge', 'run')
+mergeTimeoutMs = null
+check('with the opt-in, a commit-msg hook that outlives the timeout answers git_failed, and the pending merge was aborted', hungLate.ok === false && hungLate.error?.code === 'git_failed' && /did not finish within 1500 ms/.test(hungLate.error.message) && hungLate.error.message.includes('the merge was aborted'))
+check('the aborted merge leaves no MERGE_HEAD, a clean tree and HEAD unmoved', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '' && must(repo, 'rev-parse', 'HEAD') === headBeforeU)
+check('the commit-msg hook that outlived the timeout is gone', await hookGone(pidFile))
+scrub()
+
+const W = 'task-w'
+const planW = await startTask(W)
+commit(planW.worktree, 'w.txt', 'task w\n', 'task w work')
+finish(W)
+installHook('post-merge', `echo $$ > "${pidFile}"; sleep 30`)
+mergeTimeoutMs = 1500
+const hungAfter = await integrate(W, undefined, 'run')
+mergeTimeoutMs = null
+check('with the opt-in, a post-merge hook that outlives the timeout answers git_failed and says the branch is already part of HEAD', hungAfter.ok === false && hungAfter.error?.code === 'git_failed' && hungAfter.error.message.includes(`${planW.branch} is already part of HEAD`))
+check('the merge itself landed: HEAD is the task tip, the tree is clean', must(repo, 'rev-parse', 'HEAD') === must(planW.worktree, 'rev-parse', 'HEAD') && must(repo, 'status', '--porcelain') === '')
+check('the post-merge hook that outlived the timeout is gone', await hookGone(pidFile))
+scrub()
+
+// git merge --abort does not remove a file that a hook made.
+const K = 'task-k'
+const planK = await startTask(K)
+commit(planK.worktree, 'k.txt', 'task k\n', 'task k work')
+finish(K)
+const headBeforeK = must(repo, 'rev-parse', 'HEAD')
+installHook('pre-merge-commit', `echo made > "${repo}/leftover.txt"; echo "lint: refused" >&2; exit 1`)
+const leftover = await integrate(K, 'merge', 'run')
+check('with the opt-in, a hook that leaves a file and refuses the merge is hook_failed, and the answer says the checkout keeps changes the hook made', leftover.ok === false && leftover.error?.code === 'hook_failed' && leftover.error.message.includes('keeps changes the hook made') && leftover.error.message.includes('leftover.txt') && leftover.error.message.includes('lint: refused'))
+check('only the file the hook made stays: no MERGE_HEAD, HEAD unmoved', !existsSync(`${repo}/.git/MERGE_HEAD`) && must(repo, 'status', '--porcelain') === '?? leftover.txt' && must(repo, 'rev-parse', 'HEAD') === headBeforeK)
+rmSync(`${repo}/leftover.txt`, { force: true })
+installHook('pre-merge-commit', 'echo "plain-stdout-words"; exit 1')
+const printed = await integrate(K, 'merge', 'run')
+check('a hook that prints on stdout has its text in hook_failed, which git sends to stderr', printed.ok === false && printed.error?.code === 'hook_failed' && printed.error.message.includes('plain-stdout-words'))
+rmSync(`${repo}/.git/hooks/pre-merge-commit`, { force: true })
+check('the same task merges once the hook lets go', (await integrate(K, 'merge', 'run')).ok === true)
+scrub()
 
 check('an unknown task is task_not_found', (await integrate('task-nope')).error?.code === 'task_not_found')
 const plain = `${home}/plain`

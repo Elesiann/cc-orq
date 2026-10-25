@@ -10,6 +10,7 @@ import {
 import { failureSnippet, isRecord, isWithin, shortBranch, type JobRecord } from './types.ts'
 import {
   GIT_TIMEOUT_MS,
+  gitArgv,
   gitDetail,
   isAncestorArgv,
   mergeAbortArgv,
@@ -22,6 +23,9 @@ import {
 } from './worktree.ts'
 
 export type IntegrateOutcome = { integrated: Integrated } | { failure: GitFailure }
+
+type ProcessResult = Awaited<ReturnType<CoreEngine['process']['run']>>
+type Git = (argv: string[]) => Promise<ProcessResult>
 
 function fail(code: GitFailure['code'], message: string, files?: string[]): { failure: GitFailure } {
   return { failure: files === undefined ? { code, message } : { code, message, files } }
@@ -36,6 +40,12 @@ const GIT_NAMES_A_HOOK = /^(?:fatal|error): .*\bhooks?\b/im
 
 /** The line git ends with when a hook refuses a merge commit. orq aborts that merge, so the advice is wrong. */
 const GIT_COMMIT_ADVICE = 'Not committing merge;'
+
+const LEFT_PATHS_LISTED = 10
+
+function reasonOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
 
 /** A shared launch records no branch, so a job also counts when it runs inside the task's worktree. */
 function worksOnTask(job: JobRecord, branch: string, worktree: string): boolean {
@@ -60,9 +70,10 @@ async function liveJobOn($: CoreEngine, jobsDir: string, task: JobRecord, branch
   return null
 }
 
-/** The hook's output from what the refused merge printed: redacted, cut to its last 20 lines, without git's advice. */
-function hookOutput(stderr: string): string {
-  const lines = stderr.split('\n').filter((line) => !line.startsWith(GIT_COMMIT_ADVICE))
+/** The hook's output from what the refused merge printed on both streams: redacted, cut to its last 20 lines, without git's advice. */
+function hookOutput(stdout: string, stderr: string): string {
+  const printed = [stdout, stderr].map((stream) => stream.trimEnd()).filter((stream) => stream !== '')
+  const lines = printed.join('\n').split('\n').filter((line) => !line.startsWith(GIT_COMMIT_ADVICE))
   return failureSnippet(lines.join('\n').trim())
 }
 
@@ -76,16 +87,103 @@ export function parseIntegrateInput(raw: unknown): { input: IntegrateInput } | {
   return { input: { taskId: raw.taskId, strategy } }
 }
 
+type Attempt = { result: ProcessResult } | { unfinished: string }
+
+async function attempt(run: Git, argv: string[]): Promise<Attempt> {
+  try {
+    return { result: await run(argv) }
+  } catch (err) {
+    return { unfinished: reasonOf(err) }
+  }
+}
+
+async function must(run: Git, argv: string[], what: string): Promise<ProcessResult> {
+  const r = await run(argv)
+  if (r.exitCode !== 0) throw new Error(`${what} failed${gitDetail(r.stderr)}`)
+  return r
+}
+
+type Aftermath = {
+  conflicted: string[]
+  abortedMerge: boolean
+  undidHalfMadeMerge: boolean
+  headHasBranch: boolean
+  leftBehind: string[]
+}
+
+/**
+ * Puts the checkout back after a merge that did not succeed, then reads what stays in it. The unmerged files are read
+ * before any abort, since merge --abort clears them from the index. git 2.43 runs pre-merge-commit before it writes
+ * MERGE_HEAD, so a git killed there leaves the merge in the index with no merge pending, which merge --abort does
+ * not undo; git reset --merge does, unless HEAD already moved onto the branch.
+ */
+async function cleanUp(run: Git, repo: string, branch: string, killed: boolean): Promise<Aftermath> {
+  const conflicted = outputLines((await run(unmergedFilesArgv(repo))).stdout)
+  const pending = (await run(mergeHeadArgv(repo))).exitCode === 0
+  if (pending) await must(run, mergeAbortArgv(repo), 'git merge --abort')
+  if (!pending && !killed) return { conflicted, abortedMerge: false, undidHalfMadeMerge: false, headHasBranch: false, leftBehind: [] }
+  const headHasBranch = killed && !pending && (await run(isAncestorArgv(repo, branch))).exitCode === 0
+  const status = async () => outputLines((await must(run, statusArgv(repo), 'git status')).stdout)
+  let leftBehind = await status()
+  const undidHalfMadeMerge = killed && !pending && !headHasBranch && leftBehind.some((line) => !line.startsWith('??'))
+  if (undidHalfMadeMerge) {
+    await must(run, gitArgv(repo, 'reset', '--merge'), 'git reset --merge')
+    leftBehind = await status()
+  }
+  return { conflicted, abortedMerge: pending, undidHalfMadeMerge, headHasBranch, leftBehind }
+}
+
+function keptClause(repo: string, madeBy: string, leftBehind: string[]): string {
+  if (leftBehind.length === 0) return ''
+  const paths = leftBehind.slice(0, LEFT_PATHS_LISTED).map((line) => line.slice(3))
+  const more = leftBehind.length > LEFT_PATHS_LISTED ? `, and ${leftBehind.length - LEFT_PATHS_LISTED} more` : ''
+  return `; ${repo} keeps changes ${madeBy} made: ${paths.join(', ')}${more}`
+}
+
+type Merging = { repo: string; branch: string; strategy: IntegrateStrategy; gitHooks: IntegrateGitHooks }
+
+async function failedMerge(run: Git, { repo, branch, strategy, gitHooks }: Merging, merged: Attempt): Promise<IntegrateOutcome> {
+  let after: Aftermath
+  try {
+    after = await cleanUp(run, repo, branch, 'unfinished' in merged)
+  } catch (err) {
+    const ended = 'unfinished' in merged ? 'did not finish' : 'failed'
+    return fail('git_failed', `git merge of ${branch} into ${repo} ${ended}, and ${reasonOf(err)}; ${repo} may still be mid-merge`)
+  }
+  const { conflicted, abortedMerge, undidHalfMadeMerge, headHasBranch, leftBehind } = after
+  const aborted = abortedMerge ? '; the merge was aborted' : ''
+  if ('unfinished' in merged) {
+    const undone = undidHalfMadeMerge ? '; the half-made merge was undone with git reset --merge' : ''
+    const finished = headHasBranch ? `; ${branch} is already part of HEAD of ${repo}, so the merge itself finished` : ''
+    const kept = keptClause(repo, 'the merge or its hook', leftBehind)
+    return fail('git_failed', `git merge ${branch} into ${repo} did not finish: ${merged.unfinished}${aborted}${undone}${finished}${kept}`)
+  }
+  const { result } = merged
+  if (conflicted.length > 0) {
+    const kept = keptClause(repo, 'the merge', leftBehind)
+    return fail('merge_conflict', `${branch} conflicts with ${repo} in ${conflicted.length} file(s); the merge was aborted${kept}`, conflicted)
+  }
+  if (gitHooks === 'run' && (abortedMerge || GIT_NAMES_A_HOOK.test(result.stderr))) {
+    const output = hookOutput(result.stdout, result.stderr)
+    const refused = `a git hook refused the merge of ${branch} into ${repo}${aborted}${keptClause(repo, 'the hook', leftBehind)}`
+    const said = output === '' ? "The checkout's hook printed nothing." : `Output of the checkout's hook:\n${output}`
+    return fail('hook_failed', `${refused}. A hook has to pass before the task can merge: fix what it checks, then integrate again.\n${said}`)
+  }
+  const code = strategy === 'ff-only' ? 'not_fast_forward' : 'git_failed'
+  return fail(code, `git merge ${branch} into ${repo} failed${gitDetail(result.stderr)}${aborted}${keptClause(repo, 'the merge', leftBehind)}`)
+}
+
 /**
  * Merge a finished task's branch into the checkout it was launched from. Every git call is an explicit
  * argv in the destination, with no force. A job still running on the branch or in the task's worktree refuses
- * the merge before git runs. A conflict is listed, then aborted; the worktree stays.
+ * the merge before git runs. A merge that conflicts, is refused, or is killed for outliving git's timeout is
+ * cleaned up, and the answer says what stays in the checkout; the worktree stays.
  *
  * `gitHooks` says whether `$` runs the checkout's hooks as they are, which only an engine that keeps them on can do.
  * With `run`, a merge that a hook refuses is aborted too, and answers hook_failed.
  */
 export async function integrate($: CoreEngine, jobsDir: string, input: IntegrateInput, gitHooks: IntegrateGitHooks = 'off'): Promise<IntegrateOutcome> {
-  const run = (argv: string[]) => $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
+  const run: Git = (argv) => $.process.run(argv, { timeoutMs: GIT_TIMEOUT_MS })
   try {
     const job = await readMeta($, jobsDir, input.taskId)
     if (job === null) return fail('task_not_found', `no task ${input.taskId}`)
@@ -113,29 +211,9 @@ export async function integrate($: CoreEngine, jobsDir: string, input: Integrate
     if (ancestor.exitCode === 0) return fail('already_integrated', `${branch} is already reachable from HEAD of ${repo}`)
     if (ancestor.exitCode !== 1) return fail('git_failed', `git could not compare ${branch} with HEAD${gitDetail(ancestor.stderr)}`)
 
-    const merged = await run(mergeArgv(repo, branch, input.strategy))
-    if (merged.exitCode !== 0) {
-      // The unmerged files are read before any abort, since merge --abort clears them from the index.
-      const files = outputLines((await run(unmergedFilesArgv(repo))).stdout)
-      const pending = (await run(mergeHeadArgv(repo))).exitCode === 0
-      if (pending) {
-        const abort = await run(mergeAbortArgv(repo))
-        if (abort.exitCode !== 0) {
-          return fail('git_failed', `git merge of ${branch} into ${repo} failed, and git merge --abort failed; ${repo} may still be mid-merge${gitDetail(abort.stderr)}`)
-        }
-      }
-      if (files.length > 0) {
-        return fail('merge_conflict', `${branch} conflicts with ${repo} in ${files.length} file(s); the merge was aborted`, files)
-      }
-      if (gitHooks === 'run' && (pending || GIT_NAMES_A_HOOK.test(merged.stderr))) {
-        const output = hookOutput(merged.stderr)
-        const refused = `a git hook refused the merge of ${branch} into ${repo}${pending ? '; the merge was aborted' : ''}`
-        const said = output === '' ? "The checkout's hook printed nothing." : `Output of the checkout's hook:\n${output}`
-        return fail('hook_failed', `${refused}. A hook has to pass before the task can merge: fix what it checks, then integrate again.\n${said}`)
-      }
-      const code = input.strategy === 'ff-only' ? 'not_fast_forward' : 'git_failed'
-      const aborted = pending ? '; the merge was aborted' : ''
-      return fail(code, `git merge ${branch} into ${repo} failed${gitDetail(merged.stderr)}${aborted}`)
+    const merged = await attempt(run, mergeArgv(repo, branch, input.strategy))
+    if (!('result' in merged) || merged.result.exitCode !== 0) {
+      return await failedMerge(run, { repo, branch, strategy: input.strategy, gitHooks }, merged)
     }
 
     const head = await run(revParseHeadArgv(repo))

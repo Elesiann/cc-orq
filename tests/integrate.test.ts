@@ -19,10 +19,12 @@ const PROBE_GONE = 12
 const STARTED = 2000000
 const MINUTE = 60_000
 
-type Reply = { exitCode: number; stdout?: string; stderr?: string }
+// `throws` makes the call reject, as the engine does for a git call that outlives its timeout.
+type Reply = { exitCode: number; stdout?: string; stderr?: string; throws?: string }
 type State = {
   files: Map<string, string>
-  replies: Map<string, Reply>
+  // A list answers its replies in order, and the last one answers every later call.
+  replies: Map<string, Reply | Reply[]>
   gitCalls: string[][]
   live: Set<string>
   now: number
@@ -111,7 +113,9 @@ function engineOf(s: State): any {
         const sub = argv.slice(3).join(' ')
         const key = [...s.replies.keys()].find((k) => sub.startsWith(k))
         if (key === undefined) throw new Error(`unexpected git: ${sub}`)
-        const reply = s.replies.get(key) ?? { exitCode: 0 }
+        const entry = s.replies.get(key) ?? { exitCode: 0 }
+        const reply = Array.isArray(entry) ? (entry.length > 1 ? entry.shift() : entry[0]) ?? { exitCode: 0 } : entry
+        if (reply.throws !== undefined) throw new Error(reply.throws)
         return {
           exitCode: reply.exitCode,
           stdout: reply.stdout ?? '',
@@ -209,6 +213,7 @@ test('a conflicting merge lists the unmerged files, aborts, and says so', async 
     'diff --name-only --diff-filter=U',
     'rev-parse -q --verify MERGE_HEAD',
     'merge --abort',
+    'status --porcelain',
   ])
 })
 
@@ -228,7 +233,7 @@ test('a failed merge that left MERGE_HEAD with no unmerged file is aborted and i
   expect(r.error.message).toContain('lint: trailing space in a.txt')
   expect(r.error.message).toContain('the merge was aborted')
   expect(r.error.message).not.toContain('Not committing merge')
-  expect(subcommands(s).slice(-2)).toEqual(['rev-parse -q --verify MERGE_HEAD', 'merge --abort'])
+  expect(subcommands(s).slice(-3)).toEqual(['rev-parse -q --verify MERGE_HEAD', 'merge --abort', 'status --porcelain'])
 })
 
 test('the hook output in hook_failed is redacted and cut to its last 20 lines', async () => {
@@ -321,7 +326,7 @@ test('without the opt-in, a merge that left MERGE_HEAD with no unmerged file is 
   const r = await integrate($, { taskId: TASK, strategy: 'merge' })
   expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
   expect(r.error.message).toContain('the merge was aborted')
-  expect(subcommands(s).slice(-2)).toEqual(['rev-parse -q --verify MERGE_HEAD', 'merge --abort'])
+  expect(subcommands(s).slice(-3)).toEqual(['rev-parse -q --verify MERGE_HEAD', 'merge --abort', 'status --porcelain'])
 })
 
 test('without the opt-in, a fatal line that names a hook does not make a failed merge hook_failed', async () => {
@@ -456,6 +461,205 @@ test('a jobs directory that cannot be listed stops integrate instead of skipping
   expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
   expect(r.error.message).toContain('EACCES: jobs')
   expect(s.gitCalls.length).toBe(0)
+})
+
+const TIMED_OUT = 'git did not finish within 60000 ms, so it was killed'
+
+function killed(s: State) {
+  clean(s)
+  s.replies.set('merge --no-ff', { exitCode: 0, throws: TIMED_OUT })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+}
+
+test('a merge that git did not finish, with MERGE_HEAD pending, is aborted: git_failed names the timeout, and the checkout is looked at afterwards', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('did not finish within 60000 ms')
+  expect(r.error.message).toContain('the merge was aborted')
+  expect(subcommands(s).slice(-4)).toEqual([
+    'diff --name-only --diff-filter=U',
+    'rev-parse -q --verify MERGE_HEAD',
+    'merge --abort',
+    'status --porcelain',
+  ])
+})
+
+test('a killed merge with no MERGE_HEAD but a half-made index is reset with git reset --merge, and the answer lists what the hook left', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('status --porcelain', [
+    { exitCode: 0, stdout: '' },
+    { exitCode: 0, stdout: 'A  f.txt\n?? hook-made.txt\n' },
+    { exitCode: 0, stdout: '?? hook-made.txt\n' },
+  ])
+  s.replies.set('reset --merge', { exitCode: 0 })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('did not finish within 60000 ms')
+  expect(r.error.message).toContain('git reset --merge')
+  expect(r.error.message).toContain('keeps changes')
+  expect(r.error.message).toContain('hook-made.txt')
+  expect(r.error.message).not.toContain(' f.txt')
+  expect(subcommands(s).slice(-6)).toEqual([
+    'diff --name-only --diff-filter=U',
+    'rev-parse -q --verify MERGE_HEAD',
+    `merge-base --is-ancestor ${BRANCH} HEAD`,
+    'status --porcelain',
+    'reset --merge',
+    'status --porcelain',
+  ])
+})
+
+test('a killed merge that had already moved HEAD onto the branch says so and resets nothing', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('merge-base --is-ancestor', [{ exitCode: 1 }, { exitCode: 0 }])
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('did not finish within 60000 ms')
+  expect(r.error.message).toContain(`${BRANCH} is already part of HEAD`)
+  expect(subcommands(s).some((sub) => sub.startsWith('reset'))).toBe(false)
+})
+
+test('a killed merge in a checkout that ends clean says nothing about leftovers and resets nothing', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('did not finish within 60000 ms')
+  expect(r.error.message).not.toContain('keeps changes')
+  expect(r.error.message).not.toContain('already part of HEAD')
+  expect(subcommands(s).some((sub) => sub.startsWith('reset'))).toBe(false)
+})
+
+test('a killed merge whose abort fails is git_failed, and the message says the checkout may be mid-merge', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 128, stderr: 'fatal: Unable to create index.lock: File exists\n' })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('may still be mid-merge')
+  expect(r.error.message).toContain('index.lock')
+})
+
+test('a killed merge whose reset fails is git_failed, and the message says the checkout may be mid-merge', async () => {
+  const s = fresh()
+  seedTask(s)
+  killed(s)
+  s.replies.set('status --porcelain', [{ exitCode: 0, stdout: '' }, { exitCode: 0, stdout: 'A  f.txt\n' }])
+  s.replies.set('reset --merge', { exitCode: 128, stderr: 'fatal: Unable to create index.lock: File exists\n' })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' })
+  expect(r).toMatchObject({ ok: false, error: { code: 'git_failed' } })
+  expect(r.error.message).toContain('may still be mid-merge')
+  expect(r.error.message).toContain('git reset --merge failed')
+})
+
+test('a hook that left files behind: hook_failed says the checkout keeps changes the hook made, and lists them', async () => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, { exitCode: 1, stderr: "lint: no\nNot committing merge; use 'git commit' to complete the merge.\n" })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  s.replies.set('status --porcelain', [
+    { exitCode: 0, stdout: '' },
+    { exitCode: 0, stdout: '?? generated.txt\n M src/a.ts\n' },
+  ])
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'hook_failed' } })
+  expect(r.error.message).toContain('keeps changes the hook made')
+  expect(r.error.message).toContain('generated.txt')
+  expect(r.error.message).toContain('src/a.ts')
+  expect(r.error.message).toContain('lint: no')
+  expect(subcommands(s).slice(-2)).toEqual(['merge --abort', 'status --porcelain'])
+})
+
+test('hook_failed lists at most 10 of the paths a hook left, and counts the rest', async () => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, { exitCode: 1, stderr: "Not committing merge; use 'git commit' to complete the merge.\n" })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  const left = Array.from({ length: 12 }, (_, i) => `?? leftover-${String(i + 1).padStart(2, '0')}.txt`)
+  s.replies.set('status --porcelain', [
+    { exitCode: 0, stdout: '' },
+    { exitCode: 0, stdout: `${left.join('\n')}\n` },
+  ])
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'hook_failed' } })
+  expect(r.error.message).toContain('leftover-01.txt')
+  expect(r.error.message).toContain('leftover-10.txt')
+  expect(r.error.message).not.toContain('leftover-11.txt')
+  expect(r.error.message).not.toContain('leftover-12.txt')
+  expect(r.error.message).toContain('2 more')
+})
+
+test('an aborted merge in a checkout that ends clean says nothing about leftovers', async () => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, { exitCode: 1, stderr: "lint: no\nNot committing merge; use 'git commit' to complete the merge.\n" })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'hook_failed' } })
+  expect(r.error.message).not.toContain('keeps changes')
+})
+
+test('hook_failed carries what git printed on stdout as well, redacted', async () => {
+  const s = fresh()
+  seedTask(s)
+  clean(s, {
+    exitCode: 1,
+    stdout: 'Auto-merging a.txt\nlint-on-stdout: trailing space\npassword=not-a-real-secret\n',
+    stderr: "Not committing merge; use 'git commit' to complete the merge.\n",
+  })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'hook_failed' } })
+  expect(r.error.message).toContain('lint-on-stdout: trailing space')
+  expect(r.error.message).toContain('password=[REDACTED]')
+  expect(r.error.message).not.toContain('not-a-real-secret')
+  expect(r.error.message).not.toContain('printed nothing')
+})
+
+test('the hook output is the last 20 lines of stdout and stderr together', async () => {
+  const s = fresh()
+  seedTask(s)
+  const numbered = (prefix: string) => Array.from({ length: 15 }, (_, i) => `${prefix}-${String(i + 1).padStart(2, '0')}`).join('\n')
+  clean(s, { exitCode: 1, stdout: `${numbered('out')}\n`, stderr: `${numbered('err')}\n` })
+  s.replies.set('diff --name-only', { exitCode: 0, stdout: '' })
+  s.replies.set('rev-parse -q', { exitCode: 0 })
+  s.replies.set('merge --abort', { exitCode: 0 })
+  const $ = engineOf(s)
+  const r = await integrate($, { taskId: TASK, strategy: 'merge' }, 'run')
+  expect(r).toMatchObject({ ok: false, error: { code: 'hook_failed' } })
+  expect(r.error.message).toContain('out-11')
+  expect(r.error.message).toContain('err-15')
+  expect(r.error.message).not.toContain('out-10')
 })
 
 const ELSEWHERE = '/srv/example/elsewhere'
