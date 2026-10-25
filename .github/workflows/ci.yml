@@ -25,3 +25,30 @@ jobs:
       - run: bash tests/hook-shell.sh
       - run: bash tests/allowlist-shell.sh
       - run: shellcheck tests/live/*.sh tests/live/scenarios/*.sh
+
+  # The tasks scenarios of the MCP conformance suite, run by name against the test HTTP entry in tests/conformance/.
+  # The suite is the commit that the scenarios were read at; tests/conformance/run.mjs gates on each scenario's exit code.
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: modelcontextprotocol/conformance
+          ref: c37eec888e1c6ff140af79987a40008548b7cc5f
+          path: conformance-suite
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm ci --ignore-scripts
+        working-directory: conformance-suite
+      - run: node tests/conformance/run.mjs --out "$RUNNER_TEMP/conformance"
+        env:
+          CONFORMANCE_CMD: conformance-suite/node_modules/.bin/tsx conformance-suite/src/index.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-results
+          path: ${{ runner.temp }}/conformance
