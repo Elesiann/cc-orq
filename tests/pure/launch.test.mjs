@@ -10,6 +10,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 
 import { defaultConfig } from '../../hooks/config.ts'
 import { isFailure } from '../../hooks/contract.ts'
-import { composeAnswer, jobView, launchTaskFromHeader, newJobId, readJobStatus, readMeta } from '../../hooks/engine.ts'
+import { composeAnswer, jobView, launchTaskFromHeader, newJobId, planTaskLaunch, readJobStatus, readMeta } from '../../hooks/engine.ts'
 import { parseTaskHeader } from '../../hooks/task-header.ts'
 import { parentRuntimeModeFromPermissionMode } from '../../hooks/target.ts'
 import { parseJobMeta } from '../../hooks/types.ts'
@@ -305,6 +306,41 @@ test('a launch that is given an id runs the job under it, and a taken id is refu
     assert.ok('refusal' in second, JSON.stringify(second))
     assert.match(second.refusal, /could not create its job directory \(exit 7\)/)
     assert.deepEqual(readdirSync(config.jobsDir).filter((name) => !name.startsWith('.')), [id], 'no other job directory was made for the taken id')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('planTaskLaunch resolves the instance, the modes, the flags and the real directory, and creates nothing', async () => {
+  const { root, session, engine, config } = setup()
+  try {
+    const work = join(session, 'work')
+    mkdirSync(work)
+    symlinkSync(work, join(session, 'link'))
+    const args = { agentId: 'agent-plan', header: headerFor(join(session, 'link'), 'shared', { target: 'claudeAgent fixture-model-7 effort=high' }), ceiling: CEILING, sessionDir: session, kind: 'mcp' }
+    const planned = await planTaskLaunch(engine, config, args)
+    assert.ok('spec' in planned, JSON.stringify(planned))
+    const { spec } = planned
+    assert.equal(spec.cwd, work, 'the directory the scope check resolved, not the symlink that was asked for')
+    assert.equal(spec.instance.id, 'claudeAgent')
+    assert.equal(spec.model, 'fixture-model-7')
+    assert.equal(spec.runtimeMode, 'auto-accept-edits')
+    assert.equal(spec.interactionMode, 'default')
+    assert.equal(spec.isolation, 'shared')
+    assert.deepEqual(spec.flags, ['--permission-mode', 'acceptEdits', '--effort', 'high'])
+    assert.equal(spec.kind, 'mcp')
+    assert.equal(existsSync(config.jobsDir), false, 'planning makes no job directory')
+
+    const refusals = [
+      [{ ...args, header: headerFor(work, 'shared', { target: 'nope haiku' }) }, 'provider_unavailable'],
+      [{ ...args, header: headerFor(work, 'shared', { target: 'claudeAgent haiku runtime=full-access' }) }, 'runtime_mode_escalation_denied'],
+      [{ ...args, header: headerFor(root, 'shared') }, 'cwd_out_of_scope'],
+    ]
+    for (const [asked, code] of refusals) {
+      const refused = await planTaskLaunch(engine, config, asked)
+      assert.ok('refusal' in refused && refused.refusal.includes(code), JSON.stringify(refused))
+      assert.deepEqual(await launchTaskFromHeader(engine, config, asked), refused, 'the launch refuses with the same words')
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

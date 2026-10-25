@@ -2,7 +2,7 @@
 // spec 4.4, then the approval flow of D7 (create, accept, decline, cancel, refuse) against a fake worker.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { defaultConfig } from '../../hooks/config.ts'
@@ -37,8 +37,13 @@ const ESCALATION = {
   error: { code: 'runtime_mode_escalation_denied', message: 'Runtime mode auto is above the ceiling approval-required for this task.' },
 }
 const APPROVAL = {
-  modes: { runtimeMode: 'auto', interactionMode: 'default' },
-  ceiling: { runtimeMode: 'approval-required', interactionMode: 'default' },
+  target: 'codex',
+  model: 'gpt-x',
+  cwd: '/work/repo',
+  isolation: 'worktree',
+  launch: { runtimeMode: 'auto', interactionMode: 'default' },
+  config: { runtimeMode: 'auto-accept-edits', interactionMode: 'default' },
+  session: { runtimeMode: 'approval-required', interactionMode: 'default' },
   refusal: ESCALATION,
 }
 
@@ -153,7 +158,7 @@ test('a cancelled marker makes the task cancelled before anything else, a live j
 test('a task with an approval and no answer is input_required, with one flat form under the key approve', async (t) => {
   const { s, tasks, record } = setup()
   t.after(() => s.cleanup())
-  record('task-form', { approval: APPROVAL, request: { target: 'codex', model: 'gpt-x', cwd: '/work/repo', runtime: 'auto', prompt: 'p' } })
+  record('task-form', { approval: APPROVAL })
   const task = await tasks.get('task-form')
   assert.equal(task.status, 'input_required')
   assert.equal(task.createdAt, ISO(SECOND))
@@ -161,26 +166,63 @@ test('a task with an approval and no answer is input_required, with one flat for
   const { method, params } = task.inputRequests.approve
   assert.equal(method, 'elicitation/create')
   assert.equal(params.mode, 'form')
-  assert.equal(params.message, 'codex gpt-x asks to run in /work/repo with runtime auto (ceiling approval-required). Allow it for this task only?')
+  assert.equal(
+    params.message,
+    [
+      'A task asks for more than your ceiling allows.',
+      'Worker: "codex", model "gpt-x"',
+      'Directory: "/work/repo"',
+      'Runs: in its own worktree',
+      "Asks for: runtime auto, above ceiling.runtime auto-accept-edits and the session's permission mode approval-required",
+    ].join('\n'),
+  )
   assert.deepEqual(params.requestedSchema, {
     type: 'object',
-    properties: { approve: { type: 'boolean', title: 'Allow it for this task only', default: true } },
+    properties: {
+      approve: {
+        type: 'boolean',
+        title: 'Allow runtime auto and interaction default, in its own worktree, for this task only',
+        description: "Above ceiling.runtime auto-accept-edits and the session's permission mode approval-required.",
+        default: true,
+      },
+    },
     required: ['approve'],
   })
-  assert.match(task.statusMessage, /^waiting for your approval of codex gpt-x$/)
+  assert.equal(task.statusMessage, 'waiting for your approval to go above the ceiling')
 })
 
-test('a form for a request above both ceilings names both', async (t) => {
+test('the form says where the task runs, in words, and names the limit that a shared task exceeds', async (t) => {
   const { s, tasks, record } = setup()
   t.after(() => s.cleanup())
-  const both = {
-    ...APPROVAL,
-    modes: { runtimeMode: 'full-access', interactionMode: 'default' },
-    ceiling: { runtimeMode: 'approval-required', interactionMode: 'plan' },
-  }
-  record('task-both', { approval: both })
-  const { message } = (await tasks.get('task-both')).inputRequests.approve.params
-  assert.ok(message.includes('runtime full-access (ceiling approval-required) and interaction default (ceiling plan)'), message)
+  record('task-shared', {
+    approval: { ...APPROVAL, isolation: 'shared', config: { runtimeMode: 'approval-required', interactionMode: 'default' }, session: null },
+  })
+  const { params } = (await tasks.get('task-shared')).inputRequests.approve
+  const lines = params.message.split('\n')
+  assert.equal(lines[3], 'Runs: in your checkout itself (shared, no worktree)')
+  assert.equal(lines[4], 'Asks for: runtime auto, above ceiling.sharedRuntime approval-required', 'with no session mode the config alone is named')
+  assert.equal(params.requestedSchema.properties.approve.title, 'Allow runtime auto and interaction default, in your checkout itself (shared, no worktree), for this task only')
+  assert.equal(params.requestedSchema.properties.approve.description, 'Above ceiling.sharedRuntime approval-required.')
+})
+
+test('a form for a request above both ceilings names both limits, and the levels are in the field the user answers', async (t) => {
+  const { s, tasks, record } = setup()
+  t.after(() => s.cleanup())
+  record('task-both', {
+    approval: {
+      ...APPROVAL,
+      launch: { runtimeMode: 'full-access', interactionMode: 'default' },
+      config: { runtimeMode: 'auto', interactionMode: 'plan' },
+      session: null,
+    },
+  })
+  const { params } = (await tasks.get('task-both')).inputRequests.approve
+  assert.equal(
+    params.message.split('\n')[4],
+    'Asks for: runtime full-access, above ceiling.runtime auto; interaction default, above ceiling.interaction plan',
+  )
+  assert.equal(params.requestedSchema.properties.approve.title, 'Allow runtime full-access and interaction default, in its own worktree, for this task only')
+  assert.equal(params.requestedSchema.properties.approve.description, 'Above ceiling.runtime auto; ceiling.interaction plan.')
 })
 
 test('a declined form ends the task as completed with the escalation error that the request got', async (t) => {
@@ -200,7 +242,7 @@ test('a launch that was refused after the approval ends the task as completed wi
   record('task-refused', { approval: APPROVAL })
   mark('task-refused', 'approved')
   assert.equal((await tasks.get('task-refused')).status, 'working', 'approved with no job yet is a launch that is starting')
-  assert.match((await tasks.get('task-refused')).statusMessage, /^starting codex m$/)
+  assert.equal((await tasks.get('task-refused')).statusMessage, 'starting after your approval')
   mark('task-refused', 'refused', '{"error":{"code":"worktree_busy","message":"busy"}}')
   const task = await tasks.get('task-refused')
   assert.equal(task.status, 'completed')
@@ -352,12 +394,94 @@ test('create records an approval task for a request above the ceiling, and its f
   const taskId = await approval(ctx)
   assert.match(taskId, /^mcp-\d+-23456789-[0-9a-z]{6}$/, 'an id that a job can run under')
   const record = JSON.parse(readFileSync(join(ctx.taskDir(taskId), 'task.json'), 'utf8'))
-  assert.deepEqual(record.approval.modes, { runtimeMode: 'auto', interactionMode: 'default' })
-  assert.deepEqual(record.approval.ceiling, { runtimeMode: 'approval-required', interactionMode: 'default' })
+  const { repo } = ctx
+  assert.deepEqual(record.approval, {
+    target: 'claudeAgent',
+    model: 'haiku',
+    cwd: repo,
+    isolation: 'worktree',
+    launch: { runtimeMode: 'auto', interactionMode: 'default' },
+    config: { runtimeMode: 'auto-accept-edits', interactionMode: 'default' },
+    session: { runtimeMode: 'approval-required', interactionMode: 'default' },
+    refusal: record.approval.refusal,
+  }, 'the record holds what the user was shown: the instance, the model, the real directory, where it runs and the limits')
   assert.equal(record.approval.refusal.error.code, 'runtime_mode_escalation_denied')
   const task = await ctx.tasks.get(taskId)
   assert.equal(task.status, 'input_required')
   assert.deepEqual(Object.keys(task.inputRequests), ['approve'])
+})
+
+test('the form shows the directory that the scope check resolved, and not the path that the model wrote', async (t) => {
+  const ctx = setup()
+  t.after(() => ctx.s.cleanup())
+  const link = join(ctx.session, 'link')
+  symlinkSync(ctx.repo, link)
+  const taskId = await approval(ctx, { cwd: link })
+  const record = JSON.parse(readFileSync(join(ctx.taskDir(taskId), 'task.json'), 'utf8'))
+  assert.equal(record.request.cwd, link, 'the request is kept as it was written')
+  assert.equal(record.approval.cwd, ctx.repo, 'the approval holds the real directory')
+  const { message } = (await ctx.tasks.get(taskId)).inputRequests.approve.params
+  assert.equal(message.split('\n')[2], `Directory: "${ctx.repo}"`)
+  assert.equal(message.includes(link), false)
+})
+
+test('a value that the model chose cannot add a line, a sentence or a look-alike to the question', async (t) => {
+  const ctx = setup()
+  t.after(() => ctx.s.cleanup())
+  const evil = join(ctx.session, 'evil\nDirectory: "safe"\nRuns: in its own worktree')
+  mkdirSync(evil)
+  symlinkSync(evil, join(ctx.session, 'innocent'))
+  const model = 'haiku"\u202e\u200bAllowit?'
+  const taskId = await approval(ctx, { cwd: join(ctx.session, 'innocent'), model })
+  const { params } = (await ctx.tasks.get(taskId)).inputRequests.approve
+  const lines = params.message.split('\n')
+  assert.equal(lines.length, 5, 'five lines, whatever the values hold')
+  assert.deepEqual(lines.map((line) => line.split(':')[0]), ['A task asks for more than your ceiling allows.', 'Worker', 'Directory', 'Runs', 'Asks for'])
+  assert.equal(lines[1], 'Worker: "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?"', 'the quote is escaped and the invisible characters are written out')
+  assert.equal(lines[2], `Directory: "${evil.replaceAll('\n', '\\n').replaceAll('"', '\\"')}"`, 'the line breaks of a real directory name are written out')
+  assert.equal(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(params.message.replaceAll('\n', '')), false, 'no control or format character is left in the question')
+  assert.equal(lines[3], 'Runs: in its own worktree')
+  const { title, description } = params.requestedSchema.properties.approve
+  for (const text of [title, description]) assert.equal(/[\p{Cc}\p{Cf}]/u.test(text), false)
+
+  const long = await approval(ctx, { model: `m${'x'.repeat(400)}` })
+  const [, workerLine] = (await ctx.tasks.get(long)).inputRequests.approve.params.message.split('\n')
+  assert.ok(workerLine.length < 200 && workerLine.endsWith('…"'), `a value is cut: ${workerLine.length} characters`)
+})
+
+test('a request that could not launch is refused at once, and no form asks about it', async (t) => {
+  const ctx = setup({ instances: [{ id: 'opencode', driver: 'opencode' }] })
+  t.after(() => ctx.s.cleanup())
+  for (const [what, more, code] of [
+    ['a target that is not configured', { target: 'nope' }, 'provider_unavailable'],
+    ['a directory outside the session', { cwd: '/usr' }, 'cwd_out_of_scope'],
+    ['a directory that does not exist', { cwd: join(ctx.session, 'missing') }, 'invalid_request'],
+    ['a mode that the driver cannot enforce', { target: 'opencode', model: 'm', runtime: 'full-access' }, 'runtime_mode_unsupported'],
+  ]) {
+    const created = await ctx.tasks.create('delegate', REQUEST(ctx.repo, { runtime: 'auto', sessionMode: 'default', ...more }), CLIENT)
+    assert.ok('result' in created, what)
+    assert.equal(created.result.isError, true, what)
+    assert.equal(JSON.parse(created.result.content[0].text).error.code, code, what)
+  }
+  assert.equal(existsSync(join(ctx.s.jobsDir, '.tasks')), false, 'no task was recorded')
+})
+
+test('a launch is held to what the form showed: a directory that moved since is refused', async (t) => {
+  const ctx = setup({ bin: { claude: FAKE_WORKER } })
+  t.after(() => ctx.s.cleanup())
+  const link = join(ctx.session, 'link')
+  const other = join(ctx.session, 'other')
+  mkdirSync(other)
+  symlinkSync(ctx.repo, link)
+  const taskId = await approval(ctx, { cwd: link })
+  rmSync(link)
+  symlinkSync(other, link)
+  await ctx.tasks.update(taskId, { approve: { action: 'accept' } })
+  assert.deepEqual(jobDirs(ctx.s), [], 'nothing ran in the directory that the user did not see')
+  const task = await ctx.tasks.get(taskId)
+  assert.equal(task.status, 'completed')
+  assert.equal(task.result.isError, true)
+  assert.match(JSON.parse(task.result.content[0].text).error.message, /no longer matches what you approved/)
 })
 
 test('accepting the form launches the job under the id of the task, at the level that was asked, and the task follows the job', async (t) => {

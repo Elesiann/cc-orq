@@ -39,8 +39,6 @@ export function conforms(schema, value, what) {
   assert.ok(parsed.success, `${what} does not match its schema: ${parsed.success ? '' : JSON.stringify(parsed.error.issues)}\n${JSON.stringify(value)}`)
 }
 
-const BARE = 'the key io.modelcontextprotocol/related-task'
-
 /** What the published spec and the conformance suite ask of a task and that the ext-tasks schemas do not check. */
 export function strictTask(task, what) {
   const text = JSON.stringify(task)
@@ -49,7 +47,7 @@ export function strictTask(task, what) {
   assert.equal(task.ttlMs, null, `${what}: ttlMs is null, since no job is deleted`)
   assert.ok(Number.isInteger(task.pollIntervalMs) && task.pollIntervalMs >= 250 && task.pollIntervalMs <= 30000, `${what}: pollIntervalMs is in 250..30000`)
   for (const absent of ['ttl', 'pollInterval', 'requestState', 'task']) assert.equal(absent in task, false, `${what}: no ${absent}`)
-  assert.equal(text.includes('io.modelcontextprotocol/related-task'), false, `${what}: ${BARE} is not on the wire`)
+  assert.equal(text.includes('io.modelcontextprotocol/related-task'), false, `${what}: the related-task key of 2025-11-25 is not on the wire`)
   if (task.resultType === 'task') {
     assert.equal(task.status, 'working', `${what}: a task is created working`)
     for (const absent of ['result', 'error', 'inputRequests']) assert.equal(absent in task, false, `${what}: a creation answer has no ${absent}`)
@@ -122,6 +120,7 @@ export function startServer({ env }) {
   const child = spawn(process.execPath, [MAIN], { env, stdio: ['pipe', 'pipe', 'pipe'] })
   const pending = new Map()
   const messages = []
+  const frames = new Map()
   let stderr = ''
   let buffer = ''
   let nextId = 1
@@ -133,9 +132,11 @@ export function startServer({ env }) {
   child.stdout.on('data', (chunk) => {
     buffer += chunk
     for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-      const message = JSON.parse(buffer.slice(0, end))
+      const line = buffer.slice(0, end)
+      const message = JSON.parse(line)
       buffer = buffer.slice(end + 1)
       messages.push(message)
+      frames.set(message.id, line)
       const waiting = pending.get(message.id)
       if (waiting !== undefined) {
         pending.delete(message.id)
@@ -181,11 +182,13 @@ export function startServer({ env }) {
       return request('tasks/cancel', { taskId, ...modern(capabilities) })
     },
     /** tools/call with a modern envelope. A task comes back as `task`; any other answer as its text block. */
-    async call(name, args = {}, capabilities) {
-      const answer = await request('tools/call', { name, arguments: args, ...modern(capabilities) })
+    async call(name, args = {}, capabilities, extraMeta = {}) {
+      const envelope = modern(capabilities)
+      const answer = await request('tools/call', { name, arguments: args, _meta: { ...envelope._meta, ...extraMeta } })
       assert.equal(answer.error, undefined, `tools/call ${name} answered a JSON-RPC error: ${JSON.stringify(answer.error)}`)
       const { result } = answer
-      if (result.resultType === 'task') return { result, task: result, isError: false }
+      const frame = frames.get(answer.id)
+      if (result.resultType === 'task') return { result, task: result, isError: false, frame }
       assert.equal(result.content.length, 1, 'a tool answers one content block')
       const { text } = result.content[0]
       let json
@@ -194,7 +197,7 @@ export function startServer({ env }) {
       } catch {
         json = undefined
       }
-      return { result, isError: result.isError === true, text, json }
+      return { result, isError: result.isError === true, text, json, frame }
     },
     async close() {
       child.stdin.end()

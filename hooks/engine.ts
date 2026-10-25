@@ -620,20 +620,18 @@ export async function launchTaskJob($: CoreEngine, config: OrqConfig, spec: Task
   return { refusal: refusal + hint }
 }
 
+export type TaskLaunchArgs = {
+  agentId: string
+  header: TaskHeader
+  ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
+  sessionDir: string
+  kind?: string
+  reservedId?: string
+  questions?: QuestionMode
+}
+
 /** A refused header comes back as `{ refusal }`, not as a throw. */
-export async function launchTaskFromHeader(
-  $: CoreEngine,
-  config: OrqConfig,
-  args: {
-    agentId: string
-    header: TaskHeader
-    ceiling: { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
-    sessionDir: string
-    kind?: string
-    reservedId?: string
-    questions?: QuestionMode
-  },
-): Promise<LaunchResult> {
+export async function planTaskLaunch($: CoreEngine, config: OrqConfig, args: TaskLaunchArgs): Promise<{ spec: TaskLaunchSpec } | { refusal: string }> {
   const { agentId, header, ceiling, sessionDir, kind, reservedId, questions } = args
   const resolved = resolveTarget({
     target: header.target,
@@ -649,22 +647,29 @@ export async function launchTaskFromHeader(
   const scoped = await scopedCwd($, config, sessionDir, header.cwd)
   if ('refusal' in scoped) return scoped
   const effort = appliedEffort(resolved.instance.driver, resolved.options)
-  return launchTaskJob($, config, {
-    ...(kind !== undefined ? { kind } : {}),
-    ...(reservedId !== undefined ? { reservedId } : {}),
-    ...(questions !== undefined ? { questions } : {}),
-    agentId,
-    instance: resolved.instance,
-    model: resolved.model,
-    cwd: scoped.cwd,
-    prompt: taskPrompt(header.prompt, header.role),
-    flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
-    runtimeMode: resolved.runtimeMode,
-    interactionMode: resolved.interactionMode,
-    ...(effort !== undefined ? { effort } : {}),
-    isolation: header.isolation,
-    scopeRoots: scoped.roots,
-  })
+  return {
+    spec: {
+      ...(kind !== undefined ? { kind } : {}),
+      ...(reservedId !== undefined ? { reservedId } : {}),
+      ...(questions !== undefined ? { questions } : {}),
+      agentId,
+      instance: resolved.instance,
+      model: resolved.model,
+      cwd: scoped.cwd,
+      prompt: taskPrompt(header.prompt, header.role),
+      flags: [...policy.flags, ...effortFlag(resolved.instance.driver, resolved.options)],
+      runtimeMode: resolved.runtimeMode,
+      interactionMode: resolved.interactionMode,
+      ...(effort !== undefined ? { effort } : {}),
+      isolation: header.isolation,
+      scopeRoots: scoped.roots,
+    },
+  }
+}
+
+export async function launchTaskFromHeader($: CoreEngine, config: OrqConfig, args: TaskLaunchArgs): Promise<LaunchResult> {
+  const planned = await planTaskLaunch($, config, args)
+  return 'refusal' in planned ? planned : launchTaskJob($, config, planned.spec)
 }
 
 /** finished | running | gone: the exit file, else the supervisor's process group. Rejects when the probe cannot run. */

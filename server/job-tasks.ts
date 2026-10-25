@@ -1,7 +1,7 @@
 // The tasks of the delegate tool, kept in the jobs directory. A task has the id of its first job, so status, integrate
 // and list accept the id that /tasks shows. Its state is derived from files on every request, never held in memory.
 
-import { resolveCeiling, sessionCeiling } from '../hooks/ceiling.ts'
+import { configCeiling, lowerCeiling, resolveCeiling, sessionCeiling } from '../hooks/ceiling.ts'
 import type { OrqConfig } from '../hooks/config.ts'
 import {
   FAILURE_CODES,
@@ -12,17 +12,21 @@ import {
   type Failure,
   type InteractionMode,
   type RuntimeMode,
+  type TaskIsolation,
 } from '../hooks/contract.ts'
 import {
   composeAnswer,
   jobView,
   launchTaskFromHeader,
+  launchTaskJob,
   newJobId,
+  planTaskLaunch,
   readMeta,
   taskStatusOf,
   writeCancel,
   type CoreEngine,
   type JobView,
+  type TaskLaunchSpec,
 } from '../hooks/engine.ts'
 import { renderTail } from '../hooks/event-line.ts'
 import { interactionModeRank, runtimeModeRank } from '../hooks/target.ts'
@@ -51,7 +55,18 @@ const HUMAN_REFUSAL =
 
 type Modes = { runtimeMode: RuntimeMode; interactionMode: InteractionMode }
 
-type Approval = { modes: Modes; ceiling: Modes; refusal: Failure }
+type Approval = {
+  target: string
+  model: string
+  cwd: string
+  isolation: TaskIsolation
+  launch: Modes
+  config: Modes
+  session: Modes | null
+  refusal: Failure
+}
+
+const ISOLATIONS: readonly TaskIsolation[] = ['worktree', 'shared']
 
 /** `task.json` is written once, before the task is answered, and never changed. */
 type TaskRecord = {
@@ -73,9 +88,14 @@ function parseModes(raw: unknown): Modes | null {
 
 function parseApproval(raw: unknown): Approval | null {
   if (!isRecord(raw)) return null
-  const modes = parseModes(raw.modes)
-  const ceiling = parseModes(raw.ceiling)
-  return modes !== null && ceiling !== null && isFailure(raw.refusal) ? { modes, ceiling, refusal: raw.refusal } : null
+  const { target, model, cwd, refusal } = raw
+  const isolation = ISOLATIONS.find((candidate) => candidate === raw.isolation)
+  const launch = parseModes(raw.launch)
+  const config = parseModes(raw.config)
+  const session = raw.session === null ? null : parseModes(raw.session)
+  if (typeof target !== 'string' || typeof model !== 'string' || typeof cwd !== 'string' || isolation === undefined) return null
+  if (launch === null || config === null || (session === null && raw.session !== null) || !isFailure(refusal)) return null
+  return { target, model, cwd, isolation, launch, config, session, refusal }
 }
 
 function parseRecord(raw: unknown, taskId: string): TaskRecord | null {
@@ -172,23 +192,58 @@ function capText(text: string): string {
   return `${cut}\n\n[cut at 100 KB: the full text is in last.txt and in the answer of the status tool]`
 }
 
-function approvalRequest(record: TaskRecord, approval: Approval): InputRequest {
-  const { modes, ceiling } = approval
-  const above = [
-    ...(runtimeModeRank(modes.runtimeMode) > runtimeModeRank(ceiling.runtimeMode) ? [`runtime ${modes.runtimeMode} (ceiling ${ceiling.runtimeMode})`] : []),
-    ...(interactionModeRank(modes.interactionMode) > interactionModeRank(ceiling.interactionMode)
-      ? [`interaction ${modes.interactionMode} (ceiling ${ceiling.interactionMode})`]
+const WHERE: Record<TaskIsolation, string> = { worktree: 'in its own worktree', shared: 'in your checkout itself (shared, no worktree)' }
+
+const effectiveOf = (approval: Approval): Modes => (approval.session === null ? approval.config : lowerCeiling(approval.config, approval.session))
+
+/** The model chose this text, so it is quoted, cut and written out, and cannot add text to the question. */
+function shown(text: string, limit = 120): string {
+  const characters = [...text]
+  const cut = characters.length > limit ? `${characters.slice(0, limit).join('')}…` : text
+  return JSON.stringify(cut).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => `\\u{${char.codePointAt(0)?.toString(16)}}`)
+}
+
+function limitText(key: string, config: string, session: string | null): string {
+  return session === null ? `${key} ${config}` : `${key} ${config} and the session's permission mode ${session}`
+}
+
+function exceeded(approval: Approval): { level: string; limit: string }[] {
+  const effective = effectiveOf(approval)
+  const { launch, config, session, isolation } = approval
+  return [
+    ...(runtimeModeRank(launch.runtimeMode) > runtimeModeRank(effective.runtimeMode)
+      ? [{ level: `runtime ${launch.runtimeMode}`, limit: limitText(isolation === 'shared' ? 'ceiling.sharedRuntime' : 'ceiling.runtime', config.runtimeMode, session?.runtimeMode ?? null) }]
+      : []),
+    ...(interactionModeRank(launch.interactionMode) > interactionModeRank(effective.interactionMode)
+      ? [{ level: `interaction ${launch.interactionMode}`, limit: limitText('ceiling.interaction', config.interactionMode, session?.interactionMode ?? null) }]
       : []),
   ]
-  const { target, model, cwd } = record.request
+}
+
+/** Closed lists make the question, apart from three values that the model chose, which `shown` quotes. */
+function approvalRequest(approval: Approval): InputRequest {
+  const above = exceeded(approval)
   return {
     method: 'elicitation/create',
     params: {
       mode: 'form',
-      message: `${target} ${model} asks to run in ${cwd} with ${above.join(' and ')}. Allow it for this task only?`,
+      message: [
+        'A task asks for more than your ceiling allows.',
+        `Worker: ${shown(approval.target)}, model ${shown(approval.model)}`,
+        `Directory: ${shown(approval.cwd)}`,
+        `Runs: ${WHERE[approval.isolation]}`,
+        `Asks for: ${above.map(({ level, limit }) => `${level}, above ${limit}`).join('; ')}`,
+      ].join('\n'),
       requestedSchema: {
         type: 'object',
-        properties: { [APPROVE]: { type: 'boolean', title: 'Allow it for this task only', default: true } },
+        properties: {
+          [APPROVE]: {
+            type: 'boolean',
+            title: `Allow runtime ${approval.launch.runtimeMode} and interaction ${approval.launch.interactionMode}, ${WHERE[approval.isolation]}, for this task only`,
+            description: `Above ${above.map(({ limit }) => limit).join('; ')}.`,
+            default: true,
+          },
+        },
         required: [APPROVE],
       },
     },
@@ -236,13 +291,13 @@ async function render($: CoreEngine, config: OrqConfig, loaded: Loaded): Promise
     case 'refused':
       return { ...base, status: 'completed', statusMessage: 'could not start', result: { content: [{ type: 'text', text: stage.text }], isError: true } }
     case 'launching':
-      return { ...base, status: 'working', statusMessage: `starting ${record.request.target} ${record.request.model}` }
+      return { ...base, status: 'working', statusMessage: 'starting after your approval' }
     case 'form':
       return {
         ...base,
         status: 'input_required',
-        statusMessage: `waiting for your approval of ${record.request.target} ${record.request.model}`,
-        inputRequests: { [APPROVE]: approvalRequest(record, stage.approval) },
+        statusMessage: 'waiting for your approval to go above the ceiling',
+        inputRequests: { [APPROVE]: approvalRequest(stage.approval) },
       }
     case 'job':
       return finishedTask($, config, stage.job, await jobView($, stage.job), base)
@@ -264,6 +319,22 @@ async function launchRefusal($: CoreEngine, text: string): Promise<TaskResult> {
   return { content: [{ type: 'text', text: failure }], isError: true }
 }
 
+const CHANGED_SINCE_SHOWN =
+  'orq: this task no longer matches what you approved: its worker, model, directory, isolation or modes changed since the form was shown, so it was not started'
+
+const textOf = (result: TaskResult): string => result.content[0]?.text ?? ''
+
+function isWhatWasShown(spec: TaskLaunchSpec, approval: Approval): boolean {
+  return (
+    spec.instance.id === approval.target &&
+    spec.model === approval.model &&
+    spec.cwd === approval.cwd &&
+    spec.isolation === approval.isolation &&
+    spec.runtimeMode === approval.launch.runtimeMode &&
+    spec.interactionMode === approval.launch.interactionMode
+  )
+}
+
 const widest = <Mode extends string>(asked: Mode | undefined, effective: Mode, rank: (mode: Mode) => number): Mode =>
   asked !== undefined && rank(asked) > rank(effective) ? asked : effective
 
@@ -272,6 +343,10 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
 
   async function agentId(): Promise<string> {
     return (await $.env.get('CLAUDE_CODE_SESSION_ID')) || 'mcp'
+  }
+
+  async function sessionDir(): Promise<string> {
+    return (await $.env.get('CLAUDE_PROJECT_DIR')) ?? ''
   }
 
   async function writeRecord(config: OrqConfig, record: TaskRecord): Promise<void> {
@@ -301,19 +376,32 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     } as const
     if (refusal !== null) {
       if (!client.tasks || !client.forms) return { result: answerOf(refusal, true) }
-      const taskId = newJobId('mcp', now, session)
-      const modes = {
+      const grant = {
         runtimeMode: widest(header.runtimeMode, effective.runtimeMode, runtimeModeRank),
         interactionMode: widest(header.interactionMode, effective.interactionMode, interactionModeRank),
       }
-      await writeRecord(config, { ...record, taskId, approval: { modes, ceiling: effective, refusal } })
+      const planned = await planTaskLaunch($, config, { agentId: session, header, ceiling: grant, sessionDir: await sessionDir(), kind: 'mcp', questions: call.questions })
+      if ('refusal' in planned) return { result: await launchRefusal($, planned.refusal) }
+      const { spec } = planned
+      const taskId = newJobId('mcp', now, session)
+      const approval: Approval = {
+        target: spec.instance.id,
+        model: spec.model,
+        cwd: spec.cwd,
+        isolation: spec.isolation,
+        launch: { runtimeMode: spec.runtimeMode, interactionMode: spec.interactionMode },
+        config: configCeiling(config.ceiling, spec.isolation),
+        session: sessionCeiling(call.sessionMode),
+        refusal,
+      }
+      await writeRecord(config, { ...record, taskId, approval })
       return { taskId }
     }
     const launched = await launchTaskFromHeader($, config, {
       agentId: session,
       header,
       ceiling: effective,
-      sessionDir: (await $.env.get('CLAUDE_PROJECT_DIR')) ?? '',
+      sessionDir: await sessionDir(),
       kind: 'mcp',
       questions: call.questions,
     })
@@ -332,25 +420,31 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
 
   async function launchApproved(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, approval: Approval): Promise<void> {
     const { record, dir } = loaded
-    const call = parseDelegateInput(record.request)
+    const refuse = (text: string): Promise<void> => $.fs.write(`${dir}/refused`, text)
     await $.fs.write(`${dir}/approved`, `${iso(await $.clock.now())}\n`)
-    const launched = isFailure(call)
-      ? { refusal: JSON.stringify(call) }
-      : await launchTaskFromHeader($, config, {
-          agentId: await agentId(),
-          header: call.header,
-          ceiling: approval.modes,
-          sessionDir: (await $.env.get('CLAUDE_PROJECT_DIR')) ?? '',
-          kind: 'mcp',
-          reservedId: record.taskId,
-          questions: record.questions,
-        })
+    const call = parseDelegateInput(record.request)
+    if (isFailure(call)) return refuse(JSON.stringify(call))
+    const effective = effectiveOf(approval)
+    const planned = await planTaskLaunch($, config, {
+      agentId: await agentId(),
+      header: call.header,
+      ceiling: {
+        runtimeMode: widest(approval.launch.runtimeMode, effective.runtimeMode, runtimeModeRank),
+        interactionMode: widest(approval.launch.interactionMode, effective.interactionMode, interactionModeRank),
+      },
+      sessionDir: await sessionDir(),
+      kind: 'mcp',
+      reservedId: record.taskId,
+      questions: record.questions,
+    })
+    if ('refusal' in planned) return refuse(textOf(await launchRefusal($, planned.refusal)))
+    if (!isWhatWasShown(planned.spec, approval)) return refuse(JSON.stringify(fail('invalid_request', CHANGED_SINCE_SHOWN)))
+    const launched = await launchTaskJob($, config, planned.spec)
     if ('job' in launched) {
       if (await $.fs.exists(`${dir}/cancelled`)) await writeCancel($, launched.job, 'cancelled while it started')
       return
     }
-    const refused = await launchRefusal($, launched.refusal)
-    await $.fs.write(`${dir}/refused`, refused.content[0]?.text ?? launched.refusal)
+    await refuse(textOf(await launchRefusal($, launched.refusal)))
   }
 
   async function answerForm(config: OrqConfig, loaded: Extract<Loaded, { kind: 'task' }>, answer: InputResponse): Promise<void> {
