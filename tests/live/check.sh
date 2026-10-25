@@ -562,7 +562,7 @@ check_dw2_scenario_name() {
 check_dw2_work_inside_root() {
   out=$( (
     source "$UNDER/lib.sh"
-    # shellcheck disable=SC2317 # live_acquire calls it
+    # shellcheck disable=SC2317,SC2329 # live_acquire calls it
     live_scratch_path() { printf '%s\n' "$TMP/outside-1"; }
     live_acquire anything
   ) 2>&1) && fail "live_acquire took a work directory outside the scratch directory"
