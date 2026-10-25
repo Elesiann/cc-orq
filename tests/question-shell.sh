@@ -32,6 +32,9 @@ FAKE
 chmod +x "$BIN/claude"
 export PATH="$BIN:$PATH"
 
+# macOS has no timeout; Linux keeps its own.
+command -v timeout >/dev/null 2>&1 || timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
 JOB="$T/job-asked"
 mkdir -p "$JOB"
 printf '%s' 'Migrate the schema.' > "$JOB/prompt.txt"

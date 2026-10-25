@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +28,8 @@ jobs:
       - run: bash tests/lock-shell.sh
       - run: bash tests/hook-shell.sh
       - run: bash tests/allowlist-shell.sh
-      - run: shellcheck tests/live/*.sh tests/live/scenarios/*.sh
+      - if: runner.os == 'Linux'
+        run: shellcheck tests/live/*.sh tests/live/scenarios/*.sh
 
   conformance:
     runs-on: ubuntu-latest

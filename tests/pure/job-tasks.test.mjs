@@ -2,6 +2,7 @@
 // spec 4.4, then the approval flow of D7 (create, accept, decline, cancel, refuse) against a fake worker.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -132,6 +133,105 @@ test('an id that names no task or job, or that is not a safe id, is TaskNotFound
     await assert.rejects(() => tasks.cancel(id), TaskNotFound)
   }
   await assert.rejects(() => tasks.get('task-gone'), TaskNotFound, 'a task with no approval and no job has lost its job')
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A launch has written meta.json and the supervisor has not yet written its pid. The task polls in this window.
+
+const ago = (seconds) => Date.now() / 1000 - seconds
+
+test('a job whose meta was written a moment ago and that has no pid yet is starting, so its task stays working and does not turn completed and back', async (t) => {
+  const { s, tasks, record, mark } = setup()
+  t.after(() => s.cleanup())
+  record('task-start', { approval: APPROVAL })
+  mark('task-start', 'approved')
+  // startedAt is long ago, as when a worktree copy was slow: the meta file is what is young.
+  const dir = job(s.jobsDir, 'task-start', { meta: { kind: 'mcp' } })
+  job(s.jobsDir, 'job-start')
+
+  for (const id of ['task-start', 'job-start']) {
+    const starting = await tasks.get(id)
+    assert.equal(starting.status, 'working', `${id}: a terminal state would be wrong, since the supervisor is about to write its pid`)
+    assert.match(starting.statusMessage, /^codex · fixture-model · starting · /)
+  }
+
+  utimesSync(join(dir, 'meta.json'), ago(60), ago(60))
+  utimesSync(join(s.jobsDir, 'job-start', 'meta.json'), ago(60), ago(60))
+  for (const id of ['task-start', 'job-start']) {
+    const lost = await tasks.get(id)
+    assert.equal(lost.status, 'completed', `${id}: a minute with no pid is a supervisor that never came up`)
+    assert.equal(lost.result.isError, true)
+    assert.match(lost.result.content[0].text, /was interrupted: its supervisor is gone/)
+  }
+})
+
+test('a young job whose supervisor wrote a pid that is dead is lost at once, and one whose pid is alive is running', async (t) => {
+  const { s, tasks } = setup()
+  t.after(() => s.cleanup())
+  job(s.jobsDir, 'job-dead', { files: { pgid: String(await s.deadGroup()) } })
+  job(s.jobsDir, 'job-alive', { files: { pgid: String(s.liveGroup()) } })
+  job(s.jobsDir, 'job-exited', { files: { exit: '0', 'last.txt': 'ok' } })
+  assert.equal((await tasks.get('job-dead')).status, 'completed')
+  const alive = await tasks.get('job-alive')
+  assert.equal(alive.status, 'working')
+  assert.equal(alive.statusMessage.includes('starting'), false, 'with a pid the job is running, not starting')
+  assert.equal((await tasks.get('job-exited')).status, 'completed')
+})
+
+test('a cancel while the job is starting is written to the job, and a job that is lost gets none', async (t) => {
+  const { s, tasks, record, mark } = setup()
+  t.after(() => s.cleanup())
+  record('task-start', { approval: APPROVAL })
+  mark('task-start', 'approved')
+  const dir = job(s.jobsDir, 'task-start', { meta: { kind: 'mcp' } })
+  await tasks.cancel('task-start')
+  assert.ok(existsSync(join(dir, 'cancel')), 'the supervisor stops a job that has a cancel marker when it comes up')
+  assert.equal((await tasks.get('task-start')).status, 'working', 'it reads as cancelling until the supervisor writes exit 124')
+
+  const lost = job(s.jobsDir, 'job-lost-early')
+  utimesSync(join(lost, 'meta.json'), ago(60), ago(60))
+  await tasks.cancel('job-lost-early')
+  assert.equal(existsSync(join(lost, 'cancel')), false, 'a job that is lost has nothing to cancel')
+})
+
+const SLOW_WORKER = '#!/bin/bash\necho $$ > "$ORQ_JOB_DIR/worker.pid"\nexec sleep 60\n'
+
+test('the supervisor stops a worker whose cancel marker was there before it came up, and the job exits 124', async (t) => {
+  const s = scene({ bin: { claude: SLOW_WORKER } })
+  t.after(() => s.cleanup())
+  const dir = join(s.jobsDir, 'job-marked-early')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'prompt.txt'), 'never finishes')
+  writeFileSync(join(dir, 'cancel'), 'cancelled\n')
+  const supervisor = spawn('bash', [join(REPO, 'scripts', 'supervise.sh'), dir, 'claude', s.root, 'haiku'], {
+    env: { ...s.env, ORQ_JOB_DIR: dir },
+    detached: true,
+    stdio: 'ignore',
+  })
+  supervisor.unref()
+  t.after(() => {
+    const stop = (pid, target) => {
+      if (!Number.isInteger(pid) || pid <= 1) return
+      try {
+        process.kill(target, 'SIGKILL')
+      } catch {
+        /* already gone */
+      }
+    }
+    stop(supervisor.pid, -supervisor.pid)
+    if (existsSync(join(dir, 'worker.pid'))) {
+      const worker = Number(readFileSync(join(dir, 'worker.pid'), 'utf8').trim())
+      stop(worker, worker)
+    }
+  })
+  const stopAt = Date.now() + 25000
+  while (!existsSync(join(dir, 'exit'))) {
+    assert.ok(Date.now() < stopAt, 'the supervisor never wrote exit for a job that was cancelled before it started')
+    await new Promise((done) => setTimeout(done, 200))
+  }
+  assert.equal(readFileSync(join(dir, 'exit'), 'utf8').trim(), '124')
+  const worker = Number(readFileSync(join(dir, 'worker.pid'), 'utf8').trim())
+  assert.throws(() => process.kill(worker, 0), 'the worker was stopped')
 })
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -453,10 +553,12 @@ test('a value that the model chose cannot add a line, a sentence or a look-alike
   assert.equal(lines.length, 3, 'three lines, whatever the values hold')
   assert.equal(lines[0], 'A task asks for more than your ceiling allows: runtime auto.')
   assert.equal(lines[1], 'It runs in its own worktree.')
-  const escapedDir = evil.replaceAll('\n', '\\n').replaceAll('"', '\\"')
+  const chars = [...evil]
+  const cutDir = chars.length > 120 ? `${chars.slice(0, 120).join('')}…` : evil
+  const shownDir = cutDir.replaceAll('\n', '\\n').replaceAll('"', '\\"')
   assert.equal(
     lines[2],
-    `Worker "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?", directory "${escapedDir}".`,
+    `Worker "claudeAgent", model "haiku\\"\\u{202e}\\u{200b}Allowit?", directory "${shownDir}".`,
     'the quote is escaped, the invisible characters are written out, and so are the line breaks of a real directory name',
   )
   assert.equal(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(params.message.replaceAll('\n', '')), false, 'no control or format character is left in the question')
