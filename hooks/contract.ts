@@ -139,6 +139,8 @@ export const FAILURE_CODES = [
   'capability_denied',
   // The task ran without a worktree, so it has no branch to merge.
   'no_worktree',
+  // A live job still works on the task branch, the task's own job or one that took the branch over. Nothing was merged.
+  'task_running',
   // The destination checkout has uncommitted or untracked changes.
   'dirty_worktree',
   // The task branch is already reachable from HEAD.
@@ -147,6 +149,8 @@ export const FAILURE_CODES = [
   'not_fast_forward',
   // The merge stopped on conflicts. It was aborted; the answer lists the files.
   'merge_conflict',
+  // A git hook of the destination checkout refused the merge. A pending merge was aborted; the answer carries the hook's output.
+  'hook_failed',
   // git failed in a way no other code names.
   'git_failed',
 ] as const

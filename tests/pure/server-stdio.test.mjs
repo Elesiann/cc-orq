@@ -881,6 +881,167 @@ test('integrate fast-forwards a worktree job that a fake worker committed in, an
   assert.equal(readdirSync(session).includes('repo-wt'), true)
 })
 
+function checkoutWithLauncher(s) {
+  const session = join(s.root, 'session')
+  const repo = join(session, 'repo')
+  mkdirSync(repo, { recursive: true })
+  git(repo, ['init', '-q', '-b', 'main'])
+  writeFileSync(join(repo, 'shared.txt'), 'base\n')
+  git(repo, ['add', 'shared.txt'])
+  git(repo, ['commit', '-q', '-m', 'base'])
+  const engine = nodeEngine({ env: s.env, pluginRoot: REPO })
+  const config = { ...defaultConfig(s.home), jobsDir: s.jobsDir }
+  const launch = async (agentId) => {
+    const header = parseTaskHeader(`target: claudeAgent haiku\ncwd: ${repo}\nisolation: worktree\n\nwork`)
+    const launched = await launchTaskFromHeader(engine, config, {
+      agentId,
+      header,
+      ceiling: parentRuntimeModeFromPermissionMode('acceptEdits'),
+      sessionDir: session,
+    })
+    assert.ok('job' in launched, JSON.stringify(launched))
+    return launched.job
+  }
+  return { repo, launch }
+}
+
+function hookFile(repo, name, body) {
+  const path = join(repo, '.git', 'hooks', name)
+  writeFileSync(path, `#!/bin/sh\n${body}\n`)
+  chmodSync(path, 0o755)
+  return path
+}
+
+test('integrate runs no hook of the checkout until the config says gitHooks run, and then answers hook_failed with the hook output', async (t) => {
+  const s = scene({ instances: [{ id: 'claudeAgent', driver: 'claudeAgent' }], bin: { claude: FAKE_WORKER } })
+  t.after(() => s.cleanup())
+  const { repo, launch } = checkoutWithLauncher(s)
+  const refusing = join(s.root, 'lint-fails')
+  const marker = join(s.root, 'post-merge-ran')
+  writeFileSync(refusing, '')
+  hookFile(repo, 'pre-merge-commit', `if [ -e "${refusing}" ]; then echo "lint: a trailing space" >&2; exit 1; fi`)
+  hookFile(repo, 'post-merge', `touch "${marker}"`)
+
+  const server = s.start()
+  t.after(() => server.close())
+  const statusOf = (taskId) => server.call('status', { taskId })
+  const first = await launch('agent-a')
+  const second = await launch('agent-b')
+  for (const j of [first, second]) assert.equal((await untilEnded(statusOf, j.id)).status, 'completed')
+
+  const byDefault = await server.call('integrate', { taskId: first.id, strategy: 'merge' })
+  assert.equal(byDefault.isError, false)
+  assert.equal(byDefault.json.ok, true)
+  assert.equal(existsSync(marker), false, 'the post-merge hook did not run by default')
+  assert.equal(git(repo, ['rev-list', '--merges', '--count', 'HEAD']), '1', 'the refusing pre-merge-commit hook did not stop the merge by default')
+
+  for (const gitHooks of ['RUN', true, 'on']) {
+    s.setConfig({ integrate: { gitHooks } })
+    const ignored = await server.call('integrate', { taskId: second.id, strategy: 'merge' })
+    assert.equal(ignored.json.error?.code, undefined, `integrate.gitHooks ${JSON.stringify(gitHooks)} is not run`)
+    assert.equal(ignored.json.ok, true)
+    git(repo, ['reset', '-q', '--hard', 'HEAD~1'])
+  }
+
+  s.setConfig({ integrate: { gitHooks: 'run' } })
+  const headBefore = git(repo, ['rev-parse', 'HEAD'])
+  const refused = await server.call('integrate', { taskId: second.id, strategy: 'merge' })
+  assert.equal(refused.isError, true)
+  assert.equal(refused.json.ok, false)
+  assert.equal(refused.json.error.code, 'hook_failed')
+  assert.match(refused.json.error.message, /lint: a trailing space/)
+  assert.match(refused.json.error.message, /checkout's hook/)
+  assert.equal(existsSync(join(repo, '.git', 'MERGE_HEAD')), false, 'no merge is left pending')
+  assert.equal(git(repo, ['status', '--porcelain']), '', 'the checkout is clean')
+  assert.equal(git(repo, ['rev-parse', 'HEAD']), headBefore, 'HEAD did not move')
+  assert.equal(existsSync(marker), false, 'a merge that a hook refused ran no post-merge hook')
+
+  rmSync(refusing)
+  const merged = await server.call('integrate', { taskId: second.id, strategy: 'merge' })
+  assert.equal(merged.isError, false)
+  assert.equal(merged.json.ok, true)
+  assert.equal(existsSync(marker), true, 'the post-merge hook ran with the opt-in')
+})
+
+test('integrate answers task_running with the id of a live job on the branch, before git runs, and goes on once that job is gone', async (t) => {
+  const s = scene({ instances: [{ id: 'claudeAgent', driver: 'claudeAgent' }], bin: { claude: FAKE_WORKER } })
+  t.after(() => s.cleanup())
+  const { repo, launch } = checkoutWithLauncher(s)
+  const server = s.start()
+  t.after(() => server.close())
+  const first = await launch('agent-a')
+  assert.equal((await untilEnded((taskId) => server.call('status', { taskId }), first.id)).status, 'completed')
+
+  const group = s.liveGroup()
+  job(s.jobsDir, 'job-next', {
+    meta: { kind: 'task', agentId: 'agent-n', repo, branch: `orq/${first.id}`, worktree: first.worktree, cwd: first.worktree },
+    files: { pgid: `${group}\n` },
+  })
+  const headBefore = git(repo, ['rev-parse', 'HEAD'])
+  const refused = await server.call('integrate', { taskId: first.id })
+  assert.equal(refused.isError, true)
+  assert.equal(refused.json.ok, false)
+  assert.equal(refused.json.error.code, 'task_running')
+  assert.match(refused.json.error.message, /job-next/)
+  assert.equal(git(repo, ['rev-parse', 'HEAD']), headBefore, 'HEAD did not move')
+  assert.equal(git(repo, ['status', '--porcelain']), '', 'the checkout is clean')
+  assert.equal(existsSync(join(repo, '.git', 'MERGE_HEAD')), false)
+
+  process.kill(-group, 'SIGKILL')
+  for (let wait = 0; wait < 250; wait += 1) {
+    try {
+      process.kill(-group, 0)
+    } catch {
+      break
+    }
+    await new Promise((done) => setTimeout(done, 20))
+  }
+  const merged = await server.call('integrate', { taskId: first.id })
+  assert.equal(merged.isError, false)
+  assert.equal(merged.json.ok, true)
+  assert.equal(git(repo, ['rev-parse', 'HEAD']), merged.json.mergedSha)
+})
+
+test('integrate answers task_running for a live shared job inside the task worktree and for a job that has no pgid yet, and goes on once they are gone', async (t) => {
+  const s = scene({ instances: [{ id: 'claudeAgent', driver: 'claudeAgent' }], bin: { claude: FAKE_WORKER } })
+  t.after(() => s.cleanup())
+  const { repo, launch } = checkoutWithLauncher(s)
+  const server = s.start()
+  t.after(() => server.close())
+  const first = await launch('agent-a')
+  assert.equal((await untilEnded((taskId) => server.call('status', { taskId }), first.id)).status, 'completed')
+  const headBefore = git(repo, ['rev-parse', 'HEAD'])
+  const refuse = async (name) => {
+    const refused = await server.call('integrate', { taskId: first.id })
+    assert.equal(refused.isError, true)
+    assert.equal(refused.json.error.code, 'task_running')
+    assert.match(refused.json.error.message, new RegExp(`task ${name} is still running`))
+    assert.equal(git(repo, ['rev-parse', 'HEAD']), headBefore, 'HEAD did not move')
+    assert.equal(git(repo, ['status', '--porcelain']), '', 'the checkout is clean')
+  }
+
+  const group = s.liveGroup()
+  job(s.jobsDir, 'job-shared', { meta: { kind: 'task', agentId: 'agent-s', cwd: join(first.worktree, 'src') }, files: { pgid: `${group}\n` } })
+  await refuse('job-shared')
+  process.kill(-group, 'SIGKILL')
+  for (let wait = 0; wait < 250; wait += 1) {
+    try {
+      process.kill(-group, 0)
+    } catch {
+      break
+    }
+    await new Promise((done) => setTimeout(done, 20))
+  }
+
+  job(s.jobsDir, 'job-fresh', { startedAt: Date.now(), meta: { kind: 'task', agentId: 'agent-f', cwd: first.worktree } })
+  await refuse('job-fresh')
+  job(s.jobsDir, 'job-fresh', { startedAt: Date.now() - 60_000, meta: { kind: 'task', agentId: 'agent-f', cwd: first.worktree } })
+  const merged = await server.call('integrate', { taskId: first.id })
+  assert.equal(merged.isError, false)
+  assert.equal(merged.json.ok, true)
+  assert.equal(git(repo, ['rev-parse', 'HEAD']), merged.json.mergedSha)
+})
+
 // ---------------------------------------------------------------------------------------------------------------------
 // capabilities and the session mode
 
