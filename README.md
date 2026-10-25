@@ -447,25 +447,42 @@ its last 20 lines:
 {"ok": false, "error": {"code": "hook_failed", "message": "a git hook refused the merge of orq/JOB_ID into CHECKOUT; the merge was aborted. A hook has to pass before the task can merge: fix what it checks, then integrate again.\nOutput of the checkout's hook:\nlint: a.txt has a trailing space"}}
 ```
 
-`git merge --abort` puts back what the merge changed, but not a file that a hook
-made. After every failed merge, `integrate` reads `git status --porcelain`. When
-a refused merge leaves changes in the checkout, the answer says so and lists up
-to 10 paths, for example `; CHECKOUT keeps changes the hook made: generated.txt`.
-That includes a hook that refuses before any merge is pending, such as a
-`reference-transaction` hook. `integrate` refuses a checkout with changes, so
-remove those files before you integrate again.
+When a merge fails, or git's 60 second limit kills it, `integrate` undoes the
+merge itself only when it can tell that the changes in the checkout are the
+merge's. Before the merge, it records the paths that the task branch changes
+since it left HEAD, with `git diff --name-only HEAD...BRANCH`. After the failure,
+it reads `git status --porcelain`.
+
+- If every changed tracked file is one of those paths, staged or not, it runs
+  `git merge --abort` when a merge is pending, and `git reset --merge` when a
+  killed git left a half-made merge with no `MERGE_HEAD`.
+- If any changed tracked file is not one of those paths, it changes nothing. The
+  answer names those files as probably your own change, lists the rest, and names
+  the command to run after you have checked them. That command drops staged
+  changes of your own too.
+- A file that git does not track never stops the cleanup, and it stays.
+
+The check goes by path. A change of yours to a file that the task branch also
+changes counts as the merge's, and the cleanup discards it. A hook that changes a
+tracked file outside those paths, such as a formatter or a version bump, stops
+the cleanup the same way, and the answer calls that file probably yours. Commit
+or stash your own work before you integrate, and leave the checkout alone while
+`integrate` runs.
+
+Neither command removes a file that a hook made. After every failed merge,
+`integrate` reads `git status --porcelain` once more. When the checkout keeps
+changes, the answer lists up to 10 paths, for example
+`; CHECKOUT keeps changes the hook made: generated.txt`. That includes a hook that
+refuses before any merge is pending, such as a `reference-transaction` hook.
+`integrate` refuses a checkout with changes, so remove those files before you
+integrate again.
 
 A merge that outlives git's 60 second limit is killed, and `integrate` answers
-`git_failed` with the reason. If a merge was pending, `integrate` aborts it, as
-it does for a refused merge. If none was pending, it resets nothing, because it
-cannot tell what the killed merge staged from a change you made in the
-meantime. A `pre-merge-commit` hook that runs long ends this way, since git
-writes `MERGE_HEAD` after that hook. The answer says nothing was reset, lists up
-to 10 changed paths, and names the command that drops what the merge staged:
-check the paths with `git status`, then run `git reset --merge` in the checkout.
-That command drops every staged change, yours included, and untracked files stay
-for you to remove by hand. When a `post-merge` hook is what ran long, the merge
-had already landed, and the answer says the branch is already part of HEAD.
+`git_failed` with the reason, after it applies the rule above. A
+`pre-merge-commit` hook that runs long leaves a half-made merge with no
+`MERGE_HEAD`, because git writes `MERGE_HEAD` after that hook. When a
+`post-merge` hook is what ran long, the merge had already landed. The answer then
+says the branch is already part of HEAD, resets nothing, and lists what stays.
 
 A refusal names one of these codes:
 
@@ -478,10 +495,10 @@ A refusal names one of these codes:
 | `dirty_worktree` | The checkout has uncommitted or untracked files. Commit or stash them, then integrate again. |
 | `already_integrated` | The task branch is already in the checkout's HEAD, so there is nothing to merge. |
 | `not_fast_forward` | `ff-only` cannot move HEAD, because the checkout has commits the task lacks. Integrate with `merge`, or rebase the task first. |
-| `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort`, and the answer lists the conflicted files. |
-| `hook_failed` | Only with the opt-in. A git hook of the checkout refused the merge, or the merge stopped before its commit with no conflict, for example when signing the commit fails. orq ran `git merge --abort` if a merge was pending. The answer carries what git printed on stdout and stderr, which includes the hook's output, with secrets redacted and cut to its last 20 lines, and it lists up to 10 files that the hook left in the checkout. Fix what the hook checks, then integrate again. |
+| `merge_conflict` | The merge stopped on conflicts. orq ran `git merge --abort` unless a tracked file outside the merge had changed, and the answer lists the conflicted files. |
+| `hook_failed` | Only with the opt-in. A git hook of the checkout refused the merge, or the merge stopped before its commit with no conflict, for example when signing the commit fails. orq ran `git merge --abort` if a merge was pending and no tracked file outside the merge had changed. The answer carries what git printed on stdout and stderr, which includes the hook's output, with secrets redacted and cut to its last 20 lines, and it lists up to 10 files that the hook left in the checkout. Fix what the hook checks, then integrate again. |
 | `invalid_request` | The input does not match the schema. |
-| `git_failed` | git failed in a way no other code names, or a merge outlived git's 60 second limit and was killed. The answer carries its message. After a kill with no merge pending, it says nothing was reset and lists up to 10 changed paths. |
+| `git_failed` | git failed in a way no other code names, or a merge outlived git's 60 second limit and was killed. The answer carries its message. After a kill, it says what was aborted or reset, or why nothing was, and lists up to 10 changed paths. |
 
 When a merge conflicts, redelegate a rebase of the task branch to the same
 worker, then integrate again. orq never forces a merge, and it never resolves a
@@ -514,8 +531,9 @@ as `git merge` does in your shell. A fast-forward makes no commit, so `ff-only`
 runs no `pre-merge-commit`, `prepare-commit-msg` or `commit-msg` hook, and
 `merge` runs all three. `post-merge` runs after either strategy, and git ignores
 its exit code. When a hook refuses the merge, `integrate` runs `git merge
---abort`, which restores your checkout except for files the hook made, and
-answers `hook_failed` with the hook's output and those files.
+--abort` if the cleanup rule before the table of error codes allows it, which
+restores your checkout except for files the hook made, and answers `hook_failed`
+with the hook's output and those files.
 
 The opt-in runs whatever hooks the checkout has when you integrate, including
 hook files that a worker changed or added. A worker that can write the checkout's
