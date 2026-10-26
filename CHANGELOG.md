@@ -6,6 +6,17 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The BLOCKED text and `status` of a question name the real state. After the
+  question was answered they name the continuation's taskId, and while a human
+  form is open they say the user is answering it in a form. They no longer tell
+  the session to call `answer` when `answer` would refuse.
+- `already_answered` says to read the continuation with `status`, and to delegate
+  anew if it failed.
+- `answer` on a job that wrote its question but has not exited says so, and to
+  answer when the job ends, instead of saying it is waiting.
+
 ## [0.2.0] - 2026-10-25
 
 ### Breaking changes
