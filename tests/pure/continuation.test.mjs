@@ -88,7 +88,11 @@ test('answer resumes the worker in its own session, worktree and branch, as a ta
   assert.equal(read(s, next, 'session'), 'ses-q1\n')
 
   const again = await server.get(id)
-  assert.equal(again.result.content[0].text, text, 'an answer never changes the task that asked')
+  assert.equal(
+    again.result.content[0].text.split('\n\n— orq')[0],
+    `BLOCKED on a question (taskId ${id}): ${QUESTION}\n\nThe question was answered: its worker continues in taskId ${next}. Read it with status; if it failed, delegate anew.`,
+    'once answered, the task that asked names its continuation, and not the answer tool',
+  )
   const status = (await server.call('status', { taskId: id })).json
   assert.equal(status.next, next, 'status says which job took the question over')
   assert.equal((await server.call('status', { taskId: next })).json.parent, id)
