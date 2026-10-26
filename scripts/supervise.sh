@@ -39,6 +39,9 @@
 dir=$1; runner=$2; cwd=$3; model=${4:-}; effort=${5:-}; sandbox=${6:-}
 
 echo $$ > "$dir/pgid"
+# The launcher writes exit 125 when no pid shows within 5 s, and gives the lock back. A supervisor that reports after
+# that must not start a worker. The check and the start below are not atomic.
+if [ -e "$dir/exit" ]; then exit 0; fi
 trap '' TERM
 sweep=$(cd "$(dirname "$0")" && pwd)/sweep.py
 extract=$(cd "$(dirname "$0")" && pwd)/extract.py
@@ -92,6 +95,21 @@ write_session() {
   python3 "$extract" "$dir/events.jsonl" "$runner" "$dir/session" > /dev/null 2>&1
   if [ ! -s "$dir/session" ] && [ -n "$resume" ]; then printf '%s\n' "$resume" > "$dir/session"; fi
   return 0
+}
+
+# A worker below auto cannot write question.txt outside its directory, so it ends its final message with BLOCKED: and
+# the question. When the job exits 0 without a question.txt, that message becomes the question, before exit appears.
+# A question the worker wrote stays as it is, and a cancelled job writes none.
+write_question() {
+  [ -e "$dir/cancel" ] && return 0
+  [ -e "$dir/question.txt" ] && return 0
+  [ -s "$dir/last.txt" ] || return 0
+  local first text
+  IFS= read -r first < "$dir/last.txt" || :
+  case "$first" in BLOCKED:*) ;; *) return 0 ;; esac
+  text=$(python3 -c 'import sys; print(open(sys.argv[1], encoding="utf-8", errors="replace").read().split("BLOCKED:", 1)[1].strip())' "$dir/last.txt" 2>/dev/null) || return 0
+  [ -n "$text" ] || return 0
+  printf '%s\n' "$text" > "$dir/question.txt"
 }
 
 # A CLI can leave a process running outside its process group, such as an MCP server that OpenCode was still
@@ -310,6 +328,7 @@ if [ -e "$dir/cancel" ]; then
   write_exit main 124
   kill -KILL -$$ 2>/dev/null
 elif [ ! -e "$dir/exit" ]; then
+  [ "$code" -eq 0 ] && write_question
   write_session
   write_exit main "$code"
 fi

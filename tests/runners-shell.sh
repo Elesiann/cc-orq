@@ -114,7 +114,7 @@ pwd > "$ARGV_DUMP/claude.cwd"
 [ -n "$CLAUDE_LEFTOVER" ] && leftover claude
 [ -n "$CLAUDE_SLEEP" ] && sleep "$CLAUDE_SLEEP"
 printf '{"type":"system","subtype":"init","session_id":"ses-fake"}\n'
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"ses-fake","result":"FAKE-CLAUDE","usage":{"input_tokens":11,"output_tokens":4},"modelUsage":{"fake-claude-model":{}}}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"ses-fake","result":"%s","usage":{"input_tokens":11,"output_tokens":4},"modelUsage":{"fake-claude-model":{}}}\n' "${CLAUDE_RESULT:-FAKE-CLAUDE}"
 exit 0
 EOF
 chmod +x "$BIN"/codex "$BIN"/opencode "$BIN"/agy "$BIN"/claude "$BIN"/hold "$BIN"/slow-stop "$BIN"/deaf
@@ -288,6 +288,33 @@ rm -f "$DUMP/claude.argv"
 RESUME_ID='--dangerous' run_job job-resume-bad-id claude m '' '' 'x'
 expect_file "$JOB/exit" 4 resume-refuses-an-id-that-reads-as-an-option
 [ ! -e "$DUMP/claude.argv" ] && ok resume-bad-id-starts-no-cli || bad resume-bad-id-starts-no-cli
+
+# A worker below auto cannot write question.txt outside its directory, so its final message says BLOCKED: and the
+# question. The supervisor writes that question when the job exits 0. A question the worker did write stays, and a
+# cancelled job writes none.
+CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked claude m '' '' 'ask'
+expect_file "$JOB/question.txt" 'Which env?' blocked-message-becomes-question
+expect_file "$JOB/exit" 0 blocked-message-exit
+[ -s "$JOB/session" ] && ok blocked-message-session || bad blocked-message-session
+mkdir -p "$T/job-blocked-own"
+printf '%s\n' 'My own question' > "$T/job-blocked-own/question.txt"
+CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked-own claude m '' '' 'ask'
+expect_file "$JOB/question.txt" 'My own question' blocked-message-keeps-the-workers-question
+mkdir -p "$T/job-blocked-cancel"
+: > "$T/job-blocked-cancel/cancel"
+CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked-cancel claude m '' '' 'ask'
+expect_file "$JOB/exit" 124 blocked-cancelled-exit
+[ ! -e "$JOB/question.txt" ] && ok blocked-cancelled-writes-no-question || bad blocked-cancelled-writes-no-question
+
+# A supervisor that reports after its launcher wrote exit 125 starts no worker and leaves exit as it was.
+mkdir -p "$T/job-late"
+printf '125\n' > "$T/job-late/exit"
+rm -f "$DUMP/claude.argv"
+run_job job-late claude m '' '' 'late'
+[ ! -e "$DUMP/claude.argv" ] && ok late-supervisor-starts-no-worker || bad late-supervisor-starts-no-worker
+expect_file "$JOB/exit" 125 late-supervisor-keeps-exit
+[ -s "$JOB/pgid" ] && ok late-supervisor-reported-its-pid || bad late-supervisor-reported-its-pid
+[ ! -e "$JOB/session" ] && ok late-supervisor-writes-no-session || bad late-supervisor-writes-no-session
 
 # The job's marker is its ORQ_JOB_DIR. The timeout wrapper carries it too and is an ancestor of the supervisor.
 setsid sleep 300 </dev/null >/dev/null 2>&1 &

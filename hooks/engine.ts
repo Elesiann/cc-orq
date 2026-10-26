@@ -821,18 +821,43 @@ export function notEndedText(id: string, status: 'running' | 'cancelling' | 'int
  * in a new job, so this job's text stays as it is. A job that recorded no session cannot be resumed, and the old way, a new
  * task with the brief and the answer, is the one left.
  */
-export function blockedText(id: string, question: string, resumable: boolean): string {
-  const way = resumable
+export function blockedText(id: string, question: string, state: { next: Next | null; form: boolean; resumable: boolean }): string {
+  const head = `BLOCKED on a question (taskId ${id}): ${question}`
+  if (state.next !== null) {
+    return `${head}\n\nThe question was answered: its worker continues in taskId ${state.next.jobId}. Read it with status; if it failed, delegate anew.`
+  }
+  if (state.form) {
+    return `${head}\n\nThe user is answering it in a form; the answer tool takes over once the form is declined, cancelled or 24 hours old.`
+  }
+  const way = state.resumable
     ? 'Answer it with the answer tool; the same worker resumes its session.'
     : 'This worker cannot be resumed (it recorded no session), so answer it in a new delegate with the original brief plus the answer.'
-  return `BLOCKED on a question (taskId ${id}): ${question}\n\n${way}`
+  return `${head}\n\n${way}`
+}
+
+/** A form left open for this long ends the task with the BLOCKED text. */
+const FORM_WINDOW_MS = 24 * 60 * 60 * 1000
+
+/** The worker's question stays a form until it is declined, the task is cancelled, 24 hours pass, or it has no session to resume. */
+export async function formIsOpen($: CoreEngine, job: JobRecord, view: { endedAt: number | null }): Promise<boolean> {
+  if ((await readSession($, job)) === null || (await $.fs.exists(`${job.dir}/declined`))) return false
+  return (await $.clock.now()) - (view.endedAt ?? 0) < FORM_WINDOW_MS
+}
+
+/** The BLOCKED text as the answer tool will treat this question now: answered, open in a form, resumable, or not. */
+async function blockedAnswer($: CoreEngine, job: JobRecord, question: string, view: { endedAt: number | null }): Promise<string> {
+  return blockedText(job.id, question, {
+    next: await readNext($, job),
+    form: job.questions === 'human' && (await formIsOpen($, job, view)),
+    resumable: (await readSession($, job)) !== null,
+  })
 }
 
 export async function composeAnswer($: CoreEngine, config: OrqConfig, job: JobRecord, knownView?: JobView): Promise<string> {
   const view = knownView ?? (await jobView($, job))
   if (!('exitCode' in view)) return notEndedText(job.id, view.status)
   if (view.status === 'cancelled') return `orq: ${job.id} was cancelled (exit 124)`
-  if (view.question !== null) return blockedText(job.id, view.question, (await readSession($, job)) !== null)
+  if (view.question !== null) return blockedAnswer($, job, view.question, view)
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
     return `orq: ${job.id} failed (exit ${view.exitCode})` + (snippet ? `\n${snippet}` : '')
@@ -929,7 +954,7 @@ export async function readJobStatus($: CoreEngine, config: OrqConfig, jobId: str
     ...(next !== null ? { next: next.jobId } : {}),
   }
   if (view.status === 'done') {
-    return { ...answer, result: view.question !== null ? blockedText(job.id, view.question, (await readSession($, job)) !== null) : view.lastText }
+    return { ...answer, result: view.question !== null ? await blockedAnswer($, job, view.question, view) : view.lastText }
   }
   if (view.status === 'failed') {
     const snippet = await stderrSnippet($, job)
@@ -1003,7 +1028,7 @@ export function alreadyAnswered(jobId: string, existing: Next | null): Failure {
     'already_answered',
     existing === null
       ? `the question of ${jobId} was answered a moment ago by another call`
-      : `the question of ${jobId} was already answered: its worker continues in taskId ${existing.jobId}, so read that one with status`,
+      : `the question of ${jobId} was already answered: its worker continues in taskId ${existing.jobId}. Read it with status; if it failed, delegate anew.`,
   )
 }
 

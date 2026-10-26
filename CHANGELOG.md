@@ -6,6 +6,28 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-25
+
+### Fixed
+
+- A worker below `auto` cannot write its question to `question.txt` outside its
+  directory, so its question never reached `answer`. When a job exits 0 and its
+  final message starts with `BLOCKED:`, the supervisor now writes the text after
+  that `BLOCKED:` to `question.txt`, unless the worker wrote one itself, before the
+  job's `exit` file appears.
+- A supervisor that started after its launcher had given up (`exit` 125) still
+  ran its worker, next to the job of whoever took the lock. A supervisor now starts
+  no worker when the job's `exit` file already exists. The check and the start are
+  not atomic, so a launcher that gives up at that moment can still lose.
+- The BLOCKED text and `status` of a question name the real state. After the
+  question was answered they name the continuation's taskId, and while a human
+  form is open they say the user is answering it in a form. They no longer tell
+  the session to call `answer` when `answer` would refuse.
+- `already_answered` says to read the continuation with `status`, and to delegate
+  anew if it failed.
+- `answer` on a job that wrote its question but has not exited says so, and to
+  answer when the job ends, instead of saying it is waiting.
+
 ## [0.2.0] - 2026-10-25
 
 ### Breaking changes
@@ -366,7 +388,8 @@ First public release.
   `~/.config/orq/config.json` for the jobs directory, wait slice, allowed roots
   and provider instances.
 
-[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Elesiann/cc-orq/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Elesiann/cc-orq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Elesiann/cc-orq/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Elesiann/cc-orq/releases/tag/v0.1.0

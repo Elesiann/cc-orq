@@ -662,12 +662,13 @@ supervisor writes its pid. A launch with no supervisor pid counts as alive for
 - A launcher that stops for more than 10 s after its last check, whether it is
   suspended or its start script is slow, can find its lock broken. Another
   launcher then takes the lock and starts its own job, and both run.
-- A supervisor that writes its pid after its launcher has given up still runs its
-  worker. The launcher gives up when the start script reports no pid within 5 s:
-  it writes `exit` 125 and gives the lock back, and the next launcher takes it.
-  The supervisor does not look for that `exit` file. This is a known limit, and
-  the supervisor itself has to close it, by not running a worker for a job
-  that already has an `exit` file. This release does not change the supervisor.
+- A supervisor that writes its pid after its launcher has given up starts no
+  worker when the job's `exit` file is already there. The launcher gives up when
+  the start script reports no pid within 5 s: it writes `exit` 125 and gives the
+  lock back, and the next launcher takes it. The supervisor checks for that file
+  right after it writes its pid. The check and the start of the worker are not
+  atomic, so a launcher that writes `exit` 125 between the two still leaves a
+  worker running next to the job of whoever took the lock.
 
 Once a supervisor that runs has written its pid, the lock holds however old it is.
 
@@ -1034,9 +1035,9 @@ The job is of kind `mcp`, and its `meta.json` names the job it continues
 (`parent`). A client with MCP tasks gets a task of its own, with the id of the
 new job, that `/tasks` lists and that wakes the session with the result; any
 other client gets `{"taskId": "<id>", "status": "running"}` at once and reads the
-job with `status`. The task that asked keeps its BLOCKED text: an answer never
-changes it. If the worker asks again, the new task ends with BLOCKED too, and
-`answer` takes that id.
+job with `status`. Once a question is answered, the BLOCKED text of the task that
+asked names the continuation's taskId instead of pointing to `answer`. If the
+worker asks again, the new task ends with BLOCKED too, and `answer` takes that id.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -1361,7 +1362,7 @@ for both the kind and the agent suffix, for example
 | `resume` | `answer` | A continuation only: the session id the CLI resumes, as its first line. The supervisor starts no worker when it is not a plain id. |
 | `declined` | the task source | A `questions: human` question that the user declined, or that could not be resumed. The form is gone, and the task ends with BLOCKED. |
 | `next` | `answer`, the question form | `{"jobId", "via"}`, `via` being `answer` or `form`: the job that took over this job's question. It is created whole and only when absent, so it is the claim that lets one answer through. |
-| `question.txt` | the job, through the shell or the `orq_ask` tool | The question for the parent, written before the job stops. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
+| `question.txt` | the job, through the shell or the `orq_ask` tool, or the supervisor from a `BLOCKED:` final message | The question for the parent, written before the job stops. The supervisor writes it when a job exits 0 with a `BLOCKED:` final message and no file. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
 | `flags` | `cc-orq:task`, `delegate` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
 The `exit` file holds one number:
@@ -1590,8 +1591,10 @@ habits.
   that stopped on one. A review round, or any other follow-up, is a new task that
   carries the earlier brief. A worker below `auto` cannot write its question to
   `question.txt` outside its directory (measured with a Claude worker at
-  `manual` and `acceptEdits`, which could not), so the question only reaches
-  `answer` from a worker that could write it.
+  `manual` and `acceptEdits`, which could not). When such a job exits 0 without a
+  `question.txt`, the supervisor writes the text after the `BLOCKED:` of its final
+  message to `question.txt`, so `answer` reaches it too. A live worker below `auto`
+  has not been run against this path. The shell suite covers it with a fake worker.
 - A client without MCP tasks gets the job's id and no wake-up, and reads the job
   with `status`. A subagent is one (measured on 2.1.310). Claude Code's
   documentation names the VS Code extension, the desktop app and a one-shot
@@ -1604,9 +1607,10 @@ habits.
   test server). `claude --resume` starts a new server, which answers for the task
   from the files.
 - A supervisor that writes its pid after its launcher gave up, so after the
-  launcher wrote `exit` 125 and gave the lock back, still runs its worker next to
-  the job of whoever took the lock. The supervisor has to close this by not
-  running a job that already has an `exit` file. See
+  launcher wrote `exit` 125 and gave the lock back, starts no worker when that
+  `exit` file is there. A launcher that writes `exit` 125 in the moment between
+  that check and the worker's start still leaves a worker running next to the job
+  of whoever took the lock, because the two steps are not atomic. See
   [Worktrees and integrate](#worktrees-and-integrate).
 - A cancel ends the job's process group and every process that still carries the
   job's `ORQ_JOB_DIR`. A process that left the group and cleared its environment

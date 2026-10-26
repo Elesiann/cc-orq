@@ -136,6 +136,9 @@ try {
 
   const again = await call('answer', { taskId: first, answer: 'Staging.' })
   check('a second answer gets already_answered with the id of the continuation', again.isError && again.json?.error?.code === 'already_answered' && again.json.error.message.includes(next), again.text)
+  check('and says to read that continuation with status, and to delegate anew if it failed', again.json.error.message.includes('if it failed, delegate anew'), again.text)
+  const answeredStatus = (await call('status', { taskId: first })).json.result
+  check('status of an answered question names its continuation, not the answer tool', answeredStatus.includes(`its worker continues in taskId ${next}`) && !answeredStatus.includes('Answer it with the answer tool'), answeredStatus)
 
   const merged = await call('integrate', { taskId: next })
   check('integrate merges what both runs committed', merged.json?.ok === true, merged.text)
