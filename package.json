@@ -1,6 +1,6 @@
 {
   "name": "cc-orq",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "T3 Code style orchestration surface for Claude Code",
   "license": "MIT",

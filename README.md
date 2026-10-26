@@ -1035,9 +1035,9 @@ The job is of kind `mcp`, and its `meta.json` names the job it continues
 (`parent`). A client with MCP tasks gets a task of its own, with the id of the
 new job, that `/tasks` lists and that wakes the session with the result; any
 other client gets `{"taskId": "<id>", "status": "running"}` at once and reads the
-job with `status`. The task that asked keeps its BLOCKED text: an answer never
-changes it. If the worker asks again, the new task ends with BLOCKED too, and
-`answer` takes that id.
+job with `status`. Once a question is answered, the BLOCKED text of the task that
+asked names the continuation's taskId instead of pointing to `answer`. If the
+worker asks again, the new task ends with BLOCKED too, and `answer` takes that id.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
