@@ -6,6 +6,18 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A worker below `auto` cannot write its question to `question.txt` outside its
+  directory, so its question never reached `answer`. When a job exits 0 and its
+  final message starts with `BLOCKED:`, the supervisor now writes the text after
+  that `BLOCKED:` to `question.txt`, unless the worker wrote a file, before the
+  job's `exit` file appears.
+- A supervisor that started after its launcher had given up (`exit` 125) still
+  ran its worker, next to the job of whoever took the lock. A supervisor now starts
+  no worker when the job's `exit` file already exists. The check and the start are
+  not atomic, so a launcher that gives up at that moment can still lose.
+
 ## [0.2.0] - 2026-10-25
 
 ### Breaking changes
