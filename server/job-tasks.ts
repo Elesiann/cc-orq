@@ -18,6 +18,7 @@ import {
   alreadyAnswered,
   composeAnswer,
   continuationPlan,
+  formIsOpen,
   jobView,
   launchContinuation,
   launchTaskFromHeader,
@@ -60,8 +61,6 @@ const HUMAN_NEEDS_FORMS =
   'questions: human needs a client that declares MCP tasks and form input, such as the Claude Code CLI, and this one does not. ' +
   'Leave questions out, and a question the worker asks comes back to you in its result.'
 
-/** A form left open for this long ends the task with the BLOCKED text. */
-const FORM_WINDOW_MS = 24 * 60 * 60 * 1000
 const QUESTION_KEY = 'q-'
 const ANSWER_MAX_CHARS = 20_000
 
@@ -327,12 +326,6 @@ async function walkForms($: CoreEngine, config: OrqConfig, first: JobRecord): Pr
   return { job, view: await viewOf($, job) }
 }
 
-/** The worker's question stays a form until it is declined, the task is cancelled, 24 hours pass, or it has no session to resume. */
-async function formIsOpen($: CoreEngine, job: JobRecord, view: Extract<JobView, { question: string | null }>): Promise<boolean> {
-  if ((await readSession($, job)) === null || (await $.fs.exists(`${job.dir}/declined`))) return false
-  return (await $.clock.now()) - (view.endedAt ?? 0) < FORM_WINDOW_MS
-}
-
 /** The worker chose the question, so its whitespace is folded and its control characters are written out. */
 function plain(text: string): string {
   const folded = text.replace(/\s+/g, ' ').trim()
@@ -562,6 +555,9 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
     if (parent === null) return { result: answerOf(fail('task_not_found', `no task ${call.taskId}`), true) }
     const view = await jobView($, parent)
     if (view.status !== 'done' || view.question === null) {
+      if (view.status === 'waiting') {
+        return { result: answerOf(fail('invalid_request', `task ${parent.id} wrote a question and has not exited yet, so answer it when the job ends`), true) }
+      }
       return { result: answerOf(fail('invalid_request', `task ${parent.id} has not stopped on a question (it is ${taskStatusOf(view)}), so there is nothing to answer`), true) }
     }
     const next = await readNext($, parent)

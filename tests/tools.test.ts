@@ -249,6 +249,20 @@ test('status answers a job that exited 0 after a question as completed, with the
   expect(answer.result).toBe('BLOCKED on a question (taskId job-blk): Which branch?\n\nAnswer it with the answer tool; the same worker resumes its session.')
 })
 
+test('status of a question in an open human form says the user is answering it, not the answer tool', async () => {
+  const s = fresh()
+  seedJob(s, 'job-form', 1000000, { questions: 'human' })
+  s.files.set(`${JOBS}/job-form/question.txt`, 'Which branch?\n')
+  s.files.set(`${JOBS}/job-form/exit`, '0')
+  s.files.set(`${JOBS}/job-form/session`, 'ses-form\n')
+  s.files.set(`${JOBS}/job-form/last.txt`, 'BLOCKED: Which branch?')
+  const $ = engineOf(s)
+  const answer = await status($, { taskId: 'job-form' })
+  expect(answer.result).toBe(
+    'BLOCKED on a question (taskId job-form): Which branch?\n\nThe user is answering it in a form; the answer tool takes over once the form is declined, cancelled or 24 hours old.',
+  )
+})
+
 test('status answers a failed job with the exit code and the redacted stderr tail', async () => {
   const s = fresh()
   seedJob(s, 'job-bad', 1000000)
