@@ -6,6 +6,22 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Cancelling a `questions: human` task while its form is open now closes the
+  form. Before, `status` and the BLOCKED text kept saying that the user was
+  answering it in a form.
+- A worker that leaves a blank `question.txt` and ends with a `BLOCKED:` final
+  message gets its question written, as one with no `question.txt` does. The
+  engine already read a blank file as no question.
+- A launch that stalled past the 10 s grace between taking its lock and writing
+  its owner could remove the lock of the launcher that broke it and took it. A
+  claim now creates its owner file exclusively, and an owner file it finds
+  already there, even an empty one, makes the claim busy.
+- The catalog probe starts no command after 75 s and stops the one still running
+  then. The engine kills it at 90 s, and an OpenCode probe that ran that long
+  left its MCP servers running.
+
 ## [0.2.1] - 2026-10-25
 
 ### Fixed
