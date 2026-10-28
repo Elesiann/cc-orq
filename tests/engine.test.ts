@@ -196,7 +196,7 @@ function runLockScript(s: State, script: string): number {
     if (s.lockExit !== 0) return s.lockExit
     const dir = /mkdir (\S+\/\.locks\/[0-9a-f]{64}) /.exec(script)?.[1] ?? ''
     if (s.locks.has(dir)) return 1
-    const owner = /printf '%s\\n' (\S+) > \S+\/owner/.exec(script)?.[1] ?? ''
+    const owner = /printf '%s\\n' (\S+) >&4/.exec(script)?.[1] ?? ''
     s.locks.set(dir, owner)
     s.files.set(`${dir}/owner`, `${owner}\n`)
     s.mtimes.set(dir, s.now)
