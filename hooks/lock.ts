@@ -11,8 +11,9 @@ import { isSafeJobId, shellWord } from './types.ts'
  * under a second directory, NAME.mutex, which `mkdir` makes the same way. Under it the owner is read again, so a
  * lock that someone else broke and took in the meantime is never removed, and the lock moves aside to a name of
  * its own in one rename. The two final checks of a launch run under the same mutex, so a check and a break never
- * interleave. A claim needs no mutex: `mkdir` fails while a lock exists. A claim that cannot write its
- * owner removes the empty directory it has just made.
+ * interleave. A claim needs no mutex: `mkdir` fails while a lock exists. A claim creates its owner file
+ * exclusively, and one it finds already there belongs to another launcher, even while it is empty. A claim that
+ * created its owner file but cannot write it removes the file and the directory it has just made.
  */
 type LockEngine = Pick<CoreEngine, 'clock' | 'fs' | 'process'>
 
@@ -134,6 +135,8 @@ const EXIT_HELD = 1
 const EXIT_LOST = 3
 const EXIT_UNWRITTEN = 4
 const EXIT_UNTOUCHED = 5
+/** Inside the claim script only: the owner file was created, so it is the claim's own, and the write failed. */
+const OWNER_UNWRITTEN = 10
 
 async function orNull<T>(read: () => Promise<T>): Promise<T | null> {
   try {
@@ -149,7 +152,11 @@ async function exitCodeOf($: LockEngine, script: string): Promise<number> {
 
 const quoted = shellWord
 
-/** A lock broken between the failed mkdir and the look at the directory is gone, so the mkdir runs once more before exit 9. */
+/**
+ * A lock broken between the failed mkdir and the look at the directory is gone, so the mkdir runs once more before exit 9.
+ * The owner is written through the descriptor that created the file, so a failed write can only be on the claim's own file.
+ * A write past a file size limit raises SIGXFSZ, which would end the subshell before it could say so.
+ */
 function claimScript({ locks, dir }: LockPaths, owner: string, key: string): string {
   return (
     `# orq:lock claim\n` +
@@ -158,10 +165,12 @@ function claimScript({ locks, dir }: LockPaths, owner: string, key: string): str
     `  [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}\n` +
     `  mkdir ${quoted(dir)} 2>/dev/null || { [ -d ${quoted(dir)} ] && exit ${EXIT_HELD}; exit 9; }\n` +
     `fi\n` +
-    `( set -C; printf '%s\\n' ${quoted(owner)} > ${quoted(`${dir}/owner`)} ) 2>/dev/null || {\n` +
-    `  [ -s ${quoted(`${dir}/owner`)} ] && exit ${EXIT_LOST}\n` +
-    `  rm -f ${quoted(`${dir}/owner`)}; rmdir ${quoted(dir)} 2>/dev/null; exit ${EXIT_UNWRITTEN}\n` +
-    `}\n` +
+    `( set -C; trap '' XFSZ; { printf '%s\\n' ${quoted(owner)} >&4 || exit ${OWNER_UNWRITTEN}; } 4> ${quoted(`${dir}/owner`)} ) 2>/dev/null\n` +
+    `case $? in\n` +
+    `  0) ;;\n` +
+    `  ${OWNER_UNWRITTEN}) rm -f ${quoted(`${dir}/owner`)}; rmdir ${quoted(dir)} 2>/dev/null; exit ${EXIT_UNWRITTEN} ;;\n` +
+    `  *) [ -e ${quoted(`${dir}/owner`)} ] && exit ${EXIT_LOST}; rmdir ${quoted(dir)} 2>/dev/null; exit ${EXIT_UNWRITTEN} ;;\n` +
+    `esac\n` +
     `printf '%s\\n' ${quoted(key)} > ${quoted(`${dir}/key`)} 2>/dev/null\n` +
     `exit 0`
   )
