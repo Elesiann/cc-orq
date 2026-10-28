@@ -321,6 +321,23 @@ test('an owner that cannot be written leaves no lock behind and is answered as a
   }
 })
 
+test('an owner file that another launcher created but has not written yet is never removed, and the claim is busy', async () => {
+  const { root, engine, jobsDir } = scratch()
+  try {
+    const repo = checkoutWithSubdirectory(root)
+    const lock = join(jobsDir, '.locks', sha256Hex(repo))
+    const racing = withShim(
+      engine,
+      'claim',
+      `mkdir() { command mkdir "$@"; local rc=$?; [ $rc -eq 0 ] && [ "$1" = ${shellWord(lock)} ] && : > ${shellWord(`${lock}/owner`)}; return $rc; }`,
+    )
+    assert.deepEqual(await claimCheckout(racing, jobsDir, 'job-late', repo, probeOf({})), { kind: 'busy', owner: null })
+    assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), '', 'the other launcher\'s owner file is still there')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a dead lock that cannot be moved aside is answered as a failure to lock, and stays for the next launch to break', async () => {
   const { root, engine, jobsDir } = scratch()
   try {
