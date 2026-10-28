@@ -153,6 +153,50 @@ test('catalog.py ends what an opencode models call leaves running, and nothing e
   }
 })
 
+test('catalog.py stops its commands at its deadline, sweeps the one it cut short, and starts none after it', sweepsHere, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orq-deadline-'))
+  const pidFile = join(dir, 'leftover.pid')
+  const argvFile = join(dir, 'opencode.argv')
+  let leftover = 0
+  try {
+    const bin = join(dir, 'bin')
+    mkdirSync(bin)
+    writeFileSync(
+      join(bin, 'opencode'),
+      `#!/bin/bash\n${RECORD_ARGV}\nsetsid sleep 60 </dev/null >/dev/null 2>&1 &\necho $! > '${pidFile}'\nsleep 8\nexit 1\n`,
+    )
+    chmodSync(join(bin, 'opencode'), 0o755)
+    const scripts = join(root, 'scripts')
+    const startedAt = Date.now()
+    const run = spawnSync(
+      'python3',
+      ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(scripts)}); import catalog; catalog.DEADLINE_S = 2; sys.exit(catalog.main())`],
+      {
+        input: JSON.stringify([{ instanceId: 'first', driver: 'opencode' }, { instanceId: 'second', driver: 'opencode' }]),
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ORQ_TEST_ARGV: argvFile, ORQ_TEST_IDS: join(dir, 'opencode.ids') },
+      },
+    )
+    const elapsedMs = Date.now() - startedAt
+    assert.equal(run.status, 0, run.stderr)
+    assert.ok(elapsedMs < 6000, `the probe ran ${elapsedMs} ms, past its deadline of 2 s`)
+    const instances = JSON.parse(run.stdout)
+    assert.deepEqual(instances.map((i) => i.unavailableReason), Array(2).fill("'opencode models --standalone' failed (exit 127)."))
+    assert.deepEqual(recordedCalls(argvFile), ['models --standalone'], 'no command starts once the deadline has passed')
+    leftover = Number(readFileSync(pidFile, 'utf8'))
+    assert.equal(await untilDead(leftover), true, 'the call cut short at the deadline was swept')
+  } finally {
+    if (leftover > 0) {
+      try {
+        process.kill(leftover, 'SIGKILL')
+      } catch {
+        // already gone
+      }
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('catalog.py reports an opencode that lists no models as unavailable, not as logged out', () => {
   const { instance } = runProbe('if [ "$1" = models ]; then exit 0; fi\nexit 1')
   assert.deepEqual(instance.models, [])
