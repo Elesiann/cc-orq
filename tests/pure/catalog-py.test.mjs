@@ -170,7 +170,7 @@ test('catalog.py stops its commands at its deadline, sweeps the one it cut short
     const startedAt = Date.now()
     const run = spawnSync(
       'python3',
-      ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(scripts)}); import catalog; catalog.DEADLINE_S = 2; sys.exit(catalog.main())`],
+      ['-B', '-c', `import sys; sys.path.insert(0, ${JSON.stringify(scripts)}); import catalog; catalog.DEADLINE_S = 2; sys.exit(catalog.main())`],
       {
         input: JSON.stringify([{ instanceId: 'first', driver: 'opencode' }, { instanceId: 'second', driver: 'opencode' }]),
         encoding: 'utf8',
