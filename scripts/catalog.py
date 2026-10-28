@@ -34,6 +34,11 @@ import uuid
 
 EFFORT_OPTION = "reasoningEffort"
 TIMEOUT_S = 60
+# The engine kills catalog.py with SIGKILL at 90 s (CATALOG_TIMEOUT_MS in hooks/tools.ts), and a killed probe sweeps
+# nothing. No command starts or runs past DEADLINE_S, which leaves the last sweep its SWEEP_TIMEOUT_S.
+DEADLINE_S = 75
+SWEEP_TIMEOUT_S = 10
+STARTED = time.monotonic()
 
 CLAUDE_ALIASES = ("haiku", "sonnet", "opus")
 
@@ -47,12 +52,19 @@ OPENCODE_MODELS = ["opencode", "models", "--standalone"]
 SWEEP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sweep.py")
 
 
+def time_left():
+    return DEADLINE_S - (time.monotonic() - STARTED)
+
+
 def run(cmd, env, timeout=TIMEOUT_S):
-    """Run cmd, return (exit_code, stdout). Timeouts/exec errors -> (127, '')."""
+    """Run cmd, return (exit_code, stdout). Timeouts, exec errors and a spent deadline -> (127, '')."""
+    left = time_left()
+    if left <= 0:
+        return 127, ""
     try:
         p = subprocess.run(
             cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout,
+            text=True, timeout=min(timeout, left),
         )
         return p.returncode, p.stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -63,6 +75,8 @@ def run_opencode_models(env):
     """Run OPENCODE_MODELS, then end what it left running. An MCP server that was still starting when OpenCode
     exited is orphaned and outlives the command, and the probe runs on every capabilities call. Every process
     of the call carries ORQ_PROBE_ID, which nothing else shares, so sweep.py finds it."""
+    if time_left() <= 0:
+        return 127, ""
     probe_id = uuid.uuid4().hex
     try:
         return run(OPENCODE_MODELS, dict(env, ORQ_PROBE_ID=probe_id))
@@ -70,7 +84,7 @@ def run_opencode_models(env):
         try:
             subprocess.run(
                 [sys.executable, SWEEP, "ORQ_PROBE_ID=" + probe_id],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=SWEEP_TIMEOUT_S,
             )
         except (OSError, subprocess.SubprocessError):
             pass

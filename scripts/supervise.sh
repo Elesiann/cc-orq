@@ -12,8 +12,9 @@
 # Files in <dir>: prompt.txt (input), pgid, cli.pid (OpenCode only: the pid of
 # the client), events.jsonl (CLI stdout), stderr.txt, last.txt (final
 # message), session (the worker's session id, when the stream names one),
-# exit (numeric exit code). session goes in before exit, so whoever reads
-# exit finds it.
+# question.txt (the worker's question: its own, or the text after BLOCKED: in
+# last.txt of a job that exits 0), exit (numeric exit code). session and
+# question.txt go in before exit, so whoever reads exit finds them.
 #
 # When <dir>/resume exists, its first line is the id of a session to continue:
 # the CLI resumes it, with prompt.txt as the next message, instead of starting
@@ -99,10 +100,11 @@ write_session() {
 
 # A worker below auto cannot write question.txt outside its directory, so it ends its final message with BLOCKED: and
 # the question. When the job exits 0 without a question.txt, that message becomes the question, before exit appears.
-# A question the worker wrote stays as it is, and a cancelled job writes none.
+# A question the worker wrote stays as it is, and a cancelled job writes none. A blank question.txt is no question to
+# the engine either, so the message replaces it.
 write_question() {
   [ -e "$dir/cancel" ] && return 0
-  [ -e "$dir/question.txt" ] && return 0
+  grep -q '[^[:space:]]' "$dir/question.txt" 2>/dev/null && return 0
   [ -s "$dir/last.txt" ] || return 0
   local first text
   IFS= read -r first < "$dir/last.txt" || :

@@ -447,6 +447,8 @@ test('a declined form, Esc, a cancel and 24 hours end the task with BLOCKED, and
   const cancelled = await ask()
   await server.cancel(cancelled.id)
   assert.equal((await server.get(cancelled.id)).status, 'cancelled', 'x in /tasks on an open form cancels the task')
+  const after = (await server.call('status', { taskId: cancelled.id })).json.result
+  assert.match(after, /Answer it with the answer tool/, 'status no longer says the user is answering in a form')
   const freed = await server.call('answer', { taskId: cancelled.id, answer: 'Production.' }, WITH_FORMS)
   assert.ok(freed.task !== undefined, 'a cancelled task frees the answer tool')
   await until(server, freed.task.taskId)

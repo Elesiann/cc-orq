@@ -830,7 +830,10 @@ export function jobTasks($: CoreEngine, getConfig: () => Promise<OrqConfig>): Ta
         const { job: tip, view } = walked
         if (view.status === 'starting' || ['running', 'waiting'].includes(taskStatusOf(view))) await writeCancel($, tip)
         else if (human && view.status === 'done' && view.question !== null && (await formIsOpen($, tip, view))) {
-          await $.fs.write(`${loaded.dir}/cancelled`, `${iso(await $.clock.now())}\n`)
+          const at = iso(await $.clock.now())
+          await $.fs.write(`${loaded.dir}/cancelled`, `${at}\n`)
+          // The form closes as a declined one does, so status and the BLOCKED text stop saying the user is answering it.
+          await $.fs.write(`${tip.dir}/declined`, `${at} cancelled\n`)
         }
         return
       }

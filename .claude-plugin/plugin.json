@@ -1,6 +1,6 @@
 {
   "name": "cc-orq",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Delegate tasks to external coding agents (Codex, OpenCode, Antigravity, Claude) from Claude Code, as MCP tasks that /tasks lists and that wake the session with the result. A stdio MCP server serves the tools capabilities, delegate, answer, status, list, cancel and integrate; the mod adds the cc-orq:task agent, the task card, /orq-panel and /orq.",
   "author": { "name": "Elesiann" },
   "license": "MIT",

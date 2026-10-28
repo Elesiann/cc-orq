@@ -928,7 +928,8 @@ environment.
 </details>
 
 The probe runs `scripts/catalog.py` over the configured instances and is cached
-for ten minutes. A probe that fails answers no providers, logs the reason on
+for ten minutes. It is killed at 90 s, so it starts no command after 75 s and
+stops the one still running then, which leaves time to sweep what OpenCode left. A probe that fails answers no providers, logs the reason on
 stderr, and is run again on the next call.
 
 `runtimeMode` and `interactionMode` are the effective ceiling of a task in its
@@ -1360,9 +1361,9 @@ for both the kind and the agent suffix, for example
 | `exit` | `supervise.sh`, or `/orq launch` when the supervisor does not start | The exit code, described below. |
 | `session` | `supervise.sh` | The worker's session id, taken from its event stream and written before `exit`. A job whose stream names none has no `session`, and cannot be resumed. |
 | `resume` | `answer` | A continuation only: the session id the CLI resumes, as its first line. The supervisor starts no worker when it is not a plain id. |
-| `declined` | the task source | A `questions: human` question that the user declined, or that could not be resumed. The form is gone, and the task ends with BLOCKED. |
+| `declined` | the task source | A `questions: human` question that the user declined, that could not be resumed, or whose task was cancelled with the form open. The form is gone, and the task ends with BLOCKED. |
 | `next` | `answer`, the question form | `{"jobId", "via"}`, `via` being `answer` or `form`: the job that took over this job's question. It is created whole and only when absent, so it is the claim that lets one answer through. |
-| `question.txt` | the job, through the shell or the `orq_ask` tool, or the supervisor from a `BLOCKED:` final message | The question for the parent, written before the job stops. The supervisor writes it when a job exits 0 with a `BLOCKED:` final message and no file. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
+| `question.txt` | the job, through the shell or the `orq_ask` tool, or the supervisor from a `BLOCKED:` final message | The question for the parent, written before the job stops. The supervisor writes it when a job exits 0 with a `BLOCKED:` final message and no non-blank file. A job with a non-blank file, no `exit`, and a running supervisor is `waiting`. |
 | `flags` | `cc-orq:task`, `delegate` | Optional. Written by a task launch from the permission ceiling and the effort. Each non-empty line becomes one extra argument to the CLI. |
 
 The `exit` file holds one number:
@@ -1592,7 +1593,7 @@ habits.
   carries the earlier brief. A worker below `auto` cannot write its question to
   `question.txt` outside its directory (measured with a Claude worker at
   `manual` and `acceptEdits`, which could not). When such a job exits 0 without a
-  `question.txt`, the supervisor writes the text after the `BLOCKED:` of its final
+  non-blank `question.txt`, the supervisor writes the text after the `BLOCKED:` of its final
   message to `question.txt`, so `answer` reaches it too. A live worker below `auto`
   has not been run against this path. The shell suite covers it with a fake worker.
 - A client without MCP tasks gets the job's id and no wake-up, and reads the job
