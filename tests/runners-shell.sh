@@ -115,7 +115,7 @@ pwd > "$ARGV_DUMP/claude.cwd"
 [ -n "$CLAUDE_SLEEP" ] && sleep "$CLAUDE_SLEEP"
 printf '{"type":"system","subtype":"init","session_id":"ses-fake"}\n'
 printf '{"type":"result","subtype":"success","is_error":false,"session_id":"ses-fake","result":"%s","usage":{"input_tokens":11,"output_tokens":4},"modelUsage":{"fake-claude-model":{}}}\n' "${CLAUDE_RESULT:-FAKE-CLAUDE}"
-exit 0
+exit "${CLAUDE_EXIT:-0}"
 EOF
 chmod +x "$BIN"/codex "$BIN"/opencode "$BIN"/agy "$BIN"/claude "$BIN"/hold "$BIN"/slow-stop "$BIN"/deaf
 export BIN PATH="$BIN:$PATH" ARGV_DUMP="$DUMP"
@@ -300,6 +300,13 @@ mkdir -p "$T/job-blocked-own"
 printf '%s\n' 'My own question' > "$T/job-blocked-own/question.txt"
 CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked-own claude m '' '' 'ask'
 expect_file "$JOB/question.txt" 'My own question' blocked-message-keeps-the-workers-question
+mkdir -p "$T/job-blocked-blank"
+printf '\n  \n' > "$T/job-blocked-blank/question.txt"
+CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked-blank claude m '' '' 'ask'
+expect_file "$JOB/question.txt" 'Which env?' blocked-message-replaces-a-blank-question
+CLAUDE_EXIT=3 CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked-failed claude m '' '' 'ask'
+expect_file "$JOB/exit" 3 blocked-failed-exit
+[ ! -e "$JOB/question.txt" ] && ok blocked-failed-writes-no-question || bad blocked-failed-writes-no-question
 mkdir -p "$T/job-blocked-cancel"
 : > "$T/job-blocked-cancel/cancel"
 CLAUDE_RESULT='BLOCKED: Which env?' run_job job-blocked-cancel claude m '' '' 'ask'
