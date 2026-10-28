@@ -138,6 +138,8 @@ test('a request without the extension gets the synchronous answer, byte for byte
   assert.deepEqual(forms.json.status, 'running', 'forms without tasks do not make a task')
   const other = await server.call('delegate', REQUEST(repo), { extensions: { 'other/extension': {} } })
   assert.equal(other.json.status, 'running', 'another extension does not either')
+  // A job still writing in the scene when the cleanup removes it fails the removal with ENOTEMPTY.
+  for (const started of [forms, other]) await until(server, started.json.taskId)
 })
 
 test('a legacy session, which sends no envelope, gets the synchronous answer', async (t) => {
