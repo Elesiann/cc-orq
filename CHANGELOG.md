@@ -6,6 +6,8 @@ All notable changes to cc-orq are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-28
+
 ### Fixed
 
 - Cancelling a `questions: human` task while its form is open now closes the
@@ -404,7 +406,8 @@ First public release.
   `~/.config/orq/config.json` for the jobs directory, wait slice, allowed roots
   and provider instances.
 
-[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Elesiann/cc-orq/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Elesiann/cc-orq/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Elesiann/cc-orq/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Elesiann/cc-orq/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Elesiann/cc-orq/compare/v0.1.0...v0.1.1
